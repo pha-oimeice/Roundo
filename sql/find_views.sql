@@ -1,0 +1,1 @@
+SELECT * FROM roundo_session_view;

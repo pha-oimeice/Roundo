@@ -1,0 +1,27 @@
+[package]
+name = "roundo_client"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "roundo-client"
+path = "./src/main.rs"
+
+[dependencies]
+avian3d.workspace = true
+bevy.workspace = true
+dynamic_voxel.workspace = true
+log.workspace = true
+roundo_marionette.workspace = true
+roundo_networking.workspace = true
+roundo_toolbox.workspace = true
+roundo_user_config.workspace = true
+serde.workspace = true
+
+[features]
+dev = [
+    "roundo_marionette/dev",
+]
+release = [
+    "roundo_marionette/release",
+]

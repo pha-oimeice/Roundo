@@ -1,0 +1,15 @@
+[package]
+name = "roundo_lifecycle"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+bevy.workspace = true
+
+[features]
+dev = [
+    "bevy/dev",
+]
+release = [
+
+]

@@ -1,0 +1,21 @@
+[package]
+name = "roundo_marionette"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+avian3d.workspace = true
+bevy.workspace = true
+dynamic_voxel.workspace = true
+log.workspace = true
+rand.workspace = true
+roundo_algorithm.workspace = true
+roundo_networking.workspace = true
+roundo_toolbox.workspace = true
+
+[features]
+dev = [
+    "bevy/dev",
+]
+release = [
+]

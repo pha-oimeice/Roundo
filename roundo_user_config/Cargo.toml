@@ -1,0 +1,8 @@
+[package]
+name = "roundo_user_config"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+roundo_toolbox.workspace = true
+serde.workspace = true
