@@ -1,6 +1,9 @@
-use bevy::prelude::{
-    App, ButtonInput, Camera3d, Commands, Component, Entity, FixedUpdate, KeyCode, Plugin, Quat,
-    Query, Res, ResMut, Resource, Transform, Update, Vec3, With,
+use bevy::{
+    input::mouse::AccumulatedMouseMotion,
+    prelude::{
+        App, ButtonInput, Camera, Camera3d, Commands, Component, Entity, EulerRot, FixedUpdate,
+        KeyCode, Plugin, Quat, Query, Res, ResMut, Resource, Time, Transform, Update, Vec3, With,
+    },
 };
 use roundo_networking::protocol::{
     ControllerAccessPolicy, ControllerCameraState, ControllerDescriptor, ControllerId,
@@ -14,6 +17,7 @@ use std::collections::HashMap;
 pub type ClientMarionetteIpc =
     CrossbeamThreadPipeEndpointA<ClientMarionetteCommand, ClientMarionetteEvent>;
 
+#[derive(Debug, Clone)]
 pub struct MarionetteClientPlugin {
     pipe: CrossbeamThreadPipe<ClientMarionetteCommand, ClientMarionetteEvent>,
 }
@@ -38,9 +42,18 @@ impl Default for MarionetteClientPlugin {
 
 impl Plugin for MarionetteClientPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<ClientControllerRegistry>()
+        app.init_resource::<ClientPlayerController>()
+            .init_resource::<ClientMarionetteInputSettings>()
+            .init_resource::<ClientControllerRegistry>()
             .insert_resource(ClientPipeResource(self.pipe.endpoint_b()))
-            .add_systems(Update, (process_client_commands, route_view_input))
+            .add_systems(
+                Update,
+                (
+                    process_client_commands,
+                    control_local_camera,
+                    route_view_input,
+                ),
+            )
             .add_systems(FixedUpdate, route_locomotion_input);
     }
 }
@@ -84,6 +97,73 @@ pub struct ControllerCamera {
     pub controller_id: ControllerId,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum ClientPlayerControllerTarget {
+    #[default]
+    NetworkedControllers,
+    LocalEntity(Entity),
+}
+
+#[derive(Resource, Clone, Copy, Debug)]
+pub struct ClientPlayerController {
+    target: ClientPlayerControllerTarget,
+    input_enabled: bool,
+}
+
+impl Default for ClientPlayerController {
+    fn default() -> Self {
+        Self {
+            target: ClientPlayerControllerTarget::default(),
+            input_enabled: true,
+        }
+    }
+}
+
+impl ClientPlayerController {
+    pub fn bind_networked_controllers(&mut self) {
+        self.target = ClientPlayerControllerTarget::NetworkedControllers;
+    }
+
+    pub fn bind_local_entity(&mut self, entity: Entity) {
+        self.target = ClientPlayerControllerTarget::LocalEntity(entity);
+    }
+
+    pub fn target(&self) -> ClientPlayerControllerTarget {
+        self.target
+    }
+
+    pub fn is_bound_to(&self, entity: Entity) -> bool {
+        self.target == ClientPlayerControllerTarget::LocalEntity(entity)
+    }
+
+    pub fn sends_network_intent(&self) -> bool {
+        self.target == ClientPlayerControllerTarget::NetworkedControllers
+    }
+
+    pub fn set_input_enabled(&mut self, enabled: bool) {
+        self.input_enabled = enabled;
+    }
+
+    pub fn input_enabled(&self) -> bool {
+        self.input_enabled
+    }
+}
+
+#[derive(Resource, Clone, Copy, Debug)]
+pub struct ClientMarionetteInputSettings {
+    pub mouse_sensitivity: f32,
+    pub camera_move_speed: f32,
+}
+
+impl Default for ClientMarionetteInputSettings {
+    fn default() -> Self {
+        Self {
+            mouse_sensitivity: 0.002,
+            camera_move_speed: 5.0,
+        }
+    }
+}
+
 #[derive(Resource, Clone)]
 struct ClientPipeResource(
     CrossbeamThreadPipeEndpointB<ClientMarionetteCommand, ClientMarionetteEvent>,
@@ -119,6 +199,7 @@ fn process_client_commands(
     mut commands: Commands,
     pipe: Res<ClientPipeResource>,
     mut registry: ResMut<ClientControllerRegistry>,
+    player_controller: Res<ClientPlayerController>,
     mut cameras: Query<&mut Transform, With<ControllerCamera>>,
 ) {
     while let Some(command) = pipe.0.try_receive() {
@@ -141,6 +222,10 @@ fn process_client_commands(
                     let camera = commands
                         .spawn((
                             Camera3d::default(),
+                            Camera {
+                                is_active: player_controller.sends_network_intent(),
+                                ..Default::default()
+                            },
                             ControllerCamera { controller_id },
                             Transform::default(),
                         ))
@@ -174,8 +259,13 @@ fn process_client_commands(
 fn route_locomotion_input(
     keyboard: Res<ButtonInput<KeyCode>>,
     pipe: Res<ClientPipeResource>,
+    player_controller: Res<ClientPlayerController>,
     mut registry: ResMut<ClientControllerRegistry>,
 ) {
+    if !player_controller.sends_network_intent() || !player_controller.input_enabled() {
+        return;
+    }
+
     let direction = keyboard_direction(&keyboard);
     let jump = keyboard.just_pressed(KeyCode::Space);
     let sprint = keyboard.pressed(KeyCode::ShiftLeft);
@@ -195,29 +285,42 @@ fn route_locomotion_input(
 
 fn route_view_input(
     keyboard: Res<ButtonInput<KeyCode>>,
+    mouse_motion: Res<AccumulatedMouseMotion>,
+    time: Res<Time>,
+    settings: Res<ClientMarionetteInputSettings>,
     pipe: Res<ClientPipeResource>,
+    player_controller: Res<ClientPlayerController>,
     mut registry: ResMut<ClientControllerRegistry>,
     mut cameras: Query<(&ControllerCamera, &mut Transform)>,
 ) {
-    let translation = view_translation(&keyboard);
-    let yaw_delta = axis(&keyboard, KeyCode::ArrowLeft, KeyCode::ArrowRight) * 0.02;
-    let pitch_delta = axis(&keyboard, KeyCode::ArrowDown, KeyCode::ArrowUp) * 0.02;
-    if translation == [0.0, 0.0, 0.0] && yaw_delta == 0.0 && pitch_delta == 0.0 {
+    if !player_controller.sends_network_intent() || !player_controller.input_enabled() {
         return;
     }
 
     for controller_id in registry.controller_ids_of_kind(ControllerKind::View) {
+        let Some((_, mut transform)) = cameras
+            .iter_mut()
+            .find(|(camera, _)| camera.controller_id == controller_id)
+        else {
+            continue;
+        };
+        let frame_input = camera_frame_input(
+            &keyboard,
+            mouse_motion.delta,
+            time.delta_secs(),
+            *settings,
+            &transform,
+        );
+        if frame_input.is_idle() {
+            continue;
+        }
         let input = ViewInput {
             sequence: registry.next_sequence(controller_id),
-            translation,
-            yaw_delta,
-            pitch_delta,
+            translation: frame_input.translation.to_array(),
+            yaw_delta: frame_input.yaw_delta,
+            pitch_delta: frame_input.pitch_delta,
         };
-        for (camera, mut transform) in &mut cameras {
-            if camera.controller_id == controller_id {
-                apply_camera_input(&mut transform, input);
-            }
-        }
+        apply_camera_input(&mut transform, input);
         let _ = pipe.0.try_send(ClientMarionetteEvent::ControllerInput {
             controller_id,
             input: ControllerInput::View(input),
@@ -233,12 +336,32 @@ fn keyboard_direction(keyboard: &ButtonInput<KeyCode>) -> [f32; 3] {
     ]
 }
 
-fn view_translation(keyboard: &ButtonInput<KeyCode>) -> [f32; 3] {
-    [
-        axis(keyboard, KeyCode::KeyJ, KeyCode::KeyL) * 0.1,
-        axis(keyboard, KeyCode::KeyU, KeyCode::KeyO) * 0.1,
-        axis(keyboard, KeyCode::KeyI, KeyCode::KeyK) * 0.1,
-    ]
+fn control_local_camera(
+    keyboard: Res<ButtonInput<KeyCode>>,
+    mouse_motion: Res<AccumulatedMouseMotion>,
+    time: Res<Time>,
+    settings: Res<ClientMarionetteInputSettings>,
+    player_controller: Res<ClientPlayerController>,
+    mut cameras: Query<&mut Transform, With<Camera>>,
+) {
+    if !player_controller.input_enabled() {
+        return;
+    }
+    let ClientPlayerControllerTarget::LocalEntity(camera_entity) = player_controller.target()
+    else {
+        return;
+    };
+    let Ok(mut transform) = cameras.get_mut(camera_entity) else {
+        return;
+    };
+    let frame_input = camera_frame_input(
+        &keyboard,
+        mouse_motion.delta,
+        time.delta_secs(),
+        *settings,
+        &transform,
+    );
+    apply_camera_frame_input(&mut transform, frame_input);
 }
 
 fn axis(keyboard: &ButtonInput<KeyCode>, negative: KeyCode, positive: KeyCode) -> f32 {
@@ -254,7 +377,137 @@ fn apply_camera_state(transform: &mut Transform, state: ControllerCameraState) {
 
 fn apply_camera_input(transform: &mut Transform, input: ViewInput) {
     transform.translation += Vec3::from_array(input.translation);
-    transform.rotation = Quat::from_rotation_y(input.yaw_delta)
-        * transform.rotation
-        * Quat::from_rotation_x(input.pitch_delta);
+    apply_camera_rotation(transform, input.yaw_delta, input.pitch_delta);
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct CameraFrameInput {
+    translation: Vec3,
+    yaw_delta: f32,
+    pitch_delta: f32,
+}
+
+impl CameraFrameInput {
+    fn is_idle(self) -> bool {
+        self.translation == Vec3::ZERO && self.yaw_delta == 0.0 && self.pitch_delta == 0.0
+    }
+}
+
+fn camera_frame_input(
+    keyboard: &ButtonInput<KeyCode>,
+    mouse_delta: bevy::prelude::Vec2,
+    delta_seconds: f32,
+    settings: ClientMarionetteInputSettings,
+    transform: &Transform,
+) -> CameraFrameInput {
+    let local_direction = Vec3::new(
+        axis(keyboard, KeyCode::KeyA, KeyCode::KeyD),
+        axis(keyboard, KeyCode::ShiftLeft, KeyCode::Space),
+        axis(keyboard, KeyCode::KeyS, KeyCode::KeyW),
+    )
+    .normalize_or_zero();
+    let (yaw, _, _) = transform.rotation.to_euler(EulerRot::YXZ);
+    let horizontal_rotation = Quat::from_rotation_y(yaw);
+    let world_direction = horizontal_rotation * Vec3::X * local_direction.x
+        + Vec3::Y * local_direction.y
+        + horizontal_rotation * Vec3::NEG_Z * local_direction.z;
+
+    CameraFrameInput {
+        translation: world_direction * settings.camera_move_speed * delta_seconds,
+        yaw_delta: -mouse_delta.x * settings.mouse_sensitivity,
+        pitch_delta: -mouse_delta.y * settings.mouse_sensitivity,
+    }
+}
+
+fn apply_camera_frame_input(transform: &mut Transform, input: CameraFrameInput) {
+    transform.translation += input.translation;
+    apply_camera_rotation(transform, input.yaw_delta, input.pitch_delta);
+}
+
+fn apply_camera_rotation(transform: &mut Transform, yaw_delta: f32, pitch_delta: f32) {
+    if yaw_delta == 0.0 && pitch_delta == 0.0 {
+        return;
+    }
+    let (yaw, pitch, _) = transform.rotation.to_euler(EulerRot::YXZ);
+    let pitch_limit = std::f32::consts::FRAC_PI_2 - 0.01;
+    transform.rotation = Quat::from_euler(
+        EulerRot::YXZ,
+        yaw + yaw_delta,
+        (pitch + pitch_delta).clamp(-pitch_limit, pitch_limit),
+        0.0,
+    );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ClientMarionetteInputSettings, apply_camera_rotation, camera_frame_input};
+    use bevy::prelude::{ButtonInput, EulerRot, KeyCode, Quat, Transform, Vec2, Vec3};
+
+    #[test]
+    fn mouse_motion_controls_yaw_and_pitch() {
+        let keyboard = ButtonInput::default();
+        let transform = Transform::from_rotation(Quat::from_euler(EulerRot::YXZ, 0.4, 0.7, 0.2));
+
+        let input = camera_frame_input(
+            &keyboard,
+            Vec2::new(20.0, 50.0),
+            1.0,
+            ClientMarionetteInputSettings::default(),
+            &transform,
+        );
+
+        assert!((input.yaw_delta + 0.04).abs() < f32::EPSILON);
+        assert!((input.pitch_delta + 0.1).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn camera_pitch_stays_strictly_between_vertical_limits() {
+        let mut upward = Transform::default();
+        apply_camera_rotation(&mut upward, 0.0, f32::MAX);
+        let (_, upward_pitch, _) = upward.rotation.to_euler(EulerRot::YXZ);
+
+        let mut downward = Transform::default();
+        apply_camera_rotation(&mut downward, 0.0, -f32::MAX);
+        let (_, downward_pitch, _) = downward.rotation.to_euler(EulerRot::YXZ);
+
+        assert!(upward_pitch < std::f32::consts::FRAC_PI_2);
+        assert!(downward_pitch > -std::f32::consts::FRAC_PI_2);
+    }
+
+    #[test]
+    fn space_and_shift_move_along_world_vertical() {
+        let settings = ClientMarionetteInputSettings {
+            camera_move_speed: 1.0,
+            ..Default::default()
+        };
+        let transform = Transform::from_rotation(Quat::from_euler(EulerRot::YXZ, 0.4, 0.7, 0.2));
+        let mut keyboard = ButtonInput::default();
+        keyboard.press(KeyCode::Space);
+        let upward = camera_frame_input(&keyboard, Vec2::ZERO, 1.0, settings, &transform);
+
+        keyboard.release(KeyCode::Space);
+        keyboard.press(KeyCode::ShiftLeft);
+        let downward = camera_frame_input(&keyboard, Vec2::ZERO, 1.0, settings, &transform);
+
+        assert_eq!(upward.translation, bevy::prelude::Vec3::Y);
+        assert_eq!(downward.translation, bevy::prelude::Vec3::NEG_Y);
+    }
+
+    #[test]
+    fn forward_movement_uses_only_camera_horizontal_heading() {
+        let settings = ClientMarionetteInputSettings {
+            camera_move_speed: 1.0,
+            ..Default::default()
+        };
+        let yaw = 0.4;
+        let transform = Transform::from_rotation(Quat::from_euler(EulerRot::YXZ, yaw, 0.7, 0.2));
+        let mut keyboard = ButtonInput::default();
+        keyboard.press(KeyCode::KeyW);
+
+        let forward = camera_frame_input(&keyboard, Vec2::ZERO, 1.0, settings, &transform);
+        let expected = Quat::from_rotation_y(yaw) * Vec3::NEG_Z;
+
+        assert!(forward.translation.abs_diff_eq(expected, f32::EPSILON));
+        assert_eq!(forward.translation.y, 0.0);
+    }
 }

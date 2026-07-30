@@ -7,7 +7,6 @@ mod base;
 mod chunk;
 pub mod data;
 mod geometry;
-mod pcg_algo;
 mod physics;
 mod render;
 mod test;

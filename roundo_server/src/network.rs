@@ -1,13 +1,20 @@
 use log::{debug, warn};
+use roundo_character::{CharacterServerCommand, CharacterServerEvent, CharacterServerIpc};
 use roundo_marionette::{ServerMarionetteCommand, ServerMarionetteEvent, ServerMarionetteIpc};
 use roundo_networking::{
     ClientGameMessage, ConnectionId, HookFuture, PublicSession, ServerHooks, ServerNetwork,
     ServerNetworkConfig, SessionId, UserSession,
 };
+use static_voxel::{StaticVoxelServerCommand, StaticVoxelServerEvent, StaticVoxelServerIpc};
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
-pub fn start_server(marionette_ipc: ServerMarionetteIpc) {
+pub fn start_server(
+    marionette_ipc: ServerMarionetteIpc,
+    character_ipc: CharacterServerIpc,
+    static_voxel_ipc: StaticVoxelServerIpc,
+) {
     let config = network_config();
     debug!(
         "Starting network server: game={}, public={}, certificate_directory={}",
@@ -17,6 +24,7 @@ pub fn start_server(marionette_ipc: ServerMarionetteIpc) {
     );
     let hooks = Arc::new(ServerHooksAdapter {
         marionette_ipc: marionette_ipc.clone(),
+        character_ipc: character_ipc.clone(),
     });
     let network = ServerNetwork::start(config, hooks)
         .unwrap_or_else(|error| panic!("failed to start network server: {error}"));
@@ -26,7 +34,9 @@ pub fn start_server(marionette_ipc: ServerMarionetteIpc) {
         addresses.game_address, addresses.public_address
     );
 
-    std::thread::spawn(move || bridge_marionette_events(marionette_ipc, network));
+    std::thread::spawn(move || {
+        bridge_ecs_events(marionette_ipc, character_ipc, static_voxel_ipc, network)
+    });
 }
 
 fn network_config() -> ServerNetworkConfig {
@@ -42,6 +52,7 @@ fn network_config() -> ServerNetworkConfig {
 
 struct ServerHooksAdapter {
     marionette_ipc: ServerMarionetteIpc,
+    character_ipc: CharacterServerIpc,
 }
 
 impl ServerHooks for ServerHooksAdapter {
@@ -112,6 +123,20 @@ impl ServerHooks for ServerHooksAdapter {
         message: ClientGameMessage,
     ) {
         let command = match message {
+            ClientGameMessage::RequestCharacterControl { character_id } => {
+                if self
+                    .character_ipc
+                    .try_send(CharacterServerCommand::RequestControl {
+                        connection_id,
+                        user_session,
+                        character_id,
+                    })
+                    .is_err()
+                {
+                    warn!("Failed to forward character control request to ECS");
+                }
+                return;
+            }
             ClientGameMessage::RequestController { controller_id } => {
                 debug!(
                     "Routing controller bind request: connection_id={}, controller_id={}",
@@ -156,61 +181,133 @@ impl ServerHooks for ServerHooksAdapter {
     }
 }
 
-fn bridge_marionette_events(marionette_ipc: ServerMarionetteIpc, network: ServerNetwork) {
-    debug!("Started Marionette-to-network event bridge");
-    while let Some(event) = marionette_ipc.receive() {
-        match event {
-            ServerMarionetteEvent::ControllerGranted {
-                connection_id,
-                controller,
-            } => {
-                debug!(
-                    "Sending controller grant: connection_id={}, controller_id={}",
-                    connection_id.0, controller.controller_id.0
-                );
-                if !network.send_to_connection(
+fn bridge_ecs_events(
+    marionette_ipc: ServerMarionetteIpc,
+    character_ipc: CharacterServerIpc,
+    static_voxel_ipc: StaticVoxelServerIpc,
+    network: ServerNetwork,
+) {
+    debug!("Started ECS-to-network event bridge");
+    loop {
+        let mut handled_event = false;
+
+        while let Some(event) = marionette_ipc.try_receive() {
+            handled_event = true;
+            match event {
+                ServerMarionetteEvent::ControllerGranted {
                     connection_id,
-                    roundo_networking::ServerGameMessage::ControllerGranted { controller },
-                ) {
-                    warn!(
-                        "Dropped controller grant because connection {} is unavailable",
-                        connection_id.0
+                    controller,
+                } => {
+                    debug!(
+                        "Sending controller grant: connection_id={}, controller_id={}",
+                        connection_id.0, controller.controller_id.0
+                    );
+                    if !network.send_to_connection(
+                        connection_id,
+                        roundo_networking::ServerGameMessage::ControllerGranted { controller },
+                    ) {
+                        warn!(
+                            "Dropped controller grant because connection {} is unavailable",
+                            connection_id.0
+                        );
+                    }
+                }
+                ServerMarionetteEvent::ControllerRevoked {
+                    user_session,
+                    controller_id,
+                } => {
+                    debug!(
+                        "Broadcasting controller revocation: user_id={}, session_id={}, controller_id={}",
+                        user_session.user_id.0, user_session.session_id.0, controller_id.0
+                    );
+                    network.send_to_session(
+                        user_session,
+                        roundo_networking::ServerGameMessage::ControllerRevoked { controller_id },
+                    );
+                }
+                ServerMarionetteEvent::ViewCameraState {
+                    user_session,
+                    controller_id,
+                    state,
+                } => {
+                    log::trace!(
+                        "Broadcasting view camera state: user_id={}, session_id={}, controller_id={}",
+                        user_session.user_id.0,
+                        user_session.session_id.0,
+                        controller_id.0
+                    );
+                    network.send_to_session(
+                        user_session,
+                        roundo_networking::ServerGameMessage::ViewCameraState {
+                            controller_id,
+                            state,
+                        },
                     );
                 }
             }
-            ServerMarionetteEvent::ControllerRevoked {
-                user_session,
-                controller_id,
-            } => {
-                debug!(
-                    "Broadcasting controller revocation: user_id={}, session_id={}, controller_id={}",
-                    user_session.user_id.0, user_session.session_id.0, controller_id.0
-                );
-                network.send_to_session(
-                    user_session,
-                    roundo_networking::ServerGameMessage::ControllerRevoked { controller_id },
-                );
-            }
-            ServerMarionetteEvent::ViewCameraState {
-                user_session,
-                controller_id,
-                state,
-            } => {
-                log::trace!(
-                    "Broadcasting view camera state: user_id={}, session_id={}, controller_id={}",
-                    user_session.user_id.0,
-                    user_session.session_id.0,
-                    controller_id.0
-                );
-                network.send_to_session(
-                    user_session,
-                    roundo_networking::ServerGameMessage::ViewCameraState {
-                        controller_id,
-                        state,
-                    },
-                );
+        }
+
+        while let Some(event) = character_ipc.try_receive() {
+            handled_event = true;
+            match event {
+                CharacterServerEvent::Snapshot(snapshot) => {
+                    network.send_to_all(roundo_networking::ServerGameMessage::CharacterSnapshot {
+                        snapshot,
+                    });
+                }
+                CharacterServerEvent::ControlGranted {
+                    connection_id,
+                    character_id,
+                } => {
+                    if network.send_to_connection(
+                        connection_id,
+                        roundo_networking::ServerGameMessage::CharacterControlGranted {
+                            character_id,
+                        },
+                    ) {
+                        let _ = static_voxel_ipc.try_send(
+                            StaticVoxelServerCommand::SubscribeCharacter {
+                                connection_id,
+                                character_id,
+                            },
+                        );
+                    }
+                }
             }
         }
+
+        while let Some(event) = static_voxel_ipc.try_receive() {
+            handled_event = true;
+            match event {
+                StaticVoxelServerEvent::ChunkLoaded {
+                    connection_id,
+                    chunk,
+                } => {
+                    network.send_to_connection(
+                        connection_id,
+                        roundo_networking::ServerGameMessage::StaticVoxelChunk {
+                            coordinate: chunk.coordinate,
+                            edge_length: static_voxel::CHUNK_EDGE_LENGTH as u16,
+                            voxels: chunk.into_voxels(),
+                        },
+                    );
+                }
+                StaticVoxelServerEvent::ChunkUnloaded {
+                    connection_id,
+                    coordinate,
+                } => {
+                    network.send_to_connection(
+                        connection_id,
+                        roundo_networking::ServerGameMessage::StaticVoxelChunkUnloaded {
+                            coordinate,
+                        },
+                    );
+                }
+            }
+        }
+
+        if !handled_event {
+            std::thread::sleep(Duration::from_millis(1));
+        }
     }
-    debug!("Marionette-to-network event bridge stopped");
 }

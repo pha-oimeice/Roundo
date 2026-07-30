@@ -2,7 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
-pub const GAME_PROTOCOL_VERSION: u16 = 1;
+pub const GAME_PROTOCOL_VERSION: u16 = 2;
 
 macro_rules! identifier {
     ($name:ident) => {
@@ -141,8 +141,19 @@ pub struct ControllerCameraState {
     pub pitch: f32,
 }
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Serialize)]
+pub struct CharacterSnapshot {
+    pub character_id: CharacterId,
+    pub translation: [f32; 3],
+    pub rotation: [f32; 4],
+    pub scale: [f32; 3],
+}
+
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub enum ClientGameMessage {
+    RequestCharacterControl {
+        character_id: CharacterId,
+    },
     RequestController {
         controller_id: ControllerId,
     },
@@ -157,6 +168,20 @@ pub enum ClientGameMessage {
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub enum ServerGameMessage {
+    CharacterSnapshot {
+        snapshot: CharacterSnapshot,
+    },
+    CharacterControlGranted {
+        character_id: CharacterId,
+    },
+    StaticVoxelChunk {
+        coordinate: [i64; 3],
+        edge_length: u16,
+        voxels: Vec<u16>,
+    },
+    StaticVoxelChunkUnloaded {
+        coordinate: [i64; 3],
+    },
     ControllerGranted {
         controller: ControllerDescriptor,
     },

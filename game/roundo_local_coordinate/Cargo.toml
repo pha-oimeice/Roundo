@@ -7,8 +7,6 @@ edition.workspace = true
 avian3d.workspace = true
 bevy.workspace = true
 roundo_lifecycle.workspace = true
-rand.workspace = true
-rand_chacha.workspace = true
 roundo_algorithm.workspace = true
 roundo_toolbox.workspace = true
 [features]

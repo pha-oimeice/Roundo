@@ -1,0 +1,11 @@
+[package]
+name = "static_voxel"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+bevy.workspace = true
+roundo_algorithm.workspace = true
+roundo_character.workspace = true
+roundo_networking.workspace = true
+roundo_toolbox.workspace = true

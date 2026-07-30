@@ -113,6 +113,10 @@ impl<AToB, BToA> CrossbeamThreadPipeEndpointA<AToB, BToA> {
         self.receiver.try_recv().ok()
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.receiver.is_empty()
+    }
+
     pub fn send(&self, data: AToB) {
         self.sender
             .send(data)
@@ -133,6 +137,10 @@ impl<AToB, BToA> CrossbeamThreadPipeEndpointB<AToB, BToA> {
 
     pub fn try_receive(&self) -> Option<AToB> {
         self.receiver.try_recv().ok()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.receiver.is_empty()
     }
 
     pub fn send(&self, data: BToA) {

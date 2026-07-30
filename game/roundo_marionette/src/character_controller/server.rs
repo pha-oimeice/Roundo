@@ -15,6 +15,7 @@ use std::collections::{HashMap, HashSet};
 pub type ServerMarionetteIpc =
     CrossbeamThreadPipeEndpointA<ServerMarionetteCommand, ServerMarionetteEvent>;
 
+#[derive(Clone)]
 pub struct MarionetteServerPlugin {
     pipe: CrossbeamThreadPipe<ServerMarionetteCommand, ServerMarionetteEvent>,
 }

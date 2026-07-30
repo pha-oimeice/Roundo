@@ -112,6 +112,10 @@ pub trait ServerHooks: Send + Sync + 'static {
 pub trait ClientHooks: Send + Sync + 'static {
     fn on_server_game_message(&self, message: ServerGameMessage);
 
+    fn on_connection_established(&self) {}
+
+    fn on_connection_lost(&self) {}
+
     fn on_connection_error(&self, _: &NetworkError) {}
 }
 
@@ -184,6 +188,10 @@ impl ServerNetwork {
 
     pub fn send_to_session(&self, user_session: UserSession, message: ServerGameMessage) {
         self.registry.send_to_session(user_session, message);
+    }
+
+    pub fn send_to_all(&self, message: ServerGameMessage) {
+        self.registry.send_to_all(message);
     }
 
     pub fn shutdown(&self) {
@@ -467,7 +475,11 @@ async fn run_client(
         }
         match establish_client_session(&config, Arc::clone(&tls_config)).await {
             Ok(session) => {
-                run_client_session(session, Arc::clone(&hooks), &mut outbound, &mut shutdown).await
+                hooks.on_connection_established();
+                run_client_session(session, Arc::clone(&hooks), &mut outbound, &mut shutdown).await;
+                if !*shutdown.borrow() {
+                    hooks.on_connection_lost();
+                }
             }
             Err(error) => {
                 log::warn!("game connection failed: {error}");
@@ -626,6 +638,16 @@ impl ConnectionRegistry {
             if let Some(sender) = senders.get(&connection_id) {
                 let _ = sender.send(ServerMessage::Game(message.clone()));
             }
+        }
+    }
+
+    fn send_to_all(&self, message: ServerGameMessage) {
+        let senders = self
+            .senders
+            .read()
+            .expect("connection sender registry lock poisoned");
+        for sender in senders.values() {
+            let _ = sender.send(ServerMessage::Game(message.clone()));
         }
     }
 

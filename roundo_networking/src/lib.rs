@@ -5,8 +5,10 @@
 //! in this crate so clients and servers cannot drift apart.
 
 pub mod connection;
+pub mod echo_test;
 pub mod frame;
 pub mod protocol;
+pub mod schema;
 pub mod session;
 pub mod tls;
 
@@ -16,7 +18,8 @@ mod error;
 
 pub use error::ProtocolError;
 pub use protocol::{
-    ClientGameMessage, ConnectionId, ServerGameMessage, SessionId, UserId, UserSession,
+    CharacterId, CharacterSnapshot, ClientGameMessage, ConnectionId, ServerGameMessage, SessionId,
+    UserId, UserSession,
 };
 pub use service::{
     CertificatePolicy, ClientHooks, ClientNetwork, ClientNetworkConfig, HookFuture, NetworkError,

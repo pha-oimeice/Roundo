@@ -1,0 +1,17 @@
+[package]
+name = "roundo_ecs_entry"
+version.workspace = true
+edition.workspace = true
+
+[features]
+client = ["dep:roundo_rendering"]
+server = ["dep:avian3d"]
+
+[dependencies]
+avian3d = { workspace = true, optional = true }
+bevy.workspace = true
+dynamic_voxel.workspace = true
+roundo_marionette.workspace = true
+roundo_character.workspace = true
+roundo_rendering = { workspace = true, optional = true }
+static_voxel.workspace = true
