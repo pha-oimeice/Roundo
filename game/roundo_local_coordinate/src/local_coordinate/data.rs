@@ -33,7 +33,7 @@ pub struct LocalCoordinateCRUDMessage(pub LocalCoordinateCRUDMessageEnum);
 
 pub type LocalCoordinateCRUDMessageEnum = CRUDRequest<Entity, Vec<AtomicVoxel>>;
 
-/// One triangle of the surface derived from a chunk's solid voxels.
+/// One chunk-local triangle derived from solid voxel primitive data.
 #[derive(Debug, Clone, Copy)]
 pub struct VoxelTriangle {
     pub vertices: [Vec3; 3],
@@ -46,6 +46,7 @@ pub struct Chunk {
     pub octree: Octree<Option<AtomicVoxelData>>,
     pub triangles: Vec<VoxelTriangle>,
     pub solid_count: usize,
+    pub geometry_revision: u64,
 }
 
 impl Default for Chunk {
@@ -54,6 +55,7 @@ impl Default for Chunk {
             octree: Octree::new(0, None),
             triangles: Vec::new(),
             solid_count: 0,
+            geometry_revision: 0,
         }
     }
 }
@@ -61,16 +63,16 @@ impl Default for Chunk {
 /// The complete voxel state and shared derived geometry for one Bevy entity.
 #[derive(Component, Default)]
 pub struct LocalCoordinate {
-    /// Authoritative sparse voxel data partitioned by chunk coordinate.
+    /// Loaded primitive data partitioned by chunk coordinate, including empty chunks.
     pub chunks: HashMap<IVec3, Chunk>,
+    /// Fill-weighted center of the owned chunks in local-coordinate space.
+    pub center_of_mass: Vec3,
     /// Stable per-voxel RGB values used while materializing chunk triangles.
     pub voxel_colors: HashMap<IVec3, [f32; 4]>,
     /// Monotonic identifier backing collision-free RGB allocation.
     pub next_color: u128,
-    /// Derived aggregate of all chunk triangle lists.
-    pub triangles: Vec<VoxelTriangle>,
     /// Chunks whose triangles must be regenerated before the next output update.
     pub dirty_chunks: HashSet<IVec3>,
-    /// Incremented whenever the aggregate triangle cache changes.
+    /// Incremented whenever one or more chunk triangle caches change.
     pub geometry_revision: u64,
 }

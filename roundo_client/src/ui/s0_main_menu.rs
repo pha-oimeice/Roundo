@@ -1,5 +1,6 @@
 use super::{
     UiAction,
+    fonts::UiFontRole,
     widgets::{spawn_button, spawn_heading, spawn_label},
 };
 use bevy::prelude::*;
@@ -17,6 +18,7 @@ pub(super) fn spawn(commands: &mut Commands, panel: Entity, intro_finished: bool
                     font_size: FontSize::Px(58.0),
                     ..default()
                 },
+                UiFontRole::Semibold,
                 TextColor(Color::srgba(0.85, 0.92, 1.0, 0.0)),
                 UiTransform::from_scale(Vec2::splat(0.88)),
             ))

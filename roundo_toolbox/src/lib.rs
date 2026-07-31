@@ -1,6 +1,6 @@
 mod config_serialization;
 pub mod fs;
-mod size_printer;
+pub mod macros;
 mod templates;
 mod traits;
 

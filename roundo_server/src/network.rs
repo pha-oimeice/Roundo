@@ -1,11 +1,14 @@
 use log::{debug, warn};
 use roundo_character::{CharacterServerCommand, CharacterServerEvent, CharacterServerIpc};
+use roundo_local_coordinate::{
+    CHUNK_EDGE_LENGTH, LocalCoordinateServerCommand, LocalCoordinateServerEvent,
+    LocalCoordinateServerIpc,
+};
 use roundo_marionette::{ServerMarionetteCommand, ServerMarionetteEvent, ServerMarionetteIpc};
 use roundo_networking::{
     ClientGameMessage, ConnectionId, HookFuture, PublicSession, ServerHooks, ServerNetwork,
     ServerNetworkConfig, SessionId, UserSession,
 };
-use static_voxel::{StaticVoxelServerCommand, StaticVoxelServerEvent, StaticVoxelServerIpc};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -13,7 +16,7 @@ use std::time::Duration;
 pub fn start_server(
     marionette_ipc: ServerMarionetteIpc,
     character_ipc: CharacterServerIpc,
-    static_voxel_ipc: StaticVoxelServerIpc,
+    local_coordinate_ipc: LocalCoordinateServerIpc,
 ) {
     let config = network_config();
     debug!(
@@ -35,7 +38,7 @@ pub fn start_server(
     );
 
     std::thread::spawn(move || {
-        bridge_ecs_events(marionette_ipc, character_ipc, static_voxel_ipc, network)
+        bridge_ecs_events(marionette_ipc, character_ipc, local_coordinate_ipc, network)
     });
 }
 
@@ -184,7 +187,7 @@ impl ServerHooks for ServerHooksAdapter {
 fn bridge_ecs_events(
     marionette_ipc: ServerMarionetteIpc,
     character_ipc: CharacterServerIpc,
-    static_voxel_ipc: StaticVoxelServerIpc,
+    local_coordinate_ipc: LocalCoordinateServerIpc,
     network: ServerNetwork,
 ) {
     debug!("Started ECS-to-network event bridge");
@@ -265,8 +268,8 @@ fn bridge_ecs_events(
                             character_id,
                         },
                     ) {
-                        let _ = static_voxel_ipc.try_send(
-                            StaticVoxelServerCommand::SubscribeCharacter {
+                        let _ = local_coordinate_ipc.try_send(
+                            LocalCoordinateServerCommand::SubscribeCharacter {
                                 connection_id,
                                 character_id,
                             },
@@ -276,29 +279,55 @@ fn bridge_ecs_events(
             }
         }
 
-        while let Some(event) = static_voxel_ipc.try_receive() {
+        while let Some(event) = local_coordinate_ipc.try_receive() {
             handled_event = true;
             match event {
-                StaticVoxelServerEvent::ChunkLoaded {
+                LocalCoordinateServerEvent::Spawned {
                     connection_id,
+                    local_coordinate_id,
+                } => {
+                    network.send_to_connection(
+                        connection_id,
+                        roundo_networking::ServerGameMessage::LocalCoordinateSpawned {
+                            local_coordinate_id,
+                        },
+                    );
+                }
+                LocalCoordinateServerEvent::Despawned {
+                    connection_id,
+                    local_coordinate_id,
+                } => {
+                    network.send_to_connection(
+                        connection_id,
+                        roundo_networking::ServerGameMessage::LocalCoordinateDespawned {
+                            local_coordinate_id,
+                        },
+                    );
+                }
+                LocalCoordinateServerEvent::ChunkLoaded {
+                    connection_id,
+                    local_coordinate_id,
                     chunk,
                 } => {
                     network.send_to_connection(
                         connection_id,
-                        roundo_networking::ServerGameMessage::StaticVoxelChunk {
+                        roundo_networking::ServerGameMessage::LocalCoordinateChunk {
+                            local_coordinate_id,
                             coordinate: chunk.coordinate,
-                            edge_length: static_voxel::CHUNK_EDGE_LENGTH as u16,
+                            edge_length: CHUNK_EDGE_LENGTH as u16,
                             voxels: chunk.into_voxels(),
                         },
                     );
                 }
-                StaticVoxelServerEvent::ChunkUnloaded {
+                LocalCoordinateServerEvent::ChunkUnloaded {
                     connection_id,
+                    local_coordinate_id,
                     coordinate,
                 } => {
                     network.send_to_connection(
                         connection_id,
-                        roundo_networking::ServerGameMessage::StaticVoxelChunkUnloaded {
+                        roundo_networking::ServerGameMessage::LocalCoordinateChunkUnloaded {
+                            local_coordinate_id,
                             coordinate,
                         },
                     );

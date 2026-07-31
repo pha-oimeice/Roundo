@@ -1,4 +1,7 @@
-use crate::local_coordinate::{base::rebuild_dirty_chunk_triangles, data::LocalCoordinate};
+use crate::local_coordinate::{
+    base::rebuild_dirty_chunk_triangles,
+    data::{CHUNK_EDGE_LENGTH, LocalCoordinate},
+};
 use avian3d::{math::Vector, prelude::Collider};
 use bevy::prelude::{
     App, Commands, Component, Entity, IntoScheduleConfigs, Plugin, Query, Update, With, Without,
@@ -65,19 +68,28 @@ fn cleanup_removed_local_coordinate_colliders(
 }
 
 fn collider_triangles(local_coordinate: &LocalCoordinate) -> Option<(Vec<Vector>, Vec<[u32; 3]>)> {
-    if local_coordinate.triangles.is_empty() {
+    let triangle_count = local_coordinate
+        .chunks
+        .values()
+        .map(|chunk| chunk.triangles.len())
+        .sum::<usize>();
+    if triangle_count == 0 {
         return None;
     }
 
-    let mut vertices = Vec::with_capacity(local_coordinate.triangles.len() * 3);
-    let mut indices = Vec::with_capacity(local_coordinate.triangles.len());
+    let mut vertices = Vec::with_capacity(triangle_count * 3);
+    let mut indices = Vec::with_capacity(triangle_count);
 
-    for triangle in &local_coordinate.triangles {
-        let first_index = u32::try_from(vertices.len()).ok()?;
-        for vertex in triangle.vertices {
-            vertices.push(Vector::new(vertex.x, vertex.y, vertex.z));
+    for (chunk_position, chunk) in &local_coordinate.chunks {
+        let chunk_origin = (*chunk_position * CHUNK_EDGE_LENGTH).as_vec3();
+        for triangle in &chunk.triangles {
+            let first_index = u32::try_from(vertices.len()).ok()?;
+            for vertex in triangle.vertices {
+                let vertex = chunk_origin + vertex;
+                vertices.push(Vector::new(vertex.x, vertex.y, vertex.z));
+            }
+            indices.push([first_index, first_index + 1, first_index + 2]);
         }
-        indices.push([first_index, first_index + 1, first_index + 2]);
     }
 
     Some((vertices, indices))

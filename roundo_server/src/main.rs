@@ -5,8 +5,8 @@ mod network;
 use crate::network::start_server;
 use log::{debug, info};
 use roundo_ecs_entry::{
-    configure_server_tick_rate, run_ecs_server, server_character_ipc, server_marionette_ipc,
-    server_static_voxel_ipc,
+    configure_server_tick_rate, run_ecs_server, server_character_ipc, server_local_coordinate_ipc,
+    server_marionette_ipc,
 };
 
 fn main() {
@@ -17,7 +17,7 @@ fn main() {
     start_server(
         server_marionette_ipc(),
         server_character_ipc(),
-        server_static_voxel_ipc(),
+        server_local_coordinate_ipc(),
     );
     info!("Server started");
     run_ecs_server();

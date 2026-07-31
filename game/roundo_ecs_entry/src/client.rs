@@ -8,19 +8,19 @@ use bevy::{
     window::WindowMode,
 };
 use roundo_character::{ClientCharacterIpc, RoundoCharacterClientPlugin};
+use roundo_local_coordinate::{LocalCoordinateClientIpc, LocalCoordinateClientPlugin};
 use roundo_marionette::{
     ClientMarionetteIpc, ClientPlayerController, ControllerCamera, MarionetteClientPlugin,
 };
 use roundo_rendering::{DebugCamera, RoundoRenderingPlugin};
-use static_voxel::{StaticVoxelClientIpc, StaticVoxelClientPlugin};
 use std::sync::LazyLock;
 
 static MARIONETTE_PLUGIN: LazyLock<MarionetteClientPlugin> =
     LazyLock::new(MarionetteClientPlugin::new);
 static CHARACTER_PLUGIN: LazyLock<RoundoCharacterClientPlugin> =
     LazyLock::new(RoundoCharacterClientPlugin::new);
-static STATIC_VOXEL_PLUGIN: LazyLock<StaticVoxelClientPlugin> =
-    LazyLock::new(StaticVoxelClientPlugin::new);
+static LOCAL_COORDINATE_PLUGIN: LazyLock<LocalCoordinateClientPlugin> =
+    LazyLock::new(LocalCoordinateClientPlugin::new);
 
 pub fn client_marionette_ipc() -> ClientMarionetteIpc {
     MARIONETTE_PLUGIN.ipc()
@@ -30,8 +30,8 @@ pub fn client_character_ipc() -> ClientCharacterIpc {
     CHARACTER_PLUGIN.ipc()
 }
 
-pub fn client_static_voxel_ipc() -> StaticVoxelClientIpc {
-    STATIC_VOXEL_PLUGIN.ipc()
+pub fn client_local_coordinate_ipc() -> LocalCoordinateClientIpc {
+    LOCAL_COORDINATE_PLUGIN.ipc()
 }
 
 pub fn create_ecs_client_app() -> App {
@@ -48,7 +48,7 @@ pub fn create_ecs_client_app() -> App {
         }),
         MeshPickingPlugin,
         (*CHARACTER_PLUGIN).clone(),
-        (*STATIC_VOXEL_PLUGIN).clone(),
+        (*LOCAL_COORDINATE_PLUGIN).clone(),
         (*MARIONETTE_PLUGIN).clone(),
         RoundoRenderingPlugin,
     ));

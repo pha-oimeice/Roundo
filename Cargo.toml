@@ -10,8 +10,9 @@ members = [
     "roundo_user_config",
     "game/roundo_algorithm",
     "roundo_networking",
-    "game/roundo_rendering"
-, "game/static_voxel", "game/roundo_character"]
+    "game/roundo_rendering",
+    "game/roundo_character",
+]
 resolver = "3"
 
 [workspace.package]
@@ -98,9 +99,9 @@ tokio = {
 tokio-rustls = "0.26"
 toml = "1.1"
 toml_edit = "0.25"
+ttf-parser = "0.25"
 webpki-roots = "1"
 # ---
-dynamic_voxel = { path = "game/roundo_local_coordinate" }
 roundo_algorithm = {path = "game/roundo_algorithm" }
 roundo_ecs_entry = { path = "game/roundo_ecs_entry" }
 roundo_lifecycle = { path = "game/roundo_lifecycle" }
@@ -108,6 +109,6 @@ roundo_marionette = { path = "game/roundo_marionette" }
 roundo_networking = {path = "roundo_networking" }
 roundo_rendering = {path = "game/roundo_rendering"}
 roundo_character = { path = "game/roundo_character" }
+roundo_local_coordinate = { path = "game/roundo_local_coordinate" }
 roundo_toolbox = { path = "roundo_toolbox" }
 roundo_user_config = { path = "roundo_user_config" }
-static_voxel = { path = "game/static_voxel" }

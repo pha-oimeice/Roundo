@@ -3,9 +3,9 @@ mod server;
 
 pub use self::{
     client::{
-        ClientMarionetteCommand, ClientMarionetteEvent, ClientMarionetteInputSettings,
-        ClientMarionetteIpc, ClientPlayerController, ClientPlayerControllerTarget,
-        ControllerCamera, MarionetteClientPlugin,
+        ClientKeyBindings, ClientMarionetteCommand, ClientMarionetteEvent,
+        ClientMarionetteInputSettings, ClientMarionetteIpc, ClientPlayerController,
+        ClientPlayerControllerTarget, ControllerCamera, MarionetteClientPlugin, MovementAction,
     },
     server::{
         CharacterCapabilities, CharacterMotor, LocomotionCapability, MarionetteServerPlugin,

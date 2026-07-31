@@ -1,4 +1,4 @@
-use super::UiAction;
+use super::{UiAction, fonts::UiFontRole};
 use bevy::{prelude::*, ui::InteractionDisabled};
 
 pub(super) const BUTTON_NORMAL: Color = Color::srgb(0.16, 0.18, 0.23);
@@ -12,6 +12,23 @@ pub(super) struct ClientUiRoot;
 #[derive(Component, Clone, Copy, Debug)]
 pub(super) struct UiButtonAction(pub(super) UiAction);
 
+#[derive(Component, Clone, Copy)]
+pub(super) struct UiButtonPalette {
+    pub(super) normal: Color,
+    pub(super) hovered: Color,
+    pub(super) pressed: Color,
+}
+
+impl Default for UiButtonPalette {
+    fn default() -> Self {
+        Self {
+            normal: BUTTON_NORMAL,
+            hovered: BUTTON_HOVERED,
+            pressed: BUTTON_PRESSED,
+        }
+    }
+}
+
 pub(super) fn spawn_heading(commands: &mut Commands, parent: Entity, value: &str) {
     let entity = commands
         .spawn((
@@ -20,6 +37,7 @@ pub(super) fn spawn_heading(commands: &mut Commands, parent: Entity, value: &str
                 font_size: FontSize::Px(34.0),
                 ..default()
             },
+            UiFontRole::Semibold,
             TextColor(Color::WHITE),
             Node {
                 margin: UiRect::bottom(px(10)),
@@ -68,6 +86,7 @@ pub(super) fn spawn_button(
         .spawn((
             Button,
             UiButtonAction(action),
+            UiButtonPalette::default(),
             Node {
                 width: percent(100),
                 height: px(46),
@@ -96,22 +115,68 @@ pub(super) fn spawn_button(
     button
 }
 
-pub(super) fn spawn_adjustment_buttons(
+pub(super) fn spawn_compact_button(
     commands: &mut Commands,
     parent: Entity,
-    decrease: UiAction,
-    increase: UiAction,
-) {
-    let row = commands
-        .spawn(Node {
-            width: percent(100),
-            column_gap: px(12),
-            ..default()
-        })
+    label: &str,
+    action: UiAction,
+    width: Val,
+) -> Entity {
+    spawn_compact_button_with_role(commands, parent, label, action, width, UiFontRole::Regular)
+}
+
+pub(super) fn spawn_compact_symbol_button(
+    commands: &mut Commands,
+    parent: Entity,
+    label: &str,
+    action: UiAction,
+    width: Val,
+) -> Entity {
+    spawn_compact_button_with_role(commands, parent, label, action, width, UiFontRole::Symbols)
+}
+
+fn spawn_compact_button_with_role(
+    commands: &mut Commands,
+    parent: Entity,
+    label: &str,
+    action: UiAction,
+    width: Val,
+    font_role: UiFontRole,
+) -> Entity {
+    let button = commands
+        .spawn((
+            Button,
+            UiButtonAction(action),
+            UiButtonPalette::default(),
+            Node {
+                width,
+                height: px(36),
+                flex_shrink: 0.0,
+                align_items: AlignItems::Center,
+                justify_content: JustifyContent::Center,
+                padding: UiRect::horizontal(px(10)),
+                border: px(1).all(),
+                border_radius: BorderRadius::all(px(6)),
+                ..default()
+            },
+            BackgroundColor(BUTTON_NORMAL),
+            BorderColor::all(Color::srgb(0.3, 0.34, 0.43)),
+        ))
         .id();
-    commands.entity(parent).add_child(row);
-    spawn_button(commands, row, "-", decrease);
-    spawn_button(commands, row, "+", increase);
+    let text = commands
+        .spawn((
+            Text::new(label),
+            TextFont {
+                font_size: FontSize::Px(16.0),
+                ..default()
+            },
+            font_role,
+            TextColor(Color::WHITE),
+        ))
+        .id();
+    commands.entity(button).add_child(text);
+    commands.entity(parent).add_child(button);
+    button
 }
 
 pub(super) fn spawn_menu_button(
@@ -125,6 +190,7 @@ pub(super) fn spawn_menu_button(
         .spawn((
             Button,
             UiButtonAction(action),
+            UiButtonPalette::default(),
             Node {
                 flex_basis: px(0),
                 flex_grow: 1.0,

@@ -23,21 +23,27 @@ impl Chunk {
         changed
     }
 
-    pub fn is_solid(&self, local_position: IVec3) -> bool {
+    /// Returns the primitive data stored at one chunk-relative voxel position.
+    pub fn voxel(&self, local_position: IVec3) -> Option<AtomicVoxelData> {
         if !is_local_position(local_position) {
-            return false;
+            return None;
         }
 
         let mut node = &self.octree.unoptimized_octree.root;
         for depth in 0..CHUNK_OCTREE_DEPTH {
             let octant = octant_at(local_position, depth);
             let Some(child) = node.children[octant].as_deref() else {
-                return false;
+                return None;
             };
             node = child;
         }
 
-        node.data.is_some_and(AtomicVoxelData::is_solid)
+        node.data
+    }
+
+    pub fn is_solid(&self, local_position: IVec3) -> bool {
+        self.voxel(local_position)
+            .is_some_and(AtomicVoxelData::is_solid)
     }
 
     pub fn is_empty(&self) -> bool {
@@ -51,7 +57,6 @@ impl Chunk {
         color_for_voxel: impl Fn(IVec3) -> [f32; 4],
     ) {
         self.triangles.clear();
-        self.triangles.reserve(self.solid_count * 12);
 
         let chunk_origin = chunk_position * CHUNK_EDGE_LENGTH;
         for z in 0..CHUNK_EDGE_LENGTH {
@@ -73,7 +78,7 @@ impl Chunk {
                         };
 
                         if !neighbor_is_solid {
-                            self.push_face(voxel_position, face, color);
+                            self.push_face(local_position, face, color);
                         }
                     }
                 }

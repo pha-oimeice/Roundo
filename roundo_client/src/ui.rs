@@ -1,3 +1,5 @@
+mod fonts;
+mod key_bindings;
 mod s0_main_menu;
 mod s1_server_selection;
 mod s2_connecting;
@@ -11,6 +13,7 @@ mod widgets;
 use crate::{
     config::{self, ServerEntry},
     network::{ActiveClientConnection, ClientConnectionStatus},
+    targeting::{ClientVoxelRaycastSettings, ClientVoxelTargetingSet},
 };
 use bevy::{
     app::AppExit,
@@ -23,37 +26,38 @@ use bevy::{
     window::{CursorGrabMode, CursorOptions, PrimaryWindow},
 };
 use roundo_character::ClientCharacterIpc;
+use roundo_local_coordinate::LocalCoordinateClientIpc;
 use roundo_marionette::{
-    ClientMarionetteInputSettings, ClientMarionetteIpc, ClientPlayerController,
-    ClientPlayerControllerTarget, ControllerCamera,
+    ClientKeyBindings, ClientMarionetteInputSettings, ClientMarionetteIpc, ClientPlayerController,
+    ClientPlayerControllerTarget, ControllerCamera, MovementAction,
 };
 use s0_main_menu::IntroLogo;
 use s1_server_selection::{
     GameAddressInput, HttpsAddressInput, ServerListEntry, ServerListScrollArea, ServerNameInput,
 };
+use s4_settings::{SettingsGroup, SettingsTab, SettingsUiState, TunableSetting};
 use server_probe::ServerProbeManager;
 use state::{ClientUiEvent, ClientUiPhase, ClientUiState, ServerMutation, ServerSelectionView};
-use static_voxel::StaticVoxelClientIpc;
-use widgets::{BUTTON_HOVERED, BUTTON_NORMAL, BUTTON_PRESSED, ClientUiRoot, UiButtonAction};
+use widgets::{ClientUiRoot, UiButtonAction, UiButtonPalette};
 
 const STARTUP_INTRO_DURATION: f32 = 2.4;
 
 pub struct RoundoClientUiPlugin {
     marionette_ipc: ClientMarionetteIpc,
     character_ipc: ClientCharacterIpc,
-    static_voxel_ipc: StaticVoxelClientIpc,
+    local_coordinate_ipc: LocalCoordinateClientIpc,
 }
 
 impl RoundoClientUiPlugin {
     pub fn new(
         marionette_ipc: ClientMarionetteIpc,
         character_ipc: ClientCharacterIpc,
-        static_voxel_ipc: StaticVoxelClientIpc,
+        local_coordinate_ipc: LocalCoordinateClientIpc,
     ) -> Self {
         Self {
             marionette_ipc,
             character_ipc,
-            static_voxel_ipc,
+            local_coordinate_ipc,
         }
     }
 }
@@ -63,14 +67,17 @@ impl Plugin for RoundoClientUiPlugin {
         app.insert_resource(ClientNetworkManager {
             marionette_ipc: self.marionette_ipc.clone(),
             character_ipc: self.character_ipc.clone(),
-            static_voxel_ipc: self.static_voxel_ipc.clone(),
+            local_coordinate_ipc: self.local_coordinate_ipc.clone(),
             active: None,
         })
         .init_resource::<ClientUiState>()
         .init_resource::<ServerProbeManager>()
         .init_resource::<ServerListUiMemory>()
         .init_resource::<StartupIntro>()
-        .add_systems(Startup, spawn_ui_camera)
+        .init_resource::<SettingsUiState>()
+        .init_resource::<ClientKeyBindings>()
+        .init_resource::<ClientVoxelRaycastSettings>()
+        .add_systems(Startup, (fonts::load_ui_fonts, spawn_ui_camera).chain())
         .add_systems(
             Update,
             (
@@ -82,12 +89,22 @@ impl Plugin for RoundoClientUiPlugin {
                 handle_escape,
                 handle_server_selection,
                 handle_ui_buttons,
+                s4_settings::commit_value_input_on_enter,
                 refresh_servers_on_s1_entry,
                 update_button_colors,
                 rebuild_ui,
+                fonts::apply_ui_fonts,
+                s4_settings::sync_setting_controls,
+                s4_settings::update_slider_visuals,
+                persist_client_settings,
                 sync_gameplay_mode,
+                s3_in_game::follow_pointer,
             )
                 .chain(),
+        )
+        .add_systems(
+            PostUpdate,
+            s3_in_game::sync_waila.after(ClientVoxelTargetingSet),
         );
     }
 }
@@ -96,7 +113,7 @@ impl Plugin for RoundoClientUiPlugin {
 struct ClientNetworkManager {
     marionette_ipc: ClientMarionetteIpc,
     character_ipc: ClientCharacterIpc,
-    static_voxel_ipc: StaticVoxelClientIpc,
+    local_coordinate_ipc: LocalCoordinateClientIpc,
     active: Option<ActiveClientConnection>,
 }
 
@@ -107,7 +124,7 @@ impl ClientNetworkManager {
             server,
             self.marionette_ipc.clone(),
             self.character_ipc.clone(),
-            self.static_voxel_ipc.clone(),
+            self.local_coordinate_ipc.clone(),
         )?);
         Ok(())
     }
@@ -163,10 +180,14 @@ enum UiAction {
     ContinueGame,
     OpenSettings,
     CloseSettings,
-    SensitivityDown,
-    SensitivityUp,
-    SpeedDown,
-    SpeedUp,
+    SelectSettingsTab(SettingsTab),
+    ToggleSettingsGroup(SettingsGroup),
+    AdjustSetting(TunableSetting, i8),
+    ToggleMovementAction(MovementAction),
+    OpenKeyBindingQueue(KeyCode),
+    CloseKeyBindingQueue,
+    AddKeyBinding(KeyCode, MovementAction),
+    RemoveKeyBinding(KeyCode, MovementAction),
     LeaveGameToServers,
     QuitApplication,
 }
@@ -182,9 +203,12 @@ struct ServerFormInputs<'w, 's> {
 struct UiViewData<'w> {
     intro: Res<'w, StartupIntro>,
     settings: Res<'w, ClientMarionetteInputSettings>,
+    raycast: Res<'w, ClientVoxelRaycastSettings>,
     manager: Res<'w, ClientNetworkManager>,
     probes: Res<'w, ServerProbeManager>,
     server_list_memory: Res<'w, ServerListUiMemory>,
+    settings_ui: Res<'w, SettingsUiState>,
+    bindings: Res<'w, ClientKeyBindings>,
 }
 
 type EnabledButtonInteractions<'w, 's> = Query<
@@ -197,7 +221,11 @@ type EnabledButtonInteractions<'w, 's> = Query<
 type ButtonColorInteractions<'w, 's> = Query<
     'w,
     's,
-    (&'static Interaction, &'static mut BackgroundColor),
+    (
+        &'static Interaction,
+        &'static mut BackgroundColor,
+        Option<&'static UiButtonPalette>,
+    ),
     (
         Changed<Interaction>,
         With<Button>,
@@ -333,6 +361,7 @@ fn handle_escape(
     keyboard: Res<ButtonInput<KeyCode>>,
     mut state: ResMut<ClientUiState>,
     mut manager: ResMut<ClientNetworkManager>,
+    mut settings_ui: ResMut<SettingsUiState>,
 ) {
     if !keyboard.just_pressed(KeyCode::Escape) {
         return;
@@ -352,6 +381,10 @@ fn handle_escape(
             state.transition(ClientUiEvent::CancelConnection);
         }
         ClientUiPhase::S3InGame => state.transition(ClientUiEvent::PauseGame),
+        ClientUiPhase::S4Settings if settings_ui.selected_key().is_some() => {
+            settings_ui.close_key_queue();
+            state.touch();
+        }
         ClientUiPhase::S4Settings => state.transition(ClientUiEvent::CloseSettings),
         ClientUiPhase::S5PauseMenu => state.transition(ClientUiEvent::ContinueGame),
     }
@@ -374,6 +407,9 @@ fn handle_ui_buttons(
     mut state: ResMut<ClientUiState>,
     mut manager: ResMut<ClientNetworkManager>,
     mut settings: ResMut<ClientMarionetteInputSettings>,
+    mut raycast: ResMut<ClientVoxelRaycastSettings>,
+    mut settings_ui: ResMut<SettingsUiState>,
+    mut bindings: ResMut<ClientKeyBindings>,
     mut probes: ResMut<ServerProbeManager>,
     mut app_exit: MessageWriter<AppExit>,
 ) {
@@ -471,24 +507,43 @@ fn handle_ui_buttons(
             }
             UiAction::ContinueGame => state.transition(ClientUiEvent::ContinueGame),
             UiAction::OpenSettings => state.transition(ClientUiEvent::OpenSettings),
-            UiAction::CloseSettings => state.transition(ClientUiEvent::CloseSettings),
-            UiAction::SensitivityDown => {
-                settings.mouse_sensitivity =
-                    (settings.mouse_sensitivity - 0.0005).clamp(0.0005, 0.01);
+            UiAction::CloseSettings => {
+                settings_ui.close_key_queue();
+                state.transition(ClientUiEvent::CloseSettings);
+            }
+            UiAction::SelectSettingsTab(tab) => {
+                if settings_ui.select_tab(tab) {
+                    state.touch();
+                }
+            }
+            UiAction::ToggleSettingsGroup(group) => {
+                settings_ui.toggle_group(group);
                 state.touch();
             }
-            UiAction::SensitivityUp => {
-                settings.mouse_sensitivity =
-                    (settings.mouse_sensitivity + 0.0005).clamp(0.0005, 0.01);
+            UiAction::AdjustSetting(parameter, direction) => {
+                parameter.adjust(&mut settings, &mut raycast, direction as f32);
+            }
+            UiAction::ToggleMovementAction(action) => {
+                settings_ui.toggle_movement_action(action);
                 state.touch();
             }
-            UiAction::SpeedDown => {
-                settings.camera_move_speed = (settings.camera_move_speed - 1.0).clamp(1.0, 50.0);
+            UiAction::OpenKeyBindingQueue(key) => {
+                settings_ui.open_key_queue(key);
                 state.touch();
             }
-            UiAction::SpeedUp => {
-                settings.camera_move_speed = (settings.camera_move_speed + 1.0).clamp(1.0, 50.0);
+            UiAction::CloseKeyBindingQueue => {
+                settings_ui.close_key_queue();
                 state.touch();
+            }
+            UiAction::AddKeyBinding(key, action) => {
+                if bindings.bind(key, action) {
+                    state.touch();
+                }
+            }
+            UiAction::RemoveKeyBinding(key, action) => {
+                if bindings.unbind(key, action) {
+                    state.touch();
+                }
             }
             UiAction::LeaveGameToServers => {
                 manager.disconnect();
@@ -541,11 +596,12 @@ fn attempt_connection(
 }
 
 fn update_button_colors(mut buttons: ButtonColorInteractions) {
-    for (interaction, mut background) in &mut buttons {
+    for (interaction, mut background, palette) in &mut buttons {
+        let palette = palette.copied().unwrap_or_default();
         background.0 = match interaction {
-            Interaction::Pressed => BUTTON_PRESSED,
-            Interaction::Hovered => BUTTON_HOVERED,
-            Interaction::None => BUTTON_NORMAL,
+            Interaction::Pressed => palette.pressed,
+            Interaction::Hovered => palette.hovered,
+            Interaction::None => palette.normal,
         };
     }
 }
@@ -565,14 +621,10 @@ fn rebuild_ui(
     for root in &roots {
         commands.entity(root).despawn();
     }
-    if state.phase == ClientUiPhase::S3InGame && !s3_in_game::renders_overlay() {
-        return;
-    }
-
-    let root_color = if state.world_visible() {
-        Color::srgba(0.0, 0.0, 0.0, 0.72)
-    } else {
-        Color::srgb(0.035, 0.045, 0.065)
+    let root_color = match state.phase {
+        ClientUiPhase::S3InGame => Color::NONE,
+        _ if state.world_visible() => Color::srgba(0.0, 0.0, 0.0, 0.72),
+        _ => Color::srgb(0.035, 0.045, 0.065),
     };
     let root = commands
         .spawn((
@@ -588,6 +640,26 @@ fn rebuild_ui(
             BackgroundColor(root_color),
         ))
         .id();
+
+    match state.phase {
+        ClientUiPhase::S3InGame => {
+            s3_in_game::spawn(&mut commands, root);
+            return;
+        }
+        ClientUiPhase::S4Settings => {
+            s4_settings::spawn(
+                &mut commands,
+                root,
+                &view.settings,
+                &view.raycast,
+                &view.bindings,
+                &view.settings_ui,
+            );
+            return;
+        }
+        _ => {}
+    }
+
     let panel = commands
         .spawn((
             Node {
@@ -638,21 +710,34 @@ fn rebuild_ui(
         ClientUiPhase::S2Connecting => {
             s2_connecting::spawn(&mut commands, panel, &state);
         }
-        ClientUiPhase::S3InGame => {}
-        ClientUiPhase::S4Settings => {
-            s4_settings::spawn(&mut commands, panel, &view.settings);
-        }
+        ClientUiPhase::S3InGame | ClientUiPhase::S4Settings => {}
         ClientUiPhase::S5PauseMenu => {
             s5_pause_menu::spawn(&mut commands, panel, view.manager.server_name());
         }
     }
 }
 
+fn persist_client_settings(
+    settings: Res<ClientMarionetteInputSettings>,
+    raycast: Res<ClientVoxelRaycastSettings>,
+    bindings: Res<ClientKeyBindings>,
+    mut initialized: Local<bool>,
+) {
+    if *initialized && !settings.is_changed() && !raycast.is_changed() && !bindings.is_changed() {
+        return;
+    }
+    *initialized = true;
+    if let Err(error) = config::save_settings(&settings, raycast.max_distance(), &bindings) {
+        log::error!("Failed to persist client settings: {error}");
+    }
+}
+
 fn sync_gameplay_mode(
     state: Res<ClientUiState>,
     mut player_controller: ResMut<ClientPlayerController>,
-    mut cursor_options: Query<&mut CursorOptions, With<PrimaryWindow>>,
+    mut windows: Query<(&mut Window, &mut CursorOptions), With<PrimaryWindow>>,
     mut cameras: Query<(Entity, &mut Camera, Option<&ControllerCamera>), With<Camera3d>>,
+    mut was_playing: Local<bool>,
 ) {
     let playing = state.phase == ClientUiPhase::S3InGame;
     let world_visible = state.world_visible();
@@ -666,7 +751,11 @@ fn sync_gameplay_mode(
         camera.is_active = world_visible && selected;
     }
 
-    if let Some(mut cursor) = cursor_options.iter_mut().next() {
+    if let Some((mut window, mut cursor)) = windows.iter_mut().next() {
+        if playing && !*was_playing {
+            let center = Vec2::new(window.width() * 0.5, window.height() * 0.5);
+            window.set_cursor_position(Some(center));
+        }
         cursor.visible = !playing;
         cursor.grab_mode = if playing {
             CursorGrabMode::Locked
@@ -674,6 +763,7 @@ fn sync_gameplay_mode(
             CursorGrabMode::None
         };
     }
+    *was_playing = playing;
 }
 
 #[cfg(test)]
@@ -714,6 +804,14 @@ mod tests {
 
         app.update();
         assert!(app.world().get::<Camera>(camera).unwrap().is_active);
+
+        let mut state = app.world_mut().resource_mut::<ClientUiState>();
+        state.transition(ClientUiEvent::PauseGame);
+        state.transition(ClientUiEvent::OpenSettings);
+        drop(state);
+
+        app.update();
+        assert!(!app.world().get::<Camera>(camera).unwrap().is_active);
     }
 
     #[test]

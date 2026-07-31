@@ -1,5 +1,8 @@
+mod client_settings;
 mod my_default_configurations;
 mod my_impls;
+
+pub use client_settings::*;
 
 use roundo_toolbox::fs::get_exe_root_path;
 use roundo_toolbox::{load_or_create_config, string_to_socket_addr};

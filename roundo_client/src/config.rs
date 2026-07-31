@@ -1,21 +1,98 @@
-//! Although all struct can be serialized, but please use 'Config' only so that only 1 config file is used.
+//! Although all structs can be serialized, only `ClientConfig` is written so the client uses one file.
 
+use bevy::prelude::KeyCode;
+use roundo_marionette::{ClientKeyBindings, ClientMarionetteInputSettings, MovementAction};
 use roundo_toolbox::fs::get_exe_root_path;
-use roundo_user_config::ClientNetworkConfig;
+use roundo_user_config::{
+    ClientCameraSettingsConfig, ClientControlSettingsConfig, ClientKeyBindingConfig, ClientKeyCode,
+    ClientMovementAction, ClientNetworkConfig, ClientSettingsConfig,
+};
 use serde::{Deserialize, Serialize};
-use std::sync::LazyLock;
+use std::sync::{LazyLock, RwLock};
 
 const CONFIG_FILE_NAME: &str = "roundo-client-config.toml";
-pub static CLIENT_CONFIG: LazyLock<ClientConfig> = LazyLock::new(|| load_config());
+static CLIENT_CONFIG: LazyLock<RwLock<ClientConfig>> = LazyLock::new(|| RwLock::new(load_config()));
 
 pub fn load_config() -> ClientConfig {
-    roundo_user_config::load_config(CONFIG_FILE_NAME)
+    let mut config = roundo_user_config::load_config::<ClientConfig>(CONFIG_FILE_NAME);
+    config.settings.normalize();
+    config
+}
+
+pub fn network_config() -> ClientNetworkConfig {
+    read_config().network.clone()
+}
+
+pub fn servers() -> Vec<ServerEntry> {
+    read_config().servers.clone()
+}
+
+pub fn settings() -> ClientSettingsConfig {
+    read_config().settings.clone()
 }
 
 pub fn save_servers(servers: &[ServerEntry]) -> Result<(), String> {
-    let mut config = CLIENT_CONFIG.clone();
-    config.servers = servers.to_vec();
-    let serialized = toml::to_string_pretty(&config)
+    update_config(|config| config.servers = servers.to_vec())
+}
+
+pub fn save_settings(
+    input: &ClientMarionetteInputSettings,
+    voxel_raycast_distance: f32,
+    bindings: &ClientKeyBindings,
+) -> Result<(), String> {
+    let mut settings = ClientSettingsConfig {
+        controls: ClientControlSettingsConfig {
+            mouse_sensitivity: input.mouse_sensitivity,
+        },
+        camera: ClientCameraSettingsConfig {
+            move_speed: input.camera_move_speed,
+            voxel_raycast_distance,
+        },
+        key_bindings: bindings
+            .iter()
+            .filter_map(|(key, actions)| {
+                let key = config_key_code(key)?;
+                Some(ClientKeyBindingConfig {
+                    key,
+                    actions: actions.iter().copied().map(config_action).collect(),
+                })
+            })
+            .collect(),
+    };
+    settings.normalize();
+    update_config(|config| config.settings = settings)
+}
+
+pub fn runtime_input_settings(settings: &ClientSettingsConfig) -> ClientMarionetteInputSettings {
+    ClientMarionetteInputSettings {
+        mouse_sensitivity: settings.controls.mouse_sensitivity,
+        camera_move_speed: settings.camera.move_speed,
+    }
+}
+
+pub fn runtime_key_bindings(settings: &ClientSettingsConfig) -> ClientKeyBindings {
+    let mut bindings = ClientKeyBindings::empty();
+    for configured in &settings.key_bindings {
+        let key = runtime_key_code(configured.key);
+        for action in configured.actions.iter().copied().map(runtime_action) {
+            bindings.bind(key, action);
+        }
+    }
+    bindings
+}
+
+fn read_config() -> std::sync::RwLockReadGuard<'static, ClientConfig> {
+    CLIENT_CONFIG
+        .read()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+fn update_config(update: impl FnOnce(&mut ClientConfig)) -> Result<(), String> {
+    let mut config = CLIENT_CONFIG
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    update(&mut config);
+    let serialized = toml::to_string_pretty(&*config)
         .map_err(|error| format!("Failed to serialize client config: {error}"))?;
     std::fs::write(get_exe_root_path().join(CONFIG_FILE_NAME), serialized)
         .map_err(|error| format!("Failed to save client config: {error}"))
@@ -26,6 +103,7 @@ pub fn save_servers(servers: &[ServerEntry]) -> Result<(), String> {
 pub struct ClientConfig {
     pub network: ClientNetworkConfig,
     pub servers: Vec<ServerEntry>,
+    pub settings: ClientSettingsConfig,
 }
 
 impl Default for ClientConfig {
@@ -39,6 +117,7 @@ impl Default for ClientConfig {
                 https_addr: format!("{}:{}", endpoint.host, endpoint.https_port),
             }],
             network,
+            settings: ClientSettingsConfig::default(),
         }
     }
 }
@@ -49,4 +128,136 @@ pub struct ServerEntry {
     pub name: String,
     pub game_addr: String,
     pub https_addr: String,
+}
+
+const KEY_CODE_PAIRS: [(ClientKeyCode, KeyCode); 52] = [
+    (ClientKeyCode::Escape, KeyCode::Escape),
+    (ClientKeyCode::Digit0, KeyCode::Digit0),
+    (ClientKeyCode::Digit1, KeyCode::Digit1),
+    (ClientKeyCode::Digit2, KeyCode::Digit2),
+    (ClientKeyCode::Digit3, KeyCode::Digit3),
+    (ClientKeyCode::Digit4, KeyCode::Digit4),
+    (ClientKeyCode::Digit5, KeyCode::Digit5),
+    (ClientKeyCode::Digit6, KeyCode::Digit6),
+    (ClientKeyCode::Digit7, KeyCode::Digit7),
+    (ClientKeyCode::Digit8, KeyCode::Digit8),
+    (ClientKeyCode::Digit9, KeyCode::Digit9),
+    (ClientKeyCode::Backspace, KeyCode::Backspace),
+    (ClientKeyCode::Tab, KeyCode::Tab),
+    (ClientKeyCode::KeyQ, KeyCode::KeyQ),
+    (ClientKeyCode::KeyW, KeyCode::KeyW),
+    (ClientKeyCode::KeyE, KeyCode::KeyE),
+    (ClientKeyCode::KeyR, KeyCode::KeyR),
+    (ClientKeyCode::KeyT, KeyCode::KeyT),
+    (ClientKeyCode::KeyY, KeyCode::KeyY),
+    (ClientKeyCode::KeyU, KeyCode::KeyU),
+    (ClientKeyCode::KeyI, KeyCode::KeyI),
+    (ClientKeyCode::KeyO, KeyCode::KeyO),
+    (ClientKeyCode::KeyP, KeyCode::KeyP),
+    (ClientKeyCode::CapsLock, KeyCode::CapsLock),
+    (ClientKeyCode::KeyA, KeyCode::KeyA),
+    (ClientKeyCode::KeyS, KeyCode::KeyS),
+    (ClientKeyCode::KeyD, KeyCode::KeyD),
+    (ClientKeyCode::KeyF, KeyCode::KeyF),
+    (ClientKeyCode::KeyG, KeyCode::KeyG),
+    (ClientKeyCode::KeyH, KeyCode::KeyH),
+    (ClientKeyCode::KeyJ, KeyCode::KeyJ),
+    (ClientKeyCode::KeyK, KeyCode::KeyK),
+    (ClientKeyCode::KeyL, KeyCode::KeyL),
+    (ClientKeyCode::Enter, KeyCode::Enter),
+    (ClientKeyCode::ShiftLeft, KeyCode::ShiftLeft),
+    (ClientKeyCode::KeyZ, KeyCode::KeyZ),
+    (ClientKeyCode::KeyX, KeyCode::KeyX),
+    (ClientKeyCode::KeyC, KeyCode::KeyC),
+    (ClientKeyCode::KeyV, KeyCode::KeyV),
+    (ClientKeyCode::KeyB, KeyCode::KeyB),
+    (ClientKeyCode::KeyN, KeyCode::KeyN),
+    (ClientKeyCode::KeyM, KeyCode::KeyM),
+    (ClientKeyCode::ShiftRight, KeyCode::ShiftRight),
+    (ClientKeyCode::ControlLeft, KeyCode::ControlLeft),
+    (ClientKeyCode::AltLeft, KeyCode::AltLeft),
+    (ClientKeyCode::Space, KeyCode::Space),
+    (ClientKeyCode::AltRight, KeyCode::AltRight),
+    (ClientKeyCode::ControlRight, KeyCode::ControlRight),
+    (ClientKeyCode::ArrowLeft, KeyCode::ArrowLeft),
+    (ClientKeyCode::ArrowUp, KeyCode::ArrowUp),
+    (ClientKeyCode::ArrowDown, KeyCode::ArrowDown),
+    (ClientKeyCode::ArrowRight, KeyCode::ArrowRight),
+];
+
+fn runtime_key_code(configured: ClientKeyCode) -> KeyCode {
+    KEY_CODE_PAIRS
+        .iter()
+        .find_map(|(config, runtime)| (*config == configured).then_some(*runtime))
+        .expect("every configured key code must have a runtime mapping")
+}
+
+fn config_key_code(runtime: KeyCode) -> Option<ClientKeyCode> {
+    KEY_CODE_PAIRS
+        .iter()
+        .find_map(|(config, key)| (*key == runtime).then_some(*config))
+}
+
+fn runtime_action(configured: ClientMovementAction) -> MovementAction {
+    match configured {
+        ClientMovementAction::MoveUp => MovementAction::MoveUp,
+        ClientMovementAction::MoveDown => MovementAction::MoveDown,
+        ClientMovementAction::MoveLeft => MovementAction::MoveLeft,
+        ClientMovementAction::MoveRight => MovementAction::MoveRight,
+        ClientMovementAction::MoveForward => MovementAction::MoveForward,
+        ClientMovementAction::MoveBackward => MovementAction::MoveBackward,
+    }
+}
+
+fn config_action(runtime: MovementAction) -> ClientMovementAction {
+    match runtime {
+        MovementAction::MoveUp => ClientMovementAction::MoveUp,
+        MovementAction::MoveDown => ClientMovementAction::MoveDown,
+        MovementAction::MoveLeft => ClientMovementAction::MoveLeft,
+        MovementAction::MoveRight => ClientMovementAction::MoveRight,
+        MovementAction::MoveForward => ClientMovementAction::MoveForward,
+        MovementAction::MoveBackward => ClientMovementAction::MoveBackward,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn runtime_key_bindings_round_trip_through_client_config() {
+        let settings = ClientSettingsConfig::default();
+        let runtime = runtime_key_bindings(&settings);
+        let serialized = runtime
+            .iter()
+            .map(|(key, actions)| {
+                (
+                    config_key_code(key).expect("default key must be configurable"),
+                    actions
+                        .iter()
+                        .copied()
+                        .map(config_action)
+                        .collect::<Vec<_>>(),
+                )
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(serialized.len(), settings.key_bindings.len());
+        for configured in settings.key_bindings {
+            assert!(serialized.contains(&(configured.key, configured.actions)));
+        }
+    }
+
+    #[test]
+    fn missing_settings_deserialize_to_the_shared_defaults() {
+        let config: ClientConfig = toml::from_str(
+            r#"
+            [network]
+            ca_verification = false
+            "#,
+        )
+        .expect("legacy client config should deserialize");
+
+        assert_eq!(config.settings, ClientSettingsConfig::default());
+    }
 }

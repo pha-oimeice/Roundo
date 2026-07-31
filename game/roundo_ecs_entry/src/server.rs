@@ -4,8 +4,8 @@ use bevy::app::App;
 use bevy::mesh::MeshPlugin;
 use bevy::prelude::{AssetPlugin, Fixed, Time};
 use roundo_character::{CharacterServerIpc, RoundoCharacterServerPlugin};
+use roundo_local_coordinate::{LocalCoordinateServerIpc, LocalCoordinateServerPlugin};
 use roundo_marionette::{MarionetteServerPlugin, ServerMarionetteIpc};
-use static_voxel::{StaticVoxelServerIpc, StaticVoxelServerPlugin};
 use std::sync::LazyLock;
 use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -15,8 +15,8 @@ static MARIONETTE_PLUGIN: LazyLock<MarionetteServerPlugin> =
     LazyLock::new(MarionetteServerPlugin::new);
 static CHARACTER_PLUGIN: LazyLock<RoundoCharacterServerPlugin> =
     LazyLock::new(RoundoCharacterServerPlugin::new);
-static STATIC_VOXEL_PLUGIN: LazyLock<StaticVoxelServerPlugin> =
-    LazyLock::new(StaticVoxelServerPlugin::new);
+static LOCAL_COORDINATE_PLUGIN: LazyLock<LocalCoordinateServerPlugin> =
+    LazyLock::new(LocalCoordinateServerPlugin::new);
 static TICK_RATE: AtomicU32 = AtomicU32::new(DEFAULT_TICK_RATE);
 
 pub fn server_marionette_ipc() -> ServerMarionetteIpc {
@@ -27,8 +27,8 @@ pub fn server_character_ipc() -> CharacterServerIpc {
     CHARACTER_PLUGIN.ipc()
 }
 
-pub fn server_static_voxel_ipc() -> StaticVoxelServerIpc {
-    STATIC_VOXEL_PLUGIN.ipc()
+pub fn server_local_coordinate_ipc() -> LocalCoordinateServerIpc {
+    LOCAL_COORDINATE_PLUGIN.ipc()
 }
 
 pub fn configure_server_tick_rate(tick_rate: u32) {
@@ -46,7 +46,7 @@ pub fn run_ecs_server() {
         MeshPlugin,
         PhysicsPlugins::default(),
         (*CHARACTER_PLUGIN).clone(),
-        (*STATIC_VOXEL_PLUGIN).clone(),
+        (*LOCAL_COORDINATE_PLUGIN).clone(),
         (*MARIONETTE_PLUGIN).clone(),
     ));
     app.run();

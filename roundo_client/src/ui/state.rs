@@ -169,8 +169,7 @@ impl ClientUiState {
         matches!(
             self.phase,
             ClientUiPhase::S3InGame | ClientUiPhase::S5PauseMenu
-        ) || (self.phase == ClientUiPhase::S4Settings
-            && self.settings_return == SettingsReturn::PauseMenu)
+        )
     }
 
     pub(super) fn touch(&mut self) {
@@ -294,7 +293,7 @@ impl ClientUiState {
 
 impl Default for ClientUiState {
     fn default() -> Self {
-        Self::with_servers(config::CLIENT_CONFIG.servers.clone())
+        Self::with_servers(config::servers())
     }
 }
 
@@ -354,7 +353,7 @@ mod tests {
         state.transition(ClientUiEvent::PauseGame);
         state.transition(ClientUiEvent::OpenSettings);
         assert_eq!(state.phase, ClientUiPhase::S4Settings);
-        assert!(state.world_visible());
+        assert!(!state.world_visible());
         state.transition(ClientUiEvent::CloseSettings);
         assert_eq!(state.phase, ClientUiPhase::S5PauseMenu);
     }

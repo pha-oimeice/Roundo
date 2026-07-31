@@ -12,7 +12,7 @@ use roundo_networking::protocol::{
 use roundo_toolbox::{
     CrossbeamThreadPipe, CrossbeamThreadPipeEndpointA, CrossbeamThreadPipeEndpointB,
 };
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 pub type ClientMarionetteIpc =
     CrossbeamThreadPipeEndpointA<ClientMarionetteCommand, ClientMarionetteEvent>;
@@ -44,6 +44,7 @@ impl Plugin for MarionetteClientPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<ClientPlayerController>()
             .init_resource::<ClientMarionetteInputSettings>()
+            .init_resource::<ClientKeyBindings>()
             .init_resource::<ClientControllerRegistry>()
             .insert_resource(ClientPipeResource(self.pipe.endpoint_b()))
             .add_systems(
@@ -164,6 +165,162 @@ impl Default for ClientMarionetteInputSettings {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub enum MovementAction {
+    MoveUp,
+    MoveDown,
+    MoveLeft,
+    MoveRight,
+    MoveForward,
+    MoveBackward,
+}
+
+impl MovementAction {
+    pub const ALL: [Self; 6] = [
+        Self::MoveUp,
+        Self::MoveDown,
+        Self::MoveLeft,
+        Self::MoveRight,
+        Self::MoveForward,
+        Self::MoveBackward,
+    ];
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::MoveUp => "Move Up",
+            Self::MoveDown => "Move Down",
+            Self::MoveLeft => "Move Left",
+            Self::MoveRight => "Move Right",
+            Self::MoveForward => "Move Forward",
+            Self::MoveBackward => "Move Backward",
+        }
+    }
+
+    pub const fn index(self) -> usize {
+        match self {
+            Self::MoveUp => 0,
+            Self::MoveDown => 1,
+            Self::MoveLeft => 2,
+            Self::MoveRight => 3,
+            Self::MoveForward => 4,
+            Self::MoveBackward => 5,
+        }
+    }
+
+    const fn direction(self) -> Vec3 {
+        match self {
+            Self::MoveUp => Vec3::Y,
+            Self::MoveDown => Vec3::NEG_Y,
+            Self::MoveLeft => Vec3::NEG_X,
+            Self::MoveRight => Vec3::X,
+            Self::MoveForward => Vec3::Z,
+            Self::MoveBackward => Vec3::NEG_Z,
+        }
+    }
+}
+
+#[derive(Resource, Clone, Debug, Eq, PartialEq)]
+pub struct ClientKeyBindings {
+    bindings: BTreeMap<KeyCode, Vec<MovementAction>>,
+}
+
+impl ClientKeyBindings {
+    pub fn empty() -> Self {
+        Self {
+            bindings: BTreeMap::new(),
+        }
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = (KeyCode, &[MovementAction])> {
+        self.bindings
+            .iter()
+            .map(|(key, actions)| (*key, actions.as_slice()))
+    }
+
+    pub fn actions_for(&self, key: KeyCode) -> &[MovementAction] {
+        self.bindings.get(&key).map(Vec::as_slice).unwrap_or(&[])
+    }
+
+    pub fn keys_for(&self, action: MovementAction) -> Vec<KeyCode> {
+        self.bindings
+            .iter()
+            .filter_map(|(key, actions)| actions.contains(&action).then_some(*key))
+            .collect()
+    }
+
+    pub fn bind(&mut self, key: KeyCode, action: MovementAction) -> bool {
+        let actions = self.bindings.entry(key).or_default();
+        if actions.contains(&action) {
+            return false;
+        }
+        actions.push(action);
+        true
+    }
+
+    pub fn unbind(&mut self, key: KeyCode, action: MovementAction) -> bool {
+        let Some(actions) = self.bindings.get_mut(&key) else {
+            return false;
+        };
+        let Some(index) = actions.iter().position(|bound| *bound == action) else {
+            return false;
+        };
+        actions.remove(index);
+        if actions.is_empty() {
+            self.bindings.remove(&key);
+        }
+        true
+    }
+
+    pub fn reorder(
+        &mut self,
+        key: KeyCode,
+        action: MovementAction,
+        target: MovementAction,
+    ) -> bool {
+        let Some(actions) = self.bindings.get_mut(&key) else {
+            return false;
+        };
+        let Some(from) = actions.iter().position(|bound| *bound == action) else {
+            return false;
+        };
+        let Some(to) = actions.iter().position(|bound| *bound == target) else {
+            return false;
+        };
+        if from == to {
+            return false;
+        }
+        let action = actions.remove(from);
+        actions.insert(to.min(actions.len()), action);
+        true
+    }
+
+    fn movement_direction(&self, keyboard: &ButtonInput<KeyCode>) -> Vec3 {
+        let mut direction = Vec3::ZERO;
+        for (key, actions) in &self.bindings {
+            if !keyboard.pressed(*key) {
+                continue;
+            }
+            for action in actions {
+                direction += action.direction();
+            }
+        }
+        direction.clamp(Vec3::NEG_ONE, Vec3::ONE)
+    }
+}
+
+impl Default for ClientKeyBindings {
+    fn default() -> Self {
+        let mut bindings = Self::empty();
+        bindings.bind(KeyCode::Space, MovementAction::MoveUp);
+        bindings.bind(KeyCode::ShiftLeft, MovementAction::MoveDown);
+        bindings.bind(KeyCode::KeyA, MovementAction::MoveLeft);
+        bindings.bind(KeyCode::KeyD, MovementAction::MoveRight);
+        bindings.bind(KeyCode::KeyW, MovementAction::MoveForward);
+        bindings.bind(KeyCode::KeyS, MovementAction::MoveBackward);
+        bindings
+    }
+}
+
 #[derive(Resource, Clone)]
 struct ClientPipeResource(
     CrossbeamThreadPipeEndpointB<ClientMarionetteCommand, ClientMarionetteEvent>,
@@ -258,6 +415,7 @@ fn process_client_commands(
 
 fn route_locomotion_input(
     keyboard: Res<ButtonInput<KeyCode>>,
+    bindings: Res<ClientKeyBindings>,
     pipe: Res<ClientPipeResource>,
     player_controller: Res<ClientPlayerController>,
     mut registry: ResMut<ClientControllerRegistry>,
@@ -266,7 +424,7 @@ fn route_locomotion_input(
         return;
     }
 
-    let direction = keyboard_direction(&keyboard);
+    let direction = bindings.movement_direction(&keyboard).to_array();
     let jump = keyboard.just_pressed(KeyCode::Space);
     let sprint = keyboard.pressed(KeyCode::ShiftLeft);
     for controller_id in registry.controller_ids_of_kind(ControllerKind::Locomotion) {
@@ -285,6 +443,7 @@ fn route_locomotion_input(
 
 fn route_view_input(
     keyboard: Res<ButtonInput<KeyCode>>,
+    bindings: Res<ClientKeyBindings>,
     mouse_motion: Res<AccumulatedMouseMotion>,
     time: Res<Time>,
     settings: Res<ClientMarionetteInputSettings>,
@@ -306,6 +465,7 @@ fn route_view_input(
         };
         let frame_input = camera_frame_input(
             &keyboard,
+            &bindings,
             mouse_motion.delta,
             time.delta_secs(),
             *settings,
@@ -328,16 +488,9 @@ fn route_view_input(
     }
 }
 
-fn keyboard_direction(keyboard: &ButtonInput<KeyCode>) -> [f32; 3] {
-    [
-        axis(keyboard, KeyCode::KeyA, KeyCode::KeyD),
-        0.0,
-        axis(keyboard, KeyCode::KeyW, KeyCode::KeyS),
-    ]
-}
-
 fn control_local_camera(
     keyboard: Res<ButtonInput<KeyCode>>,
+    bindings: Res<ClientKeyBindings>,
     mouse_motion: Res<AccumulatedMouseMotion>,
     time: Res<Time>,
     settings: Res<ClientMarionetteInputSettings>,
@@ -356,18 +509,13 @@ fn control_local_camera(
     };
     let frame_input = camera_frame_input(
         &keyboard,
+        &bindings,
         mouse_motion.delta,
         time.delta_secs(),
         *settings,
         &transform,
     );
     apply_camera_frame_input(&mut transform, frame_input);
-}
-
-fn axis(keyboard: &ButtonInput<KeyCode>, negative: KeyCode, positive: KeyCode) -> f32 {
-    let positive_value = if keyboard.pressed(positive) { 1.0 } else { 0.0 };
-    let negative_value = if keyboard.pressed(negative) { 1.0 } else { 0.0 };
-    positive_value - negative_value
 }
 
 fn apply_camera_state(transform: &mut Transform, state: ControllerCameraState) {
@@ -395,17 +543,13 @@ impl CameraFrameInput {
 
 fn camera_frame_input(
     keyboard: &ButtonInput<KeyCode>,
+    bindings: &ClientKeyBindings,
     mouse_delta: bevy::prelude::Vec2,
     delta_seconds: f32,
     settings: ClientMarionetteInputSettings,
     transform: &Transform,
 ) -> CameraFrameInput {
-    let local_direction = Vec3::new(
-        axis(keyboard, KeyCode::KeyA, KeyCode::KeyD),
-        axis(keyboard, KeyCode::ShiftLeft, KeyCode::Space),
-        axis(keyboard, KeyCode::KeyS, KeyCode::KeyW),
-    )
-    .normalize_or_zero();
+    let local_direction = bindings.movement_direction(keyboard).normalize_or_zero();
     let (yaw, _, _) = transform.rotation.to_euler(EulerRot::YXZ);
     let horizontal_rotation = Quat::from_rotation_y(yaw);
     let world_direction = horizontal_rotation * Vec3::X * local_direction.x
@@ -440,16 +584,21 @@ fn apply_camera_rotation(transform: &mut Transform, yaw_delta: f32, pitch_delta:
 
 #[cfg(test)]
 mod tests {
-    use super::{ClientMarionetteInputSettings, apply_camera_rotation, camera_frame_input};
+    use super::{
+        ClientKeyBindings, ClientMarionetteInputSettings, MovementAction, apply_camera_rotation,
+        camera_frame_input,
+    };
     use bevy::prelude::{ButtonInput, EulerRot, KeyCode, Quat, Transform, Vec2, Vec3};
 
     #[test]
     fn mouse_motion_controls_yaw_and_pitch() {
         let keyboard = ButtonInput::default();
+        let bindings = ClientKeyBindings::default();
         let transform = Transform::from_rotation(Quat::from_euler(EulerRot::YXZ, 0.4, 0.7, 0.2));
 
         let input = camera_frame_input(
             &keyboard,
+            &bindings,
             Vec2::new(20.0, 50.0),
             1.0,
             ClientMarionetteInputSettings::default(),
@@ -480,14 +629,17 @@ mod tests {
             camera_move_speed: 1.0,
             ..Default::default()
         };
+        let bindings = ClientKeyBindings::default();
         let transform = Transform::from_rotation(Quat::from_euler(EulerRot::YXZ, 0.4, 0.7, 0.2));
         let mut keyboard = ButtonInput::default();
         keyboard.press(KeyCode::Space);
-        let upward = camera_frame_input(&keyboard, Vec2::ZERO, 1.0, settings, &transform);
+        let upward =
+            camera_frame_input(&keyboard, &bindings, Vec2::ZERO, 1.0, settings, &transform);
 
         keyboard.release(KeyCode::Space);
         keyboard.press(KeyCode::ShiftLeft);
-        let downward = camera_frame_input(&keyboard, Vec2::ZERO, 1.0, settings, &transform);
+        let downward =
+            camera_frame_input(&keyboard, &bindings, Vec2::ZERO, 1.0, settings, &transform);
 
         assert_eq!(upward.translation, bevy::prelude::Vec3::Y);
         assert_eq!(downward.translation, bevy::prelude::Vec3::NEG_Y);
@@ -499,15 +651,57 @@ mod tests {
             camera_move_speed: 1.0,
             ..Default::default()
         };
+        let bindings = ClientKeyBindings::default();
         let yaw = 0.4;
         let transform = Transform::from_rotation(Quat::from_euler(EulerRot::YXZ, yaw, 0.7, 0.2));
         let mut keyboard = ButtonInput::default();
         keyboard.press(KeyCode::KeyW);
 
-        let forward = camera_frame_input(&keyboard, Vec2::ZERO, 1.0, settings, &transform);
+        let forward =
+            camera_frame_input(&keyboard, &bindings, Vec2::ZERO, 1.0, settings, &transform);
         let expected = Quat::from_rotation_y(yaw) * Vec3::NEG_Z;
 
         assert!(forward.translation.abs_diff_eq(expected, f32::EPSILON));
         assert_eq!(forward.translation.y, 0.0);
+    }
+
+    #[test]
+    fn bindings_form_an_ordered_unique_bipartite_graph() {
+        let mut bindings = ClientKeyBindings::default();
+        assert!(!bindings.bind(KeyCode::KeyW, MovementAction::MoveForward));
+        assert!(bindings.bind(KeyCode::KeyW, MovementAction::MoveUp));
+        assert_eq!(
+            bindings.actions_for(KeyCode::KeyW),
+            &[MovementAction::MoveForward, MovementAction::MoveUp]
+        );
+        let up_keys = bindings.keys_for(MovementAction::MoveUp);
+        assert_eq!(up_keys.len(), 2);
+        assert!(up_keys.contains(&KeyCode::KeyW));
+        assert!(up_keys.contains(&KeyCode::Space));
+
+        assert!(bindings.reorder(
+            KeyCode::KeyW,
+            MovementAction::MoveUp,
+            MovementAction::MoveForward
+        ));
+        assert_eq!(
+            bindings.actions_for(KeyCode::KeyW),
+            &[MovementAction::MoveUp, MovementAction::MoveForward]
+        );
+        assert!(bindings.unbind(KeyCode::KeyW, MovementAction::MoveUp));
+        assert!(!bindings.unbind(KeyCode::KeyW, MovementAction::MoveUp));
+    }
+
+    #[test]
+    fn one_key_executes_its_complete_action_queue() {
+        let mut bindings = ClientKeyBindings::default();
+        bindings.bind(KeyCode::KeyW, MovementAction::MoveRight);
+        let mut keyboard = ButtonInput::default();
+        keyboard.press(KeyCode::KeyW);
+
+        assert_eq!(
+            bindings.movement_direction(&keyboard),
+            Vec3::new(1.0, 0.0, 1.0)
+        );
     }
 }

@@ -1,31 +1,14 @@
 //! Versioned wire schema for the TLS game connection.
 
+use roundo_toolbox::macros::identifier;
 use serde::{Deserialize, Serialize};
 
-pub const GAME_PROTOCOL_VERSION: u16 = 2;
-
-macro_rules! identifier {
-    ($name:ident) => {
-        #[derive(
-            Clone,
-            Copy,
-            Debug,
-            Default,
-            Deserialize,
-            Eq,
-            Hash,
-            Ord,
-            PartialEq,
-            PartialOrd,
-            Serialize,
-        )]
-        pub struct $name(pub u64);
-    };
-}
+pub const GAME_PROTOCOL_VERSION: u16 = 3;
 
 identifier!(ConnectionId);
 identifier!(ControllerId);
 identifier!(CharacterId);
+identifier!(LocalCoordinateId);
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 pub struct UserId(pub i32);
@@ -174,12 +157,20 @@ pub enum ServerGameMessage {
     CharacterControlGranted {
         character_id: CharacterId,
     },
-    StaticVoxelChunk {
+    LocalCoordinateSpawned {
+        local_coordinate_id: LocalCoordinateId,
+    },
+    LocalCoordinateDespawned {
+        local_coordinate_id: LocalCoordinateId,
+    },
+    LocalCoordinateChunk {
+        local_coordinate_id: LocalCoordinateId,
         coordinate: [i64; 3],
         edge_length: u16,
         voxels: Vec<u16>,
     },
-    StaticVoxelChunkUnloaded {
+    LocalCoordinateChunkUnloaded {
+        local_coordinate_id: LocalCoordinateId,
         coordinate: [i64; 3],
     },
     ControllerGranted {

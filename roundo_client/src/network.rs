@@ -1,11 +1,13 @@
 use crate::config::ServerEntry;
 use roundo_character::{ClientCharacterCommand, ClientCharacterEvent, ClientCharacterIpc};
+use roundo_local_coordinate::{
+    CHUNK_EDGE_LENGTH, GeneratedChunk, LocalCoordinateClientCommand, LocalCoordinateClientIpc,
+};
 use roundo_marionette::{ClientMarionetteCommand, ClientMarionetteEvent, ClientMarionetteIpc};
 use roundo_networking::{
     CertificatePolicy, ClientGameMessage, ClientHooks, ClientNetwork, ClientNetworkConfig,
     NetworkError, ServerGameMessage,
 };
-use static_voxel::{GeneratedChunk, StaticVoxelClientCommand, StaticVoxelClientIpc};
 use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
@@ -31,7 +33,7 @@ impl ActiveClientConnection {
         server: &ServerEntry,
         marionette_ipc: ClientMarionetteIpc,
         character_ipc: ClientCharacterIpc,
-        static_voxel_ipc: StaticVoxelClientIpc,
+        local_coordinate_ipc: LocalCoordinateClientIpc,
     ) -> Result<Self, String> {
         validate_server_entry(server)?;
         let name = server.name.trim();
@@ -39,7 +41,7 @@ impl ActiveClientConnection {
         let hooks = Arc::new(ClientHooksAdapter {
             marionette_ipc: marionette_ipc.clone(),
             character_ipc: character_ipc.clone(),
-            static_voxel_ipc,
+            local_coordinate_ipc,
             status: Arc::clone(&status),
         });
         let network = Arc::new(
@@ -92,7 +94,7 @@ pub fn validate_server_entry(server: &ServerEntry) -> Result<(), String> {
 }
 
 fn network_config(server: &ServerEntry) -> Result<ClientNetworkConfig, String> {
-    let configured = &crate::config::CLIENT_CONFIG.network;
+    let configured = crate::config::network_config();
     let (game_address, server_name) = resolve_socket_address(
         &server.game_addr,
         configured.endpoint.game_port,
@@ -152,7 +154,7 @@ pub(crate) fn resolve_socket_address(
 struct ClientHooksAdapter {
     marionette_ipc: ClientMarionetteIpc,
     character_ipc: ClientCharacterIpc,
-    static_voxel_ipc: StaticVoxelClientIpc,
+    local_coordinate_ipc: LocalCoordinateClientIpc,
     status: Arc<RwLock<ClientConnectionStatus>>,
 }
 
@@ -178,24 +180,48 @@ impl ClientHooks for ClientHooksAdapter {
                     .character_ipc
                     .try_send(ClientCharacterCommand::ControlGranted { character_id });
             }
-            ServerGameMessage::StaticVoxelChunk {
+            ServerGameMessage::LocalCoordinateSpawned {
+                local_coordinate_id,
+            } => {
+                let _ = self
+                    .local_coordinate_ipc
+                    .try_send(LocalCoordinateClientCommand::Spawn(local_coordinate_id));
+            }
+            ServerGameMessage::LocalCoordinateDespawned {
+                local_coordinate_id,
+            } => {
+                let _ = self
+                    .local_coordinate_ipc
+                    .try_send(LocalCoordinateClientCommand::Despawn(local_coordinate_id));
+            }
+            ServerGameMessage::LocalCoordinateChunk {
+                local_coordinate_id,
                 coordinate,
                 edge_length,
                 voxels,
             } => {
-                if usize::from(edge_length) != static_voxel::CHUNK_EDGE_LENGTH {
+                if usize::from(edge_length) != CHUNK_EDGE_LENGTH {
                     return;
                 }
                 if let Some(chunk) = GeneratedChunk::from_voxels(coordinate, voxels) {
-                    let _ = self
-                        .static_voxel_ipc
-                        .try_send(StaticVoxelClientCommand::LoadChunk(chunk));
+                    let _ = self.local_coordinate_ipc.try_send(
+                        LocalCoordinateClientCommand::LoadChunk {
+                            local_coordinate_id,
+                            chunk,
+                        },
+                    );
                 }
             }
-            ServerGameMessage::StaticVoxelChunkUnloaded { coordinate } => {
-                let _ = self
-                    .static_voxel_ipc
-                    .try_send(StaticVoxelClientCommand::UnloadChunk(coordinate));
+            ServerGameMessage::LocalCoordinateChunkUnloaded {
+                local_coordinate_id,
+                coordinate,
+            } => {
+                let _ =
+                    self.local_coordinate_ipc
+                        .try_send(LocalCoordinateClientCommand::UnloadChunk {
+                            local_coordinate_id,
+                            coordinate,
+                        });
             }
             ServerGameMessage::ControllerGranted { controller } => {
                 let _ = self

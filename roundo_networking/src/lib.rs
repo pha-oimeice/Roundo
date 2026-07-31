@@ -18,8 +18,8 @@ mod error;
 
 pub use error::ProtocolError;
 pub use protocol::{
-    CharacterId, CharacterSnapshot, ClientGameMessage, ConnectionId, ServerGameMessage, SessionId,
-    UserId, UserSession,
+    CharacterId, CharacterSnapshot, ClientGameMessage, ConnectionId, LocalCoordinateId,
+    ServerGameMessage, SessionId, UserId, UserSession,
 };
 pub use service::{
     CertificatePolicy, ClientHooks, ClientNetwork, ClientNetworkConfig, HookFuture, NetworkError,

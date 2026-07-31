@@ -129,8 +129,9 @@ impl ServerProbeManager {
         self.generation = self.generation.wrapping_add(1);
         self.statuses = vec![ServerReachability::checking(); servers.len()];
         let generation = self.generation;
-        let game_port = crate::config::CLIENT_CONFIG.network.endpoint.game_port;
-        let https_port = crate::config::CLIENT_CONFIG.network.endpoint.https_port;
+        let network = crate::config::network_config();
+        let game_port = network.endpoint.game_port;
+        let https_port = network.endpoint.https_port;
 
         for (index, server) in servers.iter().cloned().enumerate() {
             let sender = self.sender.clone();

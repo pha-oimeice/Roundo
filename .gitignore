@@ -15,6 +15,17 @@ Cargo.lock
 *.md
 asset
 assets
+!roundo_client/assets/
+roundo_client/assets/*
+!roundo_client/assets/fonts/
+roundo_client/assets/fonts/*
+!roundo_client/assets/fonts/NotoSans-Regular.ttf
+!roundo_client/assets/fonts/NotoSans-SemiBold.ttf
+!roundo_client/assets/fonts/NotoSansSymbols2-Regular.ttf
+!roundo_client/assets/licenses/
+roundo_client/assets/licenses/*
+!roundo_client/assets/licenses/OFL-NotoSans.txt
+!roundo_client/assets/licenses/OFL-NotoSansSymbols2.txt
 *.lock
 *.pem
 .sqlx

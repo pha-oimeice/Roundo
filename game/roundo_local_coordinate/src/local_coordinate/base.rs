@@ -1,25 +1,31 @@
 use crate::local_coordinate::data::{
     LocalCoordinate, LocalCoordinateCRUDMessage, LocalCoordinateCRUDMessageEnum,
 };
+use crate::local_coordinate::virtual_chunk::{VirtualChunkIndex, rebuild_virtual_chunk_index};
 use bevy::prelude::{
-    App, Commands, FixedUpdate, MessageReader, Plugin, Query, ResMut, Resource, Update,
+    App, Commands, FixedUpdate, IntoScheduleConfigs, MessageReader, Plugin, Query, Update,
 };
+use bevy::transform::TransformPlugin;
 
 /// Loads shared voxel mutation and triangle-cache systems.
 pub struct LocalCoordinateBasePlugin;
 
+const MAX_CHUNK_TRIANGULATIONS_PER_COORDINATE_PER_FRAME: usize = 8;
+
 impl Plugin for LocalCoordinateBasePlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<GeometryRevisionCounter>()
+        if !app.is_plugin_added::<TransformPlugin>() {
+            app.add_plugins(TransformPlugin);
+        }
+        app.init_resource::<VirtualChunkIndex>()
             .add_message::<LocalCoordinateCRUDMessage>()
             .add_systems(FixedUpdate, apply_crud_messages)
+            .add_systems(
+                FixedUpdate,
+                rebuild_virtual_chunk_index.after(apply_crud_messages),
+            )
             .add_systems(Update, rebuild_dirty_chunk_triangles);
     }
-}
-
-#[derive(Resource, Default)]
-pub struct GeometryRevisionCounter {
-    value: u64,
 }
 
 fn apply_crud_messages(
@@ -47,14 +53,9 @@ fn apply_crud_messages(
     }
 }
 
-pub(crate) fn rebuild_dirty_chunk_triangles(
-    mut local_coordinates: Query<&mut LocalCoordinate>,
-    mut revision_counter: ResMut<GeometryRevisionCounter>,
-) {
+pub(crate) fn rebuild_dirty_chunk_triangles(mut local_coordinates: Query<&mut LocalCoordinate>) {
     for mut local_coordinate in &mut local_coordinates {
-        if local_coordinate.rebuild_dirty_chunks() {
-            revision_counter.value = revision_counter.value.wrapping_add(1);
-            local_coordinate.geometry_revision = revision_counter.value;
-        }
+        local_coordinate
+            .rebuild_dirty_chunks_with_limit(MAX_CHUNK_TRIANGULATIONS_PER_COORDINATE_PER_FRAME);
     }
 }

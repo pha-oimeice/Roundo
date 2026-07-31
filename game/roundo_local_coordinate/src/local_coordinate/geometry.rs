@@ -1,14 +1,32 @@
 use crate::local_coordinate::data::{AtomicVoxel, CHUNK_EDGE_LENGTH, LocalCoordinate};
-use bevy::prelude::IVec3;
+use bevy::prelude::{IVec3, Vec3};
+
+const CHUNK_NEIGHBOR_OFFSETS: [IVec3; 6] = [
+    IVec3::X,
+    IVec3::NEG_X,
+    IVec3::Y,
+    IVec3::NEG_Y,
+    IVec3::Z,
+    IVec3::NEG_Z,
+];
 
 impl LocalCoordinate {
     /// Applies a voxel delta and marks only the changed chunk and touched boundaries dirty.
     pub fn apply_voxel(&mut self, voxel: AtomicVoxel) -> bool {
+        let changed = self.apply_voxel_without_center_of_mass(voxel);
+        if changed {
+            self.rebuild_center_of_mass();
+        }
+        changed
+    }
+
+    fn apply_voxel_without_center_of_mass(&mut self, voxel: AtomicVoxel) -> bool {
         let (chunk_position, local_position) = split_position(voxel.position);
         let changed = if voxel.data.is_solid() {
+            self.mark_chunk_loaded(chunk_position);
             self.chunks
-                .entry(chunk_position)
-                .or_default()
+                .get_mut(&chunk_position)
+                .expect("loaded chunk must exist")
                 .set_voxel(local_position, voxel.data)
         } else {
             let Some(chunk) = self.chunks.get_mut(&chunk_position) else {
@@ -27,14 +45,6 @@ impl LocalCoordinate {
             self.voxel_colors.remove(&voxel.position);
         }
 
-        if self
-            .chunks
-            .get(&chunk_position)
-            .is_some_and(|chunk| chunk.is_empty())
-        {
-            self.chunks.remove(&chunk_position);
-        }
-
         self.mark_dirty(chunk_position, local_position);
         true
     }
@@ -44,72 +54,141 @@ impl LocalCoordinate {
         let mut changed = false;
 
         for voxel in voxels {
-            changed |= self.apply_voxel(voxel);
+            changed |= self.apply_voxel_without_center_of_mass(voxel);
+        }
+        if changed {
+            self.rebuild_center_of_mass();
         }
 
         changed
     }
 
-    /// Builds a coordinate from an authoritative voxel list.
+    /// Builds a complete finite coordinate and treats its outer chunk shell as loaded air.
     pub fn from_voxels(voxels: impl IntoIterator<Item = AtomicVoxel>) -> Self {
         let mut local_coordinate = Self::default();
         local_coordinate.apply_voxels(voxels);
+        let loaded_chunks = local_coordinate.chunks.keys().copied().collect::<Vec<_>>();
+        for chunk_position in loaded_chunks {
+            for offset in CHUNK_NEIGHBOR_OFFSETS {
+                local_coordinate.mark_chunk_loaded(chunk_position + offset);
+            }
+        }
         local_coordinate
     }
 
-    pub(crate) fn rebuild_dirty_chunks(&mut self) -> bool {
-        if self.dirty_chunks.is_empty() {
+    /// Marks one chunk's primitive data as loaded, even when the chunk is empty.
+    pub fn mark_chunk_loaded(&mut self, chunk_position: IVec3) -> bool {
+        if self.chunks.contains_key(&chunk_position) {
             return false;
         }
 
-        let mut dirty_positions = std::mem::take(&mut self.dirty_chunks)
-            .into_iter()
-            .collect::<Vec<_>>();
-        dirty_positions.sort_by_key(|position| (position.x, position.y, position.z));
+        self.chunks.insert(chunk_position, Default::default());
+        self.mark_chunk_and_neighbors_dirty(chunk_position);
+        true
+    }
 
-        let occupied_positions = self.occupied_positions();
+    /// Removes one complete chunk from this local coordinate.
+    pub fn remove_chunk(&mut self, chunk_position: IVec3) -> bool {
+        if self.chunks.remove(&chunk_position).is_none() {
+            return false;
+        }
+
+        self.voxel_colors
+            .retain(|position, _| split_position(*position).0 != chunk_position);
+        self.mark_chunk_and_neighbors_dirty(chunk_position);
+        self.rebuild_center_of_mass();
+        true
+    }
+
+    pub(crate) fn rebuild_dirty_chunks(&mut self) -> bool {
+        self.rebuild_dirty_chunks_with_limit(usize::MAX) > 0
+    }
+
+    pub(crate) fn rebuild_dirty_chunks_with_limit(&mut self, limit: usize) -> usize {
+        if self.dirty_chunks.is_empty() || limit == 0 {
+            return 0;
+        }
+
+        let mut dirty_positions = self.dirty_chunks.iter().copied().collect::<Vec<_>>();
+        dirty_positions.sort_by_key(|position| (position.x, position.y, position.z));
+        dirty_positions.truncate(limit);
+        for position in &dirty_positions {
+            self.dirty_chunks.remove(position);
+        }
+        if dirty_positions.is_empty() {
+            return 0;
+        }
+        let processed_count = dirty_positions.len();
+
+        let next_revision = self.geometry_revision.wrapping_add(1);
+        let complete_chunks = dirty_positions
+            .iter()
+            .copied()
+            .filter(|position| self.chunk_has_complete_neighborhood(*position))
+            .collect::<std::collections::HashSet<_>>();
         let (chunks, voxel_colors) = (&mut self.chunks, &self.voxel_colors);
 
         for chunk_position in dirty_positions {
+            if !complete_chunks.contains(&chunk_position) {
+                if let Some(chunk) = chunks.get_mut(&chunk_position) {
+                    chunk.triangles.clear();
+                    chunk.geometry_revision = next_revision;
+                }
+                continue;
+            }
+
             let Some(mut chunk) = chunks.remove(&chunk_position) else {
                 continue;
             };
             chunk.rebuild_triangles(
                 chunk_position,
-                |position| occupied_positions.contains(&position),
+                |position| {
+                    let (neighbor_chunk_position, neighbor_local_position) =
+                        split_position(position);
+                    chunks
+                        .get(&neighbor_chunk_position)
+                        .is_some_and(|neighbor| neighbor.is_solid(neighbor_local_position))
+                },
                 |position| voxel_colors.get(&position).copied().unwrap_or([1.0; 4]),
             );
+            chunk.geometry_revision = next_revision;
             chunks.insert(chunk_position, chunk);
         }
 
-        self.triangles.clear();
-        let mut chunk_positions = self.chunks.keys().copied().collect::<Vec<_>>();
-        chunk_positions.sort_by_key(|position| (position.x, position.y, position.z));
-        for chunk_position in chunk_positions {
-            self.triangles
-                .extend_from_slice(&self.chunks[&chunk_position].triangles);
-        }
-        true
+        self.geometry_revision = next_revision;
+        processed_count
     }
 
-    fn occupied_positions(&self) -> std::collections::HashSet<IVec3> {
-        let mut occupied_positions = std::collections::HashSet::new();
+    fn chunk_has_complete_neighborhood(&self, chunk_position: IVec3) -> bool {
+        self.chunks.contains_key(&chunk_position)
+            && CHUNK_NEIGHBOR_OFFSETS
+                .into_iter()
+                .all(|offset| self.chunks.contains_key(&(chunk_position + offset)))
+    }
+
+    fn rebuild_center_of_mass(&mut self) {
+        let chunk_volume = f64::from(CHUNK_EDGE_LENGTH).powi(3);
+        let mut weighted_center = [0.0_f64; 3];
+        let mut total_fill = 0.0_f64;
 
         for (chunk_position, chunk) in &self.chunks {
-            let chunk_origin = *chunk_position * CHUNK_EDGE_LENGTH;
-            for z in 0..CHUNK_EDGE_LENGTH {
-                for y in 0..CHUNK_EDGE_LENGTH {
-                    for x in 0..CHUNK_EDGE_LENGTH {
-                        let local_position = IVec3::new(x, y, z);
-                        if chunk.is_solid(local_position) {
-                            occupied_positions.insert(chunk_origin + local_position);
-                        }
-                    }
-                }
-            }
+            let fill = chunk.solid_count as f64 / chunk_volume;
+            let center = (chunk_position.as_dvec3() + 0.5) * f64::from(CHUNK_EDGE_LENGTH);
+            weighted_center[0] += center.x * fill;
+            weighted_center[1] += center.y * fill;
+            weighted_center[2] += center.z * fill;
+            total_fill += fill;
         }
 
-        occupied_positions
+        self.center_of_mass = if total_fill > 0.0 {
+            Vec3::new(
+                (weighted_center[0] / total_fill) as f32,
+                (weighted_center[1] / total_fill) as f32,
+                (weighted_center[2] / total_fill) as f32,
+            )
+        } else {
+            Vec3::ZERO
+        };
     }
 
     fn assign_color(&mut self, voxel_position: IVec3) {
@@ -149,8 +228,19 @@ impl LocalCoordinate {
         }
     }
 
+    fn mark_chunk_and_neighbors_dirty(&mut self, chunk_position: IVec3) {
+        self.dirty_chunks.insert(chunk_position);
+        for offset in CHUNK_NEIGHBOR_OFFSETS {
+            self.mark_existing_chunk_dirty(chunk_position + offset);
+        }
+    }
+
     fn mark_existing_chunk_dirty(&mut self, chunk_position: IVec3) {
-        if self.chunks.contains_key(&chunk_position) {
+        if self
+            .chunks
+            .get(&chunk_position)
+            .is_some_and(|chunk| !chunk.is_empty())
+        {
             self.dirty_chunks.insert(chunk_position);
         }
     }
