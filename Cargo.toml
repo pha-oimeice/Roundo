@@ -11,7 +11,7 @@ members = [
     "game/roundo_algorithm",
     "roundo_networking",
     "game/roundo_rendering",
-    "game/roundo_character",
+    "game/roundo_presence",
 ]
 resolver = "3"
 
@@ -108,7 +108,7 @@ roundo_lifecycle = { path = "game/roundo_lifecycle" }
 roundo_marionette = { path = "game/roundo_marionette" }
 roundo_networking = {path = "roundo_networking" }
 roundo_rendering = {path = "game/roundo_rendering"}
-roundo_character = { path = "game/roundo_character" }
+roundo_presence = { path = "game/roundo_presence" }
 roundo_local_coordinate = { path = "game/roundo_local_coordinate" }
 roundo_toolbox = { path = "roundo_toolbox" }
 roundo_user_config = { path = "roundo_user_config" }

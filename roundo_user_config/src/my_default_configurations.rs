@@ -43,6 +43,9 @@ impl Default for DatabaseConfig {
 }
 impl Default for GameplayConfig {
     fn default() -> Self {
-        GameplayConfig { tick_rate: 20 }
+        GameplayConfig {
+            tick_rate: 20,
+            presence_radius: 128.0,
+        }
     }
 }

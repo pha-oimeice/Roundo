@@ -9,12 +9,16 @@ pub const DEFAULT_CAMERA_MOVE_SPEED: f32 = 5.0;
 pub const MIN_VOXEL_RAYCAST_DISTANCE: f32 = 1.0;
 pub const MAX_VOXEL_RAYCAST_DISTANCE: f32 = 16.0;
 pub const DEFAULT_VOXEL_RAYCAST_DISTANCE: f32 = 8.0;
+pub const MIN_JOINABLE_WORLD_RADIUS: f32 = 0.5;
+pub const MAX_JOINABLE_WORLD_RADIUS: f32 = 32.0;
+pub const DEFAULT_JOINABLE_WORLD_RADIUS: f32 = 4.0;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ClientSettingsConfig {
     pub controls: ClientControlSettingsConfig,
     pub camera: ClientCameraSettingsConfig,
+    pub world: ClientWorldSettingsConfig,
     pub key_bindings: Vec<ClientKeyBindingConfig>,
 }
 
@@ -38,6 +42,12 @@ impl ClientSettingsConfig {
             MIN_VOXEL_RAYCAST_DISTANCE,
             MAX_VOXEL_RAYCAST_DISTANCE,
         );
+        self.world.joinable_world_radius = finite_clamped(
+            self.world.joinable_world_radius,
+            DEFAULT_JOINABLE_WORLD_RADIUS,
+            MIN_JOINABLE_WORLD_RADIUS,
+            MAX_JOINABLE_WORLD_RADIUS,
+        );
     }
 }
 
@@ -46,6 +56,7 @@ impl Default for ClientSettingsConfig {
         Self {
             controls: ClientControlSettingsConfig::default(),
             camera: ClientCameraSettingsConfig::default(),
+            world: ClientWorldSettingsConfig::default(),
             key_bindings: vec![
                 ClientKeyBindingConfig::new(ClientKeyCode::Space, ClientMovementAction::MoveUp),
                 ClientKeyBindingConfig::new(
@@ -60,6 +71,20 @@ impl Default for ClientSettingsConfig {
                     ClientMovementAction::MoveBackward,
                 ),
             ],
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ClientWorldSettingsConfig {
+    pub joinable_world_radius: f32,
+}
+
+impl Default for ClientWorldSettingsConfig {
+    fn default() -> Self {
+        Self {
+            joinable_world_radius: DEFAULT_JOINABLE_WORLD_RADIUS,
         }
     }
 }
@@ -195,6 +220,7 @@ mod tests {
         settings.controls.mouse_sensitivity = f32::NAN;
         settings.camera.move_speed = -10.0;
         settings.camera.voxel_raycast_distance = 100.0;
+        settings.world.joinable_world_radius = f32::INFINITY;
 
         settings.normalize();
 
@@ -206,6 +232,10 @@ mod tests {
         assert_eq!(
             settings.camera.voxel_raycast_distance,
             MAX_VOXEL_RAYCAST_DISTANCE
+        );
+        assert_eq!(
+            settings.world.joinable_world_radius,
+            DEFAULT_JOINABLE_WORLD_RADIUS
         );
     }
 }

@@ -6,7 +6,8 @@ use roundo_networking::frame::{self, MAX_FRAME_SIZE};
 use roundo_networking::protocol::{
     AuthenticationInfo, CharacterId, ClientGameMessage, ClientMessage, ConnectionToken,
     ControllerAccessPolicy, ControllerCameraState, ControllerDescriptor, ControllerId,
-    ControllerInput, ControllerKind, ControllerScope, LocomotionInput, ProtocolErrorCode,
+    ControllerInput, ControllerKind, ControllerScope, JoinableWorldId, LocomotionInput,
+    NearbyJoinableWorld, NearbyPlayer, PlayerId, PresenceSnapshot, ProtocolErrorCode,
     ServerGameMessage, ServerMessage, SessionId, UserId, UserSession, ViewInput,
 };
 use roundo_networking::session::{ClientSession, ServerSession, SessionState};
@@ -258,6 +259,9 @@ fn client_messages() -> Vec<ClientMessage> {
         ClientMessage::Game(ClientGameMessage::RequestController {
             controller_id: ControllerId(1),
         }),
+        ClientMessage::Game(ClientGameMessage::UpdatePlayerPosition {
+            translation: [8.0, 4.0, -2.0],
+        }),
         ClientMessage::Game(ClientGameMessage::ReleaseController {
             controller_id: ControllerId(2),
         }),
@@ -306,6 +310,20 @@ fn server_messages() -> Vec<ServerMessage> {
         },
         ServerMessage::Game(ServerGameMessage::ControllerGranted {
             controller: descriptor,
+        }),
+        ServerMessage::Game(ServerGameMessage::PresenceSnapshot {
+            snapshot: PresenceSnapshot {
+                own_player_id: PlayerId(16),
+                players: vec![NearbyPlayer {
+                    player_id: PlayerId(17),
+                    translation: [1.0, 2.0, 3.0],
+                }],
+                joinable_worlds: vec![NearbyJoinableWorld {
+                    world_id: JoinableWorldId(1),
+                    name: "Arda".to_string(),
+                    translation: [0.0, 0.0, 0.0],
+                }],
+            },
         }),
         ServerMessage::Game(ServerGameMessage::ControllerRevoked {
             controller_id: ControllerId(14),

@@ -99,6 +99,8 @@ impl ServerHooks for TestServerHooks {
         let _ = self.connected_sender.send((connection_id, user_session));
     }
 
+    fn on_session_disconnected(&self, _: ConnectionId, _: UserSession) {}
+
     fn on_client_game_message(
         &self,
         connection_id: ConnectionId,

@@ -25,12 +25,12 @@ use bevy::{
     ui::{InteractionDisabled, RelativeCursorPosition},
     window::{CursorGrabMode, CursorOptions, PrimaryWindow},
 };
-use roundo_character::ClientCharacterIpc;
 use roundo_local_coordinate::LocalCoordinateClientIpc;
 use roundo_marionette::{
     ClientKeyBindings, ClientMarionetteInputSettings, ClientMarionetteIpc, ClientPlayerController,
     ClientPlayerControllerTarget, ControllerCamera, MovementAction,
 };
+use roundo_presence::{ClientPresenceIpc, ClientPresenceSettings};
 use s0_main_menu::IntroLogo;
 use s1_server_selection::{
     GameAddressInput, HttpsAddressInput, ServerListEntry, ServerListScrollArea, ServerNameInput,
@@ -44,19 +44,19 @@ const STARTUP_INTRO_DURATION: f32 = 2.4;
 
 pub struct RoundoClientUiPlugin {
     marionette_ipc: ClientMarionetteIpc,
-    character_ipc: ClientCharacterIpc,
+    presence_ipc: ClientPresenceIpc,
     local_coordinate_ipc: LocalCoordinateClientIpc,
 }
 
 impl RoundoClientUiPlugin {
     pub fn new(
         marionette_ipc: ClientMarionetteIpc,
-        character_ipc: ClientCharacterIpc,
+        presence_ipc: ClientPresenceIpc,
         local_coordinate_ipc: LocalCoordinateClientIpc,
     ) -> Self {
         Self {
             marionette_ipc,
-            character_ipc,
+            presence_ipc,
             local_coordinate_ipc,
         }
     }
@@ -66,7 +66,7 @@ impl Plugin for RoundoClientUiPlugin {
     fn build(&self, app: &mut App) {
         app.insert_resource(ClientNetworkManager {
             marionette_ipc: self.marionette_ipc.clone(),
-            character_ipc: self.character_ipc.clone(),
+            presence_ipc: self.presence_ipc.clone(),
             local_coordinate_ipc: self.local_coordinate_ipc.clone(),
             active: None,
         })
@@ -112,7 +112,7 @@ impl Plugin for RoundoClientUiPlugin {
 #[derive(Resource)]
 struct ClientNetworkManager {
     marionette_ipc: ClientMarionetteIpc,
-    character_ipc: ClientCharacterIpc,
+    presence_ipc: ClientPresenceIpc,
     local_coordinate_ipc: LocalCoordinateClientIpc,
     active: Option<ActiveClientConnection>,
 }
@@ -123,7 +123,7 @@ impl ClientNetworkManager {
         self.active = Some(ActiveClientConnection::start(
             server,
             self.marionette_ipc.clone(),
-            self.character_ipc.clone(),
+            self.presence_ipc.clone(),
             self.local_coordinate_ipc.clone(),
         )?);
         Ok(())
@@ -720,14 +720,22 @@ fn rebuild_ui(
 fn persist_client_settings(
     settings: Res<ClientMarionetteInputSettings>,
     raycast: Res<ClientVoxelRaycastSettings>,
+    presence: Res<ClientPresenceSettings>,
     bindings: Res<ClientKeyBindings>,
     mut initialized: Local<bool>,
 ) {
-    if *initialized && !settings.is_changed() && !raycast.is_changed() && !bindings.is_changed() {
+    if *initialized
+        && !settings.is_changed()
+        && !raycast.is_changed()
+        && !presence.is_changed()
+        && !bindings.is_changed()
+    {
         return;
     }
     *initialized = true;
-    if let Err(error) = config::save_settings(&settings, raycast.max_distance(), &bindings) {
+    if let Err(error) =
+        config::save_settings(&settings, raycast.max_distance(), &presence, &bindings)
+    {
         log::error!("Failed to persist client settings: {error}");
     }
 }

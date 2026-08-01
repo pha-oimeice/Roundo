@@ -1,5 +1,4 @@
 use crate::config::ServerEntry;
-use roundo_character::{ClientCharacterCommand, ClientCharacterEvent, ClientCharacterIpc};
 use roundo_local_coordinate::{
     CHUNK_EDGE_LENGTH, GeneratedChunk, LocalCoordinateClientCommand, LocalCoordinateClientIpc,
 };
@@ -8,6 +7,7 @@ use roundo_networking::{
     CertificatePolicy, ClientGameMessage, ClientHooks, ClientNetwork, ClientNetworkConfig,
     NetworkError, ServerGameMessage,
 };
+use roundo_presence::{ClientPresenceCommand, ClientPresenceEvent, ClientPresenceIpc};
 use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
@@ -32,7 +32,7 @@ impl ActiveClientConnection {
     pub fn start(
         server: &ServerEntry,
         marionette_ipc: ClientMarionetteIpc,
-        character_ipc: ClientCharacterIpc,
+        presence_ipc: ClientPresenceIpc,
         local_coordinate_ipc: LocalCoordinateClientIpc,
     ) -> Result<Self, String> {
         validate_server_entry(server)?;
@@ -40,7 +40,7 @@ impl ActiveClientConnection {
         let status = Arc::new(RwLock::new(ClientConnectionStatus::Connecting));
         let hooks = Arc::new(ClientHooksAdapter {
             marionette_ipc: marionette_ipc.clone(),
-            character_ipc: character_ipc.clone(),
+            presence_ipc: presence_ipc.clone(),
             local_coordinate_ipc,
             status: Arc::clone(&status),
         });
@@ -52,7 +52,7 @@ impl ActiveClientConnection {
         let bridge_network = Arc::clone(&network);
         let thread_stop = Arc::clone(&bridge_stop);
         std::thread::spawn(move || {
-            bridge_ecs_events(marionette_ipc, character_ipc, bridge_network, thread_stop)
+            bridge_ecs_events(marionette_ipc, presence_ipc, bridge_network, thread_stop)
         });
 
         Ok(Self {
@@ -153,7 +153,7 @@ pub(crate) fn resolve_socket_address(
 
 struct ClientHooksAdapter {
     marionette_ipc: ClientMarionetteIpc,
-    character_ipc: ClientCharacterIpc,
+    presence_ipc: ClientPresenceIpc,
     local_coordinate_ipc: LocalCoordinateClientIpc,
     status: Arc<RwLock<ClientConnectionStatus>>,
 }
@@ -170,15 +170,10 @@ impl ClientHooksAdapter {
 impl ClientHooks for ClientHooksAdapter {
     fn on_server_game_message(&self, message: ServerGameMessage) {
         match message {
-            ServerGameMessage::CharacterSnapshot { snapshot } => {
+            ServerGameMessage::PresenceSnapshot { snapshot } => {
                 let _ = self
-                    .character_ipc
-                    .try_send(ClientCharacterCommand::Snapshot(snapshot));
-            }
-            ServerGameMessage::CharacterControlGranted { character_id } => {
-                let _ = self
-                    .character_ipc
-                    .try_send(ClientCharacterCommand::ControlGranted { character_id });
+                    .presence_ipc
+                    .try_send(ClientPresenceCommand::Snapshot(snapshot));
             }
             ServerGameMessage::LocalCoordinateSpawned {
                 local_coordinate_id,
@@ -253,6 +248,7 @@ impl ClientHooks for ClientHooksAdapter {
 
     fn on_connection_lost(&self) {
         self.set_status(ClientConnectionStatus::Reconnecting);
+        let _ = self.presence_ipc.try_send(ClientPresenceCommand::Clear);
     }
 
     fn on_connection_error(&self, error: &NetworkError) {
@@ -262,7 +258,7 @@ impl ClientHooks for ClientHooksAdapter {
 
 fn bridge_ecs_events(
     marionette_ipc: ClientMarionetteIpc,
-    character_ipc: ClientCharacterIpc,
+    presence_ipc: ClientPresenceIpc,
     network: Arc<ClientNetwork>,
     stop: Arc<AtomicBool>,
 ) {
@@ -290,11 +286,11 @@ fn bridge_ecs_events(
             }
         }
 
-        while let Some(event) = character_ipc.try_receive() {
+        while let Some(event) = presence_ipc.try_receive() {
             handled_event = true;
-            let ClientCharacterEvent::RequestControl { character_id } = event;
+            let ClientPresenceEvent::PositionChanged { translation } = event;
             if network
-                .send(ClientGameMessage::RequestCharacterControl { character_id })
+                .send(ClientGameMessage::UpdatePlayerPosition { translation })
                 .is_err()
             {
                 return;

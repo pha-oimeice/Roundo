@@ -5,11 +5,11 @@ mod server;
 
 #[cfg(feature = "client")]
 pub use client::{
-    client_character_ipc, client_local_coordinate_ipc, client_marionette_ipc,
-    create_ecs_client_app, run_ecs_client,
+    client_local_coordinate_ipc, client_marionette_ipc, client_presence_ipc, create_ecs_client_app,
+    run_ecs_client,
 };
 #[cfg(feature = "server")]
 pub use server::{
-    configure_server_tick_rate, run_ecs_server, server_character_ipc, server_local_coordinate_ipc,
-    server_marionette_ipc,
+    configure_server_presence_radius, configure_server_tick_rate, run_ecs_server,
+    server_local_coordinate_ipc, server_marionette_ipc, server_presence_ipc,
 };

@@ -54,4 +54,5 @@ pub struct DatabaseConfig {
 #[serde(default)]
 pub struct GameplayConfig {
     pub tick_rate: u32,
+    pub presence_radius: f32,
 }

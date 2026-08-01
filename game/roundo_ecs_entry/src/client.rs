@@ -2,23 +2,23 @@ use bevy::{
     DefaultPlugins,
     app::{App, PostStartup},
     prelude::{
-        Camera, Entity, IVec2, MeshPickingPlugin, PluginGroup, PreUpdate, Query, Res, ResMut,
-        Window, WindowPlugin, WindowPosition, With, Without, default,
+        Camera, Entity, IVec2, PluginGroup, PreUpdate, Query, Res, ResMut, Window, WindowPlugin,
+        WindowPosition, With, Without, default,
     },
     window::WindowMode,
 };
-use roundo_character::{ClientCharacterIpc, RoundoCharacterClientPlugin};
 use roundo_local_coordinate::{LocalCoordinateClientIpc, LocalCoordinateClientPlugin};
 use roundo_marionette::{
     ClientMarionetteIpc, ClientPlayerController, ControllerCamera, MarionetteClientPlugin,
 };
+use roundo_presence::{ClientPresenceIpc, RoundoPresenceClientPlugin};
 use roundo_rendering::{DebugCamera, RoundoRenderingPlugin};
 use std::sync::LazyLock;
 
 static MARIONETTE_PLUGIN: LazyLock<MarionetteClientPlugin> =
     LazyLock::new(MarionetteClientPlugin::new);
-static CHARACTER_PLUGIN: LazyLock<RoundoCharacterClientPlugin> =
-    LazyLock::new(RoundoCharacterClientPlugin::new);
+static PRESENCE_PLUGIN: LazyLock<RoundoPresenceClientPlugin> =
+    LazyLock::new(RoundoPresenceClientPlugin::new);
 static LOCAL_COORDINATE_PLUGIN: LazyLock<LocalCoordinateClientPlugin> =
     LazyLock::new(LocalCoordinateClientPlugin::new);
 
@@ -26,8 +26,8 @@ pub fn client_marionette_ipc() -> ClientMarionetteIpc {
     MARIONETTE_PLUGIN.ipc()
 }
 
-pub fn client_character_ipc() -> ClientCharacterIpc {
-    CHARACTER_PLUGIN.ipc()
+pub fn client_presence_ipc() -> ClientPresenceIpc {
+    PRESENCE_PLUGIN.ipc()
 }
 
 pub fn client_local_coordinate_ipc() -> LocalCoordinateClientIpc {
@@ -46,8 +46,7 @@ pub fn create_ecs_client_app() -> App {
             }),
             ..default()
         }),
-        MeshPickingPlugin,
-        (*CHARACTER_PLUGIN).clone(),
+        (*PRESENCE_PLUGIN).clone(),
         (*LOCAL_COORDINATE_PLUGIN).clone(),
         (*MARIONETTE_PLUGIN).clone(),
         RoundoRenderingPlugin,

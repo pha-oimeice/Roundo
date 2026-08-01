@@ -1,7 +1,7 @@
 use crate::ui::RoundoClientUiPlugin;
 use log::debug;
 use roundo_ecs_entry::{
-    client_character_ipc, client_local_coordinate_ipc, client_marionette_ipc, create_ecs_client_app,
+    client_local_coordinate_ipc, client_marionette_ipc, client_presence_ipc, create_ecs_client_app,
 };
 
 mod config;
@@ -16,6 +16,7 @@ fn main() {
     let mut app = create_ecs_client_app();
     app.insert_resource(config::runtime_input_settings(&settings))
         .insert_resource(config::runtime_key_bindings(&settings))
+        .insert_resource(config::runtime_presence_settings(&settings))
         .insert_resource(targeting::ClientVoxelRaycastSettings::new(
             settings.camera.voxel_raycast_distance,
         ))
@@ -23,7 +24,7 @@ fn main() {
             targeting::ClientVoxelTargetingPlugin,
             RoundoClientUiPlugin::new(
                 client_marionette_ipc(),
-                client_character_ipc(),
+                client_presence_ipc(),
                 client_local_coordinate_ipc(),
             ),
         ));

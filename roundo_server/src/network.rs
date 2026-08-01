@@ -1,5 +1,4 @@
 use log::{debug, warn};
-use roundo_character::{CharacterServerCommand, CharacterServerEvent, CharacterServerIpc};
 use roundo_local_coordinate::{
     CHUNK_EDGE_LENGTH, LocalCoordinateServerCommand, LocalCoordinateServerEvent,
     LocalCoordinateServerIpc,
@@ -9,13 +8,14 @@ use roundo_networking::{
     ClientGameMessage, ConnectionId, HookFuture, PublicSession, ServerHooks, ServerNetwork,
     ServerNetworkConfig, SessionId, UserSession,
 };
+use roundo_presence::{PresenceServerCommand, PresenceServerEvent, PresenceServerIpc};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
 pub fn start_server(
     marionette_ipc: ServerMarionetteIpc,
-    character_ipc: CharacterServerIpc,
+    presence_ipc: PresenceServerIpc,
     local_coordinate_ipc: LocalCoordinateServerIpc,
 ) {
     let config = network_config();
@@ -27,7 +27,8 @@ pub fn start_server(
     );
     let hooks = Arc::new(ServerHooksAdapter {
         marionette_ipc: marionette_ipc.clone(),
-        character_ipc: character_ipc.clone(),
+        presence_ipc: presence_ipc.clone(),
+        local_coordinate_ipc: local_coordinate_ipc.clone(),
     });
     let network = ServerNetwork::start(config, hooks)
         .unwrap_or_else(|error| panic!("failed to start network server: {error}"));
@@ -38,7 +39,7 @@ pub fn start_server(
     );
 
     std::thread::spawn(move || {
-        bridge_ecs_events(marionette_ipc, character_ipc, local_coordinate_ipc, network)
+        bridge_ecs_events(marionette_ipc, presence_ipc, local_coordinate_ipc, network)
     });
 }
 
@@ -55,7 +56,8 @@ fn network_config() -> ServerNetworkConfig {
 
 struct ServerHooksAdapter {
     marionette_ipc: ServerMarionetteIpc,
-    character_ipc: CharacterServerIpc,
+    presence_ipc: PresenceServerIpc,
+    local_coordinate_ipc: LocalCoordinateServerIpc,
 }
 
 impl ServerHooks for ServerHooksAdapter {
@@ -117,6 +119,30 @@ impl ServerHooks for ServerHooksAdapter {
         {
             warn!("Failed to forward session connection to ECS");
         }
+        if self
+            .presence_ipc
+            .try_send(PresenceServerCommand::Connect { connection_id })
+            .is_err()
+        {
+            warn!("Failed to create player presence for connection");
+        }
+    }
+
+    fn on_session_disconnected(&self, connection_id: ConnectionId, _: UserSession) {
+        if self
+            .presence_ipc
+            .try_send(PresenceServerCommand::Disconnect { connection_id })
+            .is_err()
+        {
+            warn!("Failed to remove player presence for connection");
+        }
+        if self
+            .local_coordinate_ipc
+            .try_send(LocalCoordinateServerCommand::UnsubscribePlayer { connection_id })
+            .is_err()
+        {
+            warn!("Failed to remove player voxel subscription for connection");
+        }
     }
 
     fn on_client_game_message(
@@ -126,17 +152,16 @@ impl ServerHooks for ServerHooksAdapter {
         message: ClientGameMessage,
     ) {
         let command = match message {
-            ClientGameMessage::RequestCharacterControl { character_id } => {
+            ClientGameMessage::UpdatePlayerPosition { translation } => {
                 if self
-                    .character_ipc
-                    .try_send(CharacterServerCommand::RequestControl {
+                    .presence_ipc
+                    .try_send(PresenceServerCommand::UpdatePosition {
                         connection_id,
-                        user_session,
-                        character_id,
+                        translation,
                     })
                     .is_err()
                 {
-                    warn!("Failed to forward character control request to ECS");
+                    warn!("Failed to forward player position to ECS");
                 }
                 return;
             }
@@ -186,7 +211,7 @@ impl ServerHooks for ServerHooksAdapter {
 
 fn bridge_ecs_events(
     marionette_ipc: ServerMarionetteIpc,
-    character_ipc: CharacterServerIpc,
+    presence_ipc: PresenceServerIpc,
     local_coordinate_ipc: LocalCoordinateServerIpc,
     network: ServerNetwork,
 ) {
@@ -250,31 +275,28 @@ fn bridge_ecs_events(
             }
         }
 
-        while let Some(event) = character_ipc.try_receive() {
+        while let Some(event) = presence_ipc.try_receive() {
             handled_event = true;
             match event {
-                CharacterServerEvent::Snapshot(snapshot) => {
-                    network.send_to_all(roundo_networking::ServerGameMessage::CharacterSnapshot {
-                        snapshot,
-                    });
-                }
-                CharacterServerEvent::ControlGranted {
+                PresenceServerEvent::Snapshot {
                     connection_id,
-                    character_id,
+                    snapshot,
                 } => {
-                    if network.send_to_connection(
+                    network.send_to_connection(
                         connection_id,
-                        roundo_networking::ServerGameMessage::CharacterControlGranted {
-                            character_id,
+                        roundo_networking::ServerGameMessage::PresenceSnapshot { snapshot },
+                    );
+                }
+                PresenceServerEvent::PlayerJoined {
+                    connection_id,
+                    player_id,
+                } => {
+                    let _ = local_coordinate_ipc.try_send(
+                        LocalCoordinateServerCommand::SubscribePlayer {
+                            connection_id,
+                            player_id,
                         },
-                    ) {
-                        let _ = local_coordinate_ipc.try_send(
-                            LocalCoordinateServerCommand::SubscribeCharacter {
-                                connection_id,
-                                character_id,
-                            },
-                        );
-                    }
+                    );
                 }
             }
         }

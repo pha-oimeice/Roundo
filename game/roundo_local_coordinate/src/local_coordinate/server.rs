@@ -13,15 +13,15 @@ use bevy::prelude::{
     App, Commands, Component, FixedUpdate, GlobalTransform, IntoScheduleConfigs, Plugin, Query,
     Res, ResMut, Resource, Startup, Transform, With,
 };
-use roundo_character::{Character, CharacterId, ServerCharacter};
 use roundo_networking::ConnectionId;
+use roundo_presence::{Player, PlayerId, ServerPlayer};
 use roundo_toolbox::{
     CrossbeamThreadPipe, CrossbeamThreadPipeEndpointA, CrossbeamThreadPipeEndpointB,
 };
 use std::collections::{HashMap, HashSet};
 
 pub const DEFAULT_PCG_LOCAL_COORDINATE_ID: LocalCoordinateId = LocalCoordinateId(1);
-pub const CHARACTER_CHUNK_LOAD_RADIUS: f64 = 64.0;
+pub const PLAYER_CHUNK_LOAD_RADIUS: f64 = 64.0;
 const MAX_CHUNKS_GENERATED_PER_TICK: usize = 16;
 
 pub type LocalCoordinateServerIpc =
@@ -94,7 +94,7 @@ impl Plugin for LocalCoordinateServerPlugin {
             .add_systems(Startup, spawn_generated_local_coordinates)
             .add_systems(
                 FixedUpdate,
-                prepare_character_chunks.before(rebuild_virtual_chunk_index),
+                prepare_player_chunks.before(rebuild_virtual_chunk_index),
             )
             .add_systems(
                 FixedUpdate,
@@ -117,9 +117,12 @@ impl PcgLocalCoordinate {
 
 #[derive(Clone, Debug)]
 pub enum LocalCoordinateServerCommand {
-    SubscribeCharacter {
+    SubscribePlayer {
         connection_id: ConnectionId,
-        character_id: CharacterId,
+        player_id: PlayerId,
+    },
+    UnsubscribePlayer {
+        connection_id: ConnectionId,
     },
 }
 
@@ -148,8 +151,8 @@ pub enum LocalCoordinateServerEvent {
 #[derive(Resource, Default)]
 pub struct LocalCoordinateServerWorld {
     loaded_chunks: HashMap<LocalCoordinateId, HashMap<ChunkCoordinate, GeneratedChunk>>,
-    observation_by_character: HashMap<CharacterId, ObservationRegion>,
-    subscriptions: HashMap<ConnectionId, CharacterSubscription>,
+    observation_by_player: HashMap<PlayerId, ObservationRegion>,
+    subscriptions: HashMap<ConnectionId, PlayerSubscription>,
 }
 
 impl LocalCoordinateServerWorld {
@@ -182,8 +185,8 @@ struct LocalCoordinateServerPipe(
     CrossbeamThreadPipeEndpointB<LocalCoordinateServerCommand, LocalCoordinateServerEvent>,
 );
 
-struct CharacterSubscription {
-    character_id: CharacterId,
+struct PlayerSubscription {
+    player_id: PlayerId,
     spawned_coordinates: HashSet<LocalCoordinateId>,
     sent_chunks: HashMap<ChunkReference, StreamedChunk>,
 }
@@ -214,40 +217,46 @@ fn spawn_generated_local_coordinates(
     }
 }
 
-fn prepare_character_chunks(
+fn prepare_player_chunks(
     pipe: Res<LocalCoordinateServerPipe>,
     mut world: ResMut<LocalCoordinateServerWorld>,
-    characters: Query<(&Character, &GlobalTransform), With<ServerCharacter>>,
+    players: Query<(&Player, &GlobalTransform), With<ServerPlayer>>,
     mut local_coordinates: Query<(&PcgLocalCoordinate, &GlobalTransform, &mut LocalCoordinate)>,
 ) {
     while let Some(command) = pipe.0.try_receive() {
-        let LocalCoordinateServerCommand::SubscribeCharacter {
-            connection_id,
-            character_id,
-        } = command;
-        world.subscriptions.insert(
-            connection_id,
-            CharacterSubscription {
-                character_id,
-                spawned_coordinates: HashSet::new(),
-                sent_chunks: HashMap::new(),
-            },
-        );
+        match command {
+            LocalCoordinateServerCommand::SubscribePlayer {
+                connection_id,
+                player_id,
+            } => {
+                world.subscriptions.insert(
+                    connection_id,
+                    PlayerSubscription {
+                        player_id,
+                        spawned_coordinates: HashSet::new(),
+                        sent_chunks: HashMap::new(),
+                    },
+                );
+            }
+            LocalCoordinateServerCommand::UnsubscribePlayer { connection_id } => {
+                world.subscriptions.remove(&connection_id);
+            }
+        }
     }
 
-    let subscribed_characters = world
+    let subscribed_players = world
         .subscriptions
         .values()
-        .map(|subscription| subscription.character_id)
+        .map(|subscription| subscription.player_id)
         .collect::<HashSet<_>>();
-    world.observation_by_character.clear();
-    for (character, transform) in &characters {
-        if subscribed_characters.contains(&character.id) {
-            world.observation_by_character.insert(
-                character.id,
+    world.observation_by_player.clear();
+    for (player, transform) in &players {
+        if subscribed_players.contains(&player.id) {
+            world.observation_by_player.insert(
+                player.id,
                 ObservationRegion {
                     center: transform.translation().as_dvec3().to_array(),
-                    radius: CHARACTER_CHUNK_LOAD_RADIUS,
+                    radius: PLAYER_CHUNK_LOAD_RADIUS,
                 },
             );
         }
@@ -259,7 +268,7 @@ fn prepare_character_chunks(
     for (generated, coordinate_transform, mut local_coordinate) in &mut local_coordinates {
         active_coordinates.insert(generated.id);
         let desired_chunks = world
-            .observation_by_character
+            .observation_by_player
             .values()
             .filter_map(|observation| local_observation_region(coordinate_transform, *observation))
             .flat_map(|observation| {
@@ -298,36 +307,37 @@ fn publish_subscription_changes(
     let subscription_ids = world.subscriptions.keys().copied().collect::<Vec<_>>();
 
     for connection_id in subscription_ids {
-        let (character_id, spawned_coordinates, sent_chunks) = {
+        let (player_id, spawned_coordinates, sent_chunks) = {
             let subscription = &world.subscriptions[&connection_id];
             (
-                subscription.character_id,
+                subscription.player_id,
                 subscription.spawned_coordinates.clone(),
                 subscription.sent_chunks.clone(),
             )
         };
-        let desired_chunks = world
-            .observation_by_character
-            .get(&character_id)
-            .map_or_else(HashMap::new, |observation| {
-                virtual_chunks
-                    .chunks_in_radius(
-                        observation.center[0],
-                        observation.center[1],
-                        observation.center[2],
-                        observation.radius,
-                    )
-                    .into_iter()
-                    .filter_map(|chunk_reference| {
-                        streamed_chunk(
-                            chunk_reference,
-                            &generated_coordinates,
-                            &world.loaded_chunks,
+        let desired_chunks =
+            world
+                .observation_by_player
+                .get(&player_id)
+                .map_or_else(HashMap::new, |observation| {
+                    virtual_chunks
+                        .chunks_in_radius(
+                            observation.center[0],
+                            observation.center[1],
+                            observation.center[2],
+                            observation.radius,
                         )
-                        .map(|chunk| (chunk_reference, chunk))
-                    })
-                    .collect()
-            });
+                        .into_iter()
+                        .filter_map(|chunk_reference| {
+                            streamed_chunk(
+                                chunk_reference,
+                                &generated_coordinates,
+                                &world.loaded_chunks,
+                            )
+                            .map(|chunk| (chunk_reference, chunk))
+                        })
+                        .collect()
+                });
         let desired_coordinates = desired_chunks
             .values()
             .map(|chunk| chunk.local_coordinate_id)

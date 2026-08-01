@@ -2,10 +2,11 @@
 
 use bevy::prelude::KeyCode;
 use roundo_marionette::{ClientKeyBindings, ClientMarionetteInputSettings, MovementAction};
+use roundo_presence::ClientPresenceSettings;
 use roundo_toolbox::fs::get_exe_root_path;
 use roundo_user_config::{
     ClientCameraSettingsConfig, ClientControlSettingsConfig, ClientKeyBindingConfig, ClientKeyCode,
-    ClientMovementAction, ClientNetworkConfig, ClientSettingsConfig,
+    ClientMovementAction, ClientNetworkConfig, ClientSettingsConfig, ClientWorldSettingsConfig,
 };
 use serde::{Deserialize, Serialize};
 use std::sync::{LazyLock, RwLock};
@@ -38,6 +39,7 @@ pub fn save_servers(servers: &[ServerEntry]) -> Result<(), String> {
 pub fn save_settings(
     input: &ClientMarionetteInputSettings,
     voxel_raycast_distance: f32,
+    presence: &ClientPresenceSettings,
     bindings: &ClientKeyBindings,
 ) -> Result<(), String> {
     let mut settings = ClientSettingsConfig {
@@ -47,6 +49,9 @@ pub fn save_settings(
         camera: ClientCameraSettingsConfig {
             move_speed: input.camera_move_speed,
             voxel_raycast_distance,
+        },
+        world: ClientWorldSettingsConfig {
+            joinable_world_radius: presence.joinable_world_radius(),
         },
         key_bindings: bindings
             .iter()
@@ -61,6 +66,10 @@ pub fn save_settings(
     };
     settings.normalize();
     update_config(|config| config.settings = settings)
+}
+
+pub fn runtime_presence_settings(settings: &ClientSettingsConfig) -> ClientPresenceSettings {
+    ClientPresenceSettings::new(settings.world.joinable_world_radius)
 }
 
 pub fn runtime_input_settings(settings: &ClientSettingsConfig) -> ClientMarionetteInputSettings {

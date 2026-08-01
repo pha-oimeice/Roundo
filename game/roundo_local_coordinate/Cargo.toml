@@ -8,8 +8,8 @@ avian3d.workspace = true
 bevy.workspace = true
 roundo_lifecycle.workspace = true
 roundo_algorithm.workspace = true
-roundo_character.workspace = true
 roundo_networking.workspace = true
+roundo_presence.workspace = true
 roundo_toolbox.workspace = true
 [features]
 dev = [

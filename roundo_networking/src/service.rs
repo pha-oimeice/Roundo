@@ -101,6 +101,8 @@ pub trait ServerHooks: Send + Sync + 'static {
 
     fn on_session_connected(&self, connection_id: ConnectionId, user_session: UserSession);
 
+    fn on_session_disconnected(&self, connection_id: ConnectionId, user_session: UserSession);
+
     fn on_client_game_message(
         &self,
         connection_id: ConnectionId,
@@ -448,6 +450,7 @@ async fn process_server_connection(
         hooks.on_client_game_message(connection_id, user_session, message);
     }
     registry.unregister(connection_id, user_session);
+    hooks.on_session_disconnected(connection_id, user_session);
     log::debug!(
         "game session closed: peer={peer_address}, connection_id={}",
         connection_id.0

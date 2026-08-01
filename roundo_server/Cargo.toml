@@ -12,10 +12,10 @@ anyhow.workspace = true
 dotenvy.workspace = true
 log.workspace = true
 roundo_ecs_entry = { workspace = true, features = ["server"] }
-roundo_character.workspace = true
 roundo_local_coordinate.workspace = true
 roundo_marionette.workspace = true
 roundo_networking.workspace = true
+roundo_presence.workspace = true
 roundo_toolbox.workspace = true
 roundo_user_config.workspace = true
 serde.workspace = true

@@ -3,12 +3,14 @@
 use roundo_toolbox::macros::identifier;
 use serde::{Deserialize, Serialize};
 
-pub const GAME_PROTOCOL_VERSION: u16 = 3;
+pub const GAME_PROTOCOL_VERSION: u16 = 4;
 
 identifier!(ConnectionId);
 identifier!(ControllerId);
 identifier!(CharacterId);
 identifier!(LocalCoordinateId);
+identifier!(PlayerId);
+identifier!(JoinableWorldId);
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 pub struct UserId(pub i32);
@@ -125,17 +127,29 @@ pub struct ControllerCameraState {
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Serialize)]
-pub struct CharacterSnapshot {
-    pub character_id: CharacterId,
+pub struct NearbyPlayer {
+    pub player_id: PlayerId,
     pub translation: [f32; 3],
-    pub rotation: [f32; 4],
-    pub scale: [f32; 3],
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+pub struct NearbyJoinableWorld {
+    pub world_id: JoinableWorldId,
+    pub name: String,
+    pub translation: [f32; 3],
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+pub struct PresenceSnapshot {
+    pub own_player_id: PlayerId,
+    pub players: Vec<NearbyPlayer>,
+    pub joinable_worlds: Vec<NearbyJoinableWorld>,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub enum ClientGameMessage {
-    RequestCharacterControl {
-        character_id: CharacterId,
+    UpdatePlayerPosition {
+        translation: [f32; 3],
     },
     RequestController {
         controller_id: ControllerId,
@@ -151,11 +165,8 @@ pub enum ClientGameMessage {
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub enum ServerGameMessage {
-    CharacterSnapshot {
-        snapshot: CharacterSnapshot,
-    },
-    CharacterControlGranted {
-        character_id: CharacterId,
+    PresenceSnapshot {
+        snapshot: PresenceSnapshot,
     },
     LocalCoordinateSpawned {
         local_coordinate_id: LocalCoordinateId,
