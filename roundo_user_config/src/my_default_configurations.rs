@@ -28,7 +28,7 @@ impl Default for EndpointConfig {
     fn default() -> Self {
         EndpointConfig {
             host: "127.0.0.1".to_string(),
-            game_port: 12358,
+            quic_port: 12358,
             https_port: 35813,
         }
     }

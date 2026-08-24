@@ -1,17 +1,18 @@
 [workspace]
 members = [
-    "game/roundo_marionette",
-    "game/roundo_local_coordinate",
-    "game/roundo_lifecycle",
+    "game/common/roundo_marionette",
+    "game/common/roundo_local_coordinate",
+    "game/server/roundo_lifecycle",
     "game/roundo_ecs_entry",
     "roundo_toolbox",
     "roundo_server",
     "roundo_client",
+    "roundo_cli",
     "roundo_user_config",
-    "game/roundo_algorithm",
+    "game/common/roundo_algorithm",
     "roundo_networking",
-    "game/roundo_rendering",
-    "game/roundo_presence",
+    "game/client/roundo_rendering",
+    "game/common/roundo_presence", "game/common/roundo_portal", "game/common/roundo_primitive", "roundo_client/roundo_webui", "game/common/roundo_action", "game/common/roundo_mod_loader", "roundo_proc_macros",
 ]
 resolver = "3"
 
@@ -50,7 +51,7 @@ axum-server = {
     features = ["tls-rustls"],
 }
 bevy = {
-    version = "0.19.0",
+    version = "0.19.1",
     default-features = true,
     features = [
         "bevy_dev_tools",
@@ -61,6 +62,7 @@ bevy_asset_loader = "0.27"
 bevy_enhanced_camera = "0.5"
 bevy_enhanced_input = "0.26"
 # bevy-inspector-egui = "0.37"
+# cef = {}
 cornucopia = "1"
 crossbeam = "0.8"
 dotenvy = {
@@ -75,6 +77,9 @@ postcard = {
     version = "1.1",
     features = ["use-std"],
 }
+quinn = {
+    version = "0.11"
+}
 rand = "0.10"
 rand_chacha = "0.10"
 reqwest = {
@@ -87,6 +92,8 @@ serde = {
     version = "1",
     features = ["derive"],
 }
+serde_json = "1"
+schemars = "1"
 sha2 = "0.11"
 sqlx = {
     version = "0.9",
@@ -101,14 +108,21 @@ toml = "1.1"
 toml_edit = "0.25"
 ttf-parser = "0.25"
 webpki-roots = "1"
+wry = {
+    version = "0.56"
+}
+windows = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_UI_WindowsAndMessaging"] }
+roundo_proc_macros = { path = "roundo_proc_macros" }
 # ---
-roundo_algorithm = {path = "game/roundo_algorithm" }
+roundo_algorithm = {path = "game/common/roundo_algorithm" }
+roundo_cli = { path = "roundo_cli" }
 roundo_ecs_entry = { path = "game/roundo_ecs_entry" }
-roundo_lifecycle = { path = "game/roundo_lifecycle" }
-roundo_marionette = { path = "game/roundo_marionette" }
+roundo_lifecycle = { path = "game/server/roundo_lifecycle" }
+roundo_marionette = { path = "game/common/roundo_marionette" }
 roundo_networking = {path = "roundo_networking" }
-roundo_rendering = {path = "game/roundo_rendering"}
-roundo_presence = { path = "game/roundo_presence" }
-roundo_local_coordinate = { path = "game/roundo_local_coordinate" }
+roundo_rendering = {path = "game/client/roundo_rendering" }
+roundo_presence = { path = "game/common/roundo_presence" }
+roundo_portal = { path = "game/common/roundo_portal" }
+roundo_local_coordinate = { path = "game/common/roundo_local_coordinate" }
 roundo_toolbox = { path = "roundo_toolbox" }
 roundo_user_config = { path = "roundo_user_config" }

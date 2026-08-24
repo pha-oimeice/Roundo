@@ -1,0 +1,20 @@
+
+[general]
+recipe_name = "example_recipe"
+
+[dependencies]
+forms = [
+    "example_form_0",
+    "example_form_1",
+]
+
+[[recipe]]
+workbench = "example_workbench"
+# input are forms
+# input will be consumed
+input = [
+    { form = "example_form_0", quantity = 1 },
+]
+output = [
+    { form  = "example_form_1", quantity = 1 },
+]

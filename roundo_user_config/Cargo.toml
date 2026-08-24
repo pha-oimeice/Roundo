@@ -6,3 +6,4 @@ edition.workspace = true
 [dependencies]
 roundo_toolbox.workspace = true
 serde.workspace = true
+toml.workspace = true

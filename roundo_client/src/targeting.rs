@@ -1,6 +1,11 @@
 use bevy::{prelude::*, transform::TransformSystems};
 use roundo_local_coordinate::{VoxelRaycastHit, VoxelRaycaster};
 use roundo_marionette::ClientPlayerController;
+use roundo_rendering::{
+    RenderMaterial, RenderMesh, RenderObject, RenderObjectId, RenderObjectSync, RenderObjects,
+    RenderTransform, issue_render_object, update_render_object_transform,
+    update_render_object_visibility,
+};
 use roundo_user_config::{
     DEFAULT_VOXEL_RAYCAST_DISTANCE, MAX_VOXEL_RAYCAST_DISTANCE, MIN_VOXEL_RAYCAST_DISTANCE,
 };
@@ -17,7 +22,9 @@ impl Plugin for ClientVoxelTargetingPlugin {
             .init_resource::<VoxelHighlightState>()
             .configure_sets(
                 PostUpdate,
-                ClientVoxelTargetingSet.after(TransformSystems::Propagate),
+                ClientVoxelTargetingSet
+                    .after(TransformSystems::Propagate)
+                    .before(RenderObjectSync),
             )
             .add_systems(
                 PostUpdate,
@@ -68,27 +75,21 @@ pub(crate) struct ClientVoxelTarget {
     pub(crate) hit: Option<VoxelRaycastHit>,
 }
 
-#[derive(Component)]
-struct VoxelTargetHighlight;
-
 #[derive(Resource, Default)]
 struct VoxelHighlightState {
-    entity: Option<Entity>,
-    mesh: Option<Handle<Mesh>>,
-    material: Option<Handle<StandardMaterial>>,
+    render_object_id: Option<RenderObjectId>,
 }
 
 fn update_voxel_target(
-    mut commands: Commands,
     player_controller: Res<ClientPlayerController>,
     settings: Res<ClientVoxelRaycastSettings>,
     raycaster: VoxelRaycaster,
     cameras: Query<(&Camera, &GlobalTransform), With<Camera3d>>,
     local_coordinates: Query<&GlobalTransform>,
     mut target: ResMut<ClientVoxelTarget>,
+    mut hud: ResMut<roundo_cli::HudCache>,
     mut highlight: ResMut<VoxelHighlightState>,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut render_objects: ResMut<RenderObjects>,
 ) {
     let hit = player_controller.input_enabled().then(|| {
         cameras
@@ -102,59 +103,56 @@ fn update_voxel_target(
     if target.hit != hit {
         target.hit = hit;
     }
+    hud.set_target(hit.map(|hit| {
+        let voxel = hit.voxel_position();
+        let chunk = hit.chunk.local_chunk_position();
+        serde_json::json!({
+            "voxel": format!("{:?}", hit.voxel),
+            "voxel_position": [voxel.x, voxel.y, voxel.z],
+            "relative_position": [hit.voxel_relative_position.x, hit.voxel_relative_position.y, hit.voxel_relative_position.z],
+            "chunk": [chunk.x, chunk.y, chunk.z],
+            "local_coordinate": format!("{:?}", hit.chunk.local_coordinate_entity()),
+        })
+    }));
 
     let Some(hit) = hit else {
-        if let Some(entity) = highlight.entity {
-            commands.entity(entity).insert(Visibility::Hidden);
+        if let Some(id) = highlight.render_object_id {
+            update_render_object_visibility(&mut render_objects, id, false);
         }
         return;
     };
     let Ok(local_coordinate_transform) = local_coordinates.get(hit.chunk.local_coordinate_entity())
     else {
-        if let Some(entity) = highlight.entity {
-            commands.entity(entity).insert(Visibility::Hidden);
+        if let Some(id) = highlight.render_object_id {
+            update_render_object_visibility(&mut render_objects, id, false);
         }
         return;
     };
 
-    let local_transform = Transform::from_translation(hit.voxel.position.as_vec3() + 0.5);
+    let local_transform = Transform::from_translation(hit.voxel_position().as_vec3() + 0.5);
     let world_transform = local_coordinate_transform.mul_transform(local_transform);
-    let entity = match highlight.entity {
-        Some(entity) => entity,
+    let render_object_id = match highlight.render_object_id {
+        Some(id) => id,
         None => {
-            let mesh = highlight
-                .mesh
-                .get_or_insert_with(|| {
-                    meshes.add(Cuboid::new(
-                        HIGHLIGHT_EDGE_LENGTH,
-                        HIGHLIGHT_EDGE_LENGTH,
-                        HIGHLIGHT_EDGE_LENGTH,
-                    ))
-                })
-                .clone();
-            let material = highlight
-                .material
-                .get_or_insert_with(|| {
-                    materials.add(StandardMaterial {
-                        base_color: Color::srgba(1.0, 1.0, 1.0, HIGHLIGHT_ALPHA),
-                        alpha_mode: AlphaMode::Blend,
-                        unlit: true,
-                        ..default()
-                    })
-                })
-                .clone();
-            let entity = commands
-                .spawn((VoxelTargetHighlight, Mesh3d(mesh), MeshMaterial3d(material)))
-                .id();
-            highlight.entity = Some(entity);
-            entity
+            let id = issue_render_object(
+                &mut render_objects,
+                RenderObject::new(
+                    RenderMesh::cuboid(Vec3::splat(HIGHLIGHT_EDGE_LENGTH)),
+                    RenderMaterial::unlit([1.0, 1.0, 1.0, HIGHLIGHT_ALPHA]).with_alpha_blend(),
+                    RenderTransform::from(world_transform.compute_transform()),
+                )
+                .with_name("Voxel Target Highlight"),
+            );
+            highlight.render_object_id = Some(id);
+            id
         }
     };
-    commands.entity(entity).insert((
-        world_transform.compute_transform(),
-        world_transform,
-        Visibility::Visible,
-    ));
+    update_render_object_transform(
+        &mut render_objects,
+        render_object_id,
+        RenderTransform::from(world_transform.compute_transform()),
+    );
+    update_render_object_visibility(&mut render_objects, render_object_id, true);
 }
 
 #[cfg(test)]

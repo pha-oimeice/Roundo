@@ -1,0 +1,7 @@
+[[property]]
+property_name = "example_property_0"
+reality = 2.5
+
+[[property]]
+property_name = "example_property_1"
+reality = -0.25

@@ -11,6 +11,7 @@ path = "src/main.rs"
 anyhow.workspace = true
 dotenvy.workspace = true
 log.workspace = true
+roundo_cli = { workspace = true, features = ["server"] }
 roundo_ecs_entry = { workspace = true, features = ["server"] }
 roundo_local_coordinate.workspace = true
 roundo_marionette.workspace = true
@@ -21,10 +22,9 @@ roundo_user_config.workspace = true
 serde.workspace = true
 sqlx.workspace = true
 
+[dev-dependencies]
+toml.workspace = true
+
 [features]
-dev = [
-    "roundo_marionette/dev",
-]
-release = [
-    "roundo_marionette/release",
-]
+dev = []
+release = []

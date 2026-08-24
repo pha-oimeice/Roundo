@@ -1,12 +1,12 @@
-use log::{debug, warn};
+use log::{debug, info, warn};
 use roundo_local_coordinate::{
     CHUNK_EDGE_LENGTH, LocalCoordinateServerCommand, LocalCoordinateServerEvent,
     LocalCoordinateServerIpc,
 };
-use roundo_marionette::{ServerMarionetteCommand, ServerMarionetteEvent, ServerMarionetteIpc};
+use roundo_marionette::{ServerMarionetteCommand, ServerMarionetteIpc};
 use roundo_networking::{
-    ClientGameMessage, ConnectionId, HookFuture, PublicSession, ServerHooks, ServerNetwork,
-    ServerNetworkConfig, SessionId, UserSession,
+    ClientGameMessage, ClientResourceMessage, ConnectionId, HookFuture, PublicSession, ServerHooks,
+    ServerNetwork, ServerNetworkConfig, ServerResourceMessage, SessionId, StreamId, UserSession,
 };
 use roundo_presence::{PresenceServerCommand, PresenceServerEvent, PresenceServerIpc};
 use std::path::PathBuf;
@@ -20,33 +20,38 @@ pub fn start_server(
 ) {
     let config = network_config();
     debug!(
-        "Starting network server: game={}, public={}, certificate_directory={}",
-        config.game_address,
+        "Starting network server: quic={}, public={}, certificate_directory={}",
+        config.quic_address,
         config.public_address,
         config.certificate_directory.display()
     );
     let hooks = Arc::new(ServerHooksAdapter {
-        marionette_ipc: marionette_ipc.clone(),
+        marionette_ipc,
         presence_ipc: presence_ipc.clone(),
         local_coordinate_ipc: local_coordinate_ipc.clone(),
     });
-    let network = ServerNetwork::start(config, hooks)
-        .unwrap_or_else(|error| panic!("failed to start network server: {error}"));
+    let network = Arc::new(
+        ServerNetwork::start(config, hooks)
+            .unwrap_or_else(|error| panic!("failed to start network server: {error}")),
+    );
     let addresses = network.addresses();
-    debug!(
-        "Network server is ready: game={}, public={}",
-        addresses.game_address, addresses.public_address
+    info!(
+        "Network server is ready: quic={}, public={}",
+        addresses.quic_address, addresses.public_address
     );
 
+    let game_network = Arc::clone(&network);
+    let game_local_coordinate_ipc = local_coordinate_ipc.clone();
     std::thread::spawn(move || {
-        bridge_ecs_events(marionette_ipc, presence_ipc, local_coordinate_ipc, network)
+        bridge_game_ecs_events(presence_ipc, game_local_coordinate_ipc, game_network)
     });
+    std::thread::spawn(move || bridge_resource_ecs_events(local_coordinate_ipc, network));
 }
 
 fn network_config() -> ServerNetworkConfig {
     let network = &crate::config::SERVER_CONFIG.network;
     ServerNetworkConfig {
-        game_address: network.endpoint.get_game_addr(),
+        quic_address: network.endpoint.get_quic_addr(),
         public_address: network.endpoint.get_https_addr(),
         certificate_directory: PathBuf::from(&network.certificate_path).join("certs"),
         server_alternative_names: network.server_alternative_names.clone(),
@@ -110,21 +115,14 @@ impl ServerHooks for ServerHooksAdapter {
             connection_id.0, user_session.user_id.0, user_session.session_id.0
         );
         if self
-            .marionette_ipc
-            .try_send(ServerMarionetteCommand::SessionConnected {
-                connection_id,
-                user_session,
-            })
-            .is_err()
-        {
-            warn!("Failed to forward session connection to ECS");
-        }
-        if self
             .presence_ipc
             .try_send(PresenceServerCommand::Connect { connection_id })
             .is_err()
         {
-            warn!("Failed to create player presence for connection");
+            warn!(
+                "Failed to create player presence: connection_id={}",
+                connection_id.0
+            );
         }
     }
 
@@ -134,231 +132,201 @@ impl ServerHooks for ServerHooksAdapter {
             .try_send(PresenceServerCommand::Disconnect { connection_id })
             .is_err()
         {
-            warn!("Failed to remove player presence for connection");
+            warn!(
+                "Failed to remove player presence: connection_id={}",
+                connection_id.0
+            );
         }
         if self
             .local_coordinate_ipc
             .try_send(LocalCoordinateServerCommand::UnsubscribePlayer { connection_id })
             .is_err()
         {
-            warn!("Failed to remove player voxel subscription for connection");
+            warn!(
+                "Failed to remove player voxel subscription: connection_id={}",
+                connection_id.0
+            );
         }
     }
 
     fn on_client_game_message(
         &self,
         connection_id: ConnectionId,
-        user_session: UserSession,
+        _: UserSession,
         message: ClientGameMessage,
     ) {
-        let command = match message {
-            ClientGameMessage::UpdatePlayerPosition { translation } => {
+        match message {
+            ClientGameMessage::UsePlayerController { command } => {
                 if self
-                    .presence_ipc
-                    .try_send(PresenceServerCommand::UpdatePosition {
+                    .marionette_ipc
+                    .try_send(ServerMarionetteCommand::UsePlayerController {
                         connection_id,
-                        translation,
+                        command,
                     })
                     .is_err()
                 {
-                    warn!("Failed to forward player position to ECS");
-                }
-                return;
-            }
-            ClientGameMessage::RequestController { controller_id } => {
-                debug!(
-                    "Routing controller bind request: connection_id={}, controller_id={}",
-                    connection_id.0, controller_id.0
-                );
-                ServerMarionetteCommand::RequestBinding {
-                    connection_id,
-                    user_session,
-                    controller_id,
+                    warn!(
+                        "Failed to forward player controller command to ECS: connection_id={}",
+                        connection_id.0
+                    );
                 }
             }
-            ClientGameMessage::ReleaseController { controller_id } => {
-                debug!(
-                    "Routing controller release request: user_id={}, session_id={}, controller_id={}",
-                    user_session.user_id.0, user_session.session_id.0, controller_id.0
-                );
-                ServerMarionetteCommand::ReleaseBinding {
-                    user_session,
-                    controller_id,
+        }
+    }
+
+    fn on_client_resource_message(
+        &self,
+        connection_id: ConnectionId,
+        _: UserSession,
+        message: ClientResourceMessage,
+    ) {
+        match message {
+            ClientResourceMessage::RequestLocalCoordinateChunks { chunks } => {
+                if self
+                    .local_coordinate_ipc
+                    .try_send(LocalCoordinateServerCommand::RequestChunks {
+                        connection_id,
+                        chunks,
+                    })
+                    .is_err()
+                {
+                    warn!(
+                        "Failed to forward chunk request to ECS: connection_id={}",
+                        connection_id.0
+                    );
                 }
             }
-            ClientGameMessage::ControllerInput {
-                controller_id,
-                input,
-            } => {
-                log::trace!(
-                    "Routing controller input: connection_id={}, controller_id={}",
-                    connection_id.0,
-                    controller_id.0
-                );
-                ServerMarionetteCommand::SubmitInput {
-                    connection_id,
-                    user_session,
-                    controller_id,
-                    input,
-                }
-            }
-        };
-        if self.marionette_ipc.try_send(command).is_err() {
-            warn!("Failed to forward client game message to ECS");
         }
     }
 }
 
-fn bridge_ecs_events(
-    marionette_ipc: ServerMarionetteIpc,
+fn bridge_game_ecs_events(
     presence_ipc: PresenceServerIpc,
     local_coordinate_ipc: LocalCoordinateServerIpc,
-    network: ServerNetwork,
+    network: Arc<ServerNetwork>,
 ) {
-    debug!("Started ECS-to-network event bridge");
+    debug!("Started server game IPC bridge");
     loop {
-        let mut handled_event = false;
-
-        while let Some(event) = marionette_ipc.try_receive() {
-            handled_event = true;
-            match event {
-                ServerMarionetteEvent::ControllerGranted {
-                    connection_id,
-                    controller,
-                } => {
-                    debug!(
-                        "Sending controller grant: connection_id={}, controller_id={}",
-                        connection_id.0, controller.controller_id.0
-                    );
-                    if !network.send_to_connection(
-                        connection_id,
-                        roundo_networking::ServerGameMessage::ControllerGranted { controller },
-                    ) {
-                        warn!(
-                            "Dropped controller grant because connection {} is unavailable",
-                            connection_id.0
-                        );
-                    }
-                }
-                ServerMarionetteEvent::ControllerRevoked {
-                    user_session,
-                    controller_id,
-                } => {
-                    debug!(
-                        "Broadcasting controller revocation: user_id={}, session_id={}, controller_id={}",
-                        user_session.user_id.0, user_session.session_id.0, controller_id.0
-                    );
-                    network.send_to_session(
-                        user_session,
-                        roundo_networking::ServerGameMessage::ControllerRevoked { controller_id },
-                    );
-                }
-                ServerMarionetteEvent::ViewCameraState {
-                    user_session,
-                    controller_id,
-                    state,
-                } => {
-                    log::trace!(
-                        "Broadcasting view camera state: user_id={}, session_id={}, controller_id={}",
-                        user_session.user_id.0,
-                        user_session.session_id.0,
-                        controller_id.0
-                    );
-                    network.send_to_session(
-                        user_session,
-                        roundo_networking::ServerGameMessage::ViewCameraState {
-                            controller_id,
-                            state,
-                        },
-                    );
-                }
-            }
-        }
-
-        while let Some(event) = presence_ipc.try_receive() {
-            handled_event = true;
-            match event {
-                PresenceServerEvent::Snapshot {
-                    connection_id,
-                    snapshot,
-                } => {
-                    network.send_to_connection(
-                        connection_id,
-                        roundo_networking::ServerGameMessage::PresenceSnapshot { snapshot },
-                    );
-                }
-                PresenceServerEvent::PlayerJoined {
-                    connection_id,
-                    player_id,
-                } => {
-                    let _ = local_coordinate_ipc.try_send(
-                        LocalCoordinateServerCommand::SubscribePlayer {
-                            connection_id,
-                            player_id,
-                        },
-                    );
-                }
-            }
-        }
-
-        while let Some(event) = local_coordinate_ipc.try_receive() {
-            handled_event = true;
-            match event {
-                LocalCoordinateServerEvent::Spawned {
-                    connection_id,
-                    local_coordinate_id,
-                } => {
-                    network.send_to_connection(
-                        connection_id,
-                        roundo_networking::ServerGameMessage::LocalCoordinateSpawned {
-                            local_coordinate_id,
-                        },
-                    );
-                }
-                LocalCoordinateServerEvent::Despawned {
-                    connection_id,
-                    local_coordinate_id,
-                } => {
-                    network.send_to_connection(
-                        connection_id,
-                        roundo_networking::ServerGameMessage::LocalCoordinateDespawned {
-                            local_coordinate_id,
-                        },
-                    );
-                }
-                LocalCoordinateServerEvent::ChunkLoaded {
-                    connection_id,
-                    local_coordinate_id,
-                    chunk,
-                } => {
-                    network.send_to_connection(
-                        connection_id,
-                        roundo_networking::ServerGameMessage::LocalCoordinateChunk {
-                            local_coordinate_id,
-                            coordinate: chunk.coordinate,
-                            edge_length: CHUNK_EDGE_LENGTH as u16,
-                            voxels: chunk.into_voxels(),
-                        },
-                    );
-                }
-                LocalCoordinateServerEvent::ChunkUnloaded {
-                    connection_id,
-                    local_coordinate_id,
-                    coordinate,
-                } => {
-                    network.send_to_connection(
-                        connection_id,
-                        roundo_networking::ServerGameMessage::LocalCoordinateChunkUnloaded {
-                            local_coordinate_id,
-                            coordinate,
-                        },
-                    );
-                }
-            }
-        }
-
-        if !handled_event {
+        let Some(event) = presence_ipc.try_receive() else {
             std::thread::sleep(Duration::from_millis(1));
+            continue;
+        };
+        match event {
+            PresenceServerEvent::Snapshot {
+                connection_id,
+                snapshot,
+            } => {
+                network.send_to_connection(
+                    connection_id,
+                    StreamId::Stream0,
+                    roundo_networking::ServerGameMessage::PresenceSnapshot { snapshot },
+                );
+            }
+            PresenceServerEvent::PlayerJoined {
+                connection_id,
+                player_id,
+            } => {
+                if local_coordinate_ipc
+                    .try_send(LocalCoordinateServerCommand::SubscribePlayer {
+                        connection_id,
+                        player_id,
+                    })
+                    .is_err()
+                {
+                    warn!(
+                        "Failed to subscribe player to local-coordinate updates: connection_id={}, player_id={}",
+                        connection_id.0, player_id.0
+                    );
+                }
+            }
+            PresenceServerEvent::PlayerStateChanged {
+                connection_id,
+                state,
+            } => {
+                network.send_to_connection(
+                    connection_id,
+                    StreamId::Stream0,
+                    roundo_networking::ServerGameMessage::PlayerState { state },
+                );
+            }
+        }
+    }
+}
+
+fn bridge_resource_ecs_events(
+    local_coordinate_ipc: LocalCoordinateServerIpc,
+    network: Arc<ServerNetwork>,
+) {
+    debug!("Started server resource IPC bridge");
+    loop {
+        let Some(event) = local_coordinate_ipc.try_receive() else {
+            std::thread::sleep(Duration::from_millis(1));
+            continue;
+        };
+        match event {
+            LocalCoordinateServerEvent::Spawned {
+                connection_id,
+                local_coordinate_id,
+            } => {
+                network.send_to_connection(
+                    connection_id,
+                    StreamId::Stream1,
+                    ServerResourceMessage::LocalCoordinateSpawned {
+                        local_coordinate_id,
+                    },
+                );
+            }
+            LocalCoordinateServerEvent::Despawned {
+                connection_id,
+                local_coordinate_id,
+            } => {
+                network.send_to_connection(
+                    connection_id,
+                    StreamId::Stream1,
+                    ServerResourceMessage::LocalCoordinateDespawned {
+                        local_coordinate_id,
+                    },
+                );
+            }
+            LocalCoordinateServerEvent::ChunkLoaded {
+                connection_id,
+                chunk,
+                payload,
+            } => {
+                network.send_to_connection(
+                    connection_id,
+                    StreamId::Stream1,
+                    ServerResourceMessage::LocalCoordinateChunk {
+                        chunk,
+                        edge_length: CHUNK_EDGE_LENGTH as u16,
+                        svo: payload,
+                    },
+                );
+            }
+            LocalCoordinateServerEvent::ChunkVersions {
+                connection_id,
+                chunks,
+            } => {
+                network.send_to_connection(
+                    connection_id,
+                    StreamId::Stream1,
+                    ServerResourceMessage::LocalCoordinateChunkVersions { chunks },
+                );
+            }
+            LocalCoordinateServerEvent::ChunkUnloaded {
+                connection_id,
+                local_coordinate_id,
+                coordinate,
+            } => {
+                network.send_to_connection(
+                    connection_id,
+                    StreamId::Stream1,
+                    ServerResourceMessage::LocalCoordinateChunkUnloaded {
+                        local_coordinate_id,
+                        coordinate,
+                    },
+                );
+            }
         }
     }
 }

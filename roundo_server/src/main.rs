@@ -4,8 +4,9 @@ mod network;
 
 use crate::network::start_server;
 use log::{debug, info};
+use roundo_cli::RoundoCliPlugin;
 use roundo_ecs_entry::{
-    configure_server_presence_radius, configure_server_tick_rate, run_ecs_server,
+    configure_server_presence_radius, configure_server_tick_rate, create_ecs_server_app,
     server_local_coordinate_ipc, server_marionette_ipc, server_presence_ipc,
 };
 
@@ -21,6 +22,7 @@ fn main() {
         server_local_coordinate_ipc(),
     );
     info!("Server started");
-    run_ecs_server();
+    let mut app = create_ecs_server_app();
+    app.add_plugins(RoundoCliPlugin::server()).run();
     debug!("Main thread terminated.");
 }

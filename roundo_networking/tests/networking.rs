@@ -4,18 +4,29 @@ use roundo_networking::connection::{
 };
 use roundo_networking::frame::{self, MAX_FRAME_SIZE};
 use roundo_networking::protocol::{
-    AuthenticationInfo, CharacterId, ClientGameMessage, ClientMessage, ConnectionToken,
-    ControllerAccessPolicy, ControllerCameraState, ControllerDescriptor, ControllerId,
-    ControllerInput, ControllerKind, ControllerScope, JoinableWorldId, LocomotionInput,
-    NearbyJoinableWorld, NearbyPlayer, PlayerId, PresenceSnapshot, ProtocolErrorCode,
-    ServerGameMessage, ServerMessage, SessionId, UserId, UserSession, ViewInput,
+    AuthenticationInfo, ChunkVersion, ClientGameMessage, ClientMessage, ClientResourceMessage,
+    ConnectionToken, ControllerCommand, DestroyBlockControllerAction, JoinableWorldId,
+    LocalCoordinateId, Movement3DAction, NearbyJoinableWorld, NearbyPlayer,
+    PlaceBlockControllerAction, PlayerControllerCommand, PlayerId, PlayerState, PresenceSnapshot,
+    ProtocolErrorCode, RotationSync, SceneId, SerializedPayload, ServerGameMessage, ServerMessage,
+    ServerResourceMessage, SessionId, StreamId, UserId, UserSession,
 };
 use roundo_networking::session::{ClientSession, ServerSession, SessionState};
+use roundo_toolbox::UpdateVersion;
 use tokio::io::{AsyncWriteExt, DuplexStream};
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::{Duration, timeout};
 
 const TEST_TIMEOUT: Duration = Duration::from_secs(1);
+
+#[test]
+fn serialized_payload_keeps_domain_serialization_at_the_host_seam() {
+    let source = [3_u32, 5, 8, 13];
+    let payload = SerializedPayload::encode(&source).expect("domain payload should encode");
+    let decoded: [u32; 4] = payload.decode().expect("domain payload should decode");
+
+    assert_eq!(decoded, source);
+}
 
 #[test]
 fn every_client_and_server_message_round_trips_through_postcard() {
@@ -38,10 +49,16 @@ async fn consecutive_frames_preserve_boundaries_and_order() {
     let mut client: ClientConnection<_> = ClientConnection::new(client_stream);
     let mut server: ServerConnection<_> = ServerConnection::new(server_stream);
     let first = ClientMessage::Ready {
+        stream: StreamId::Stream0,
         protocol_version: 1,
     };
-    let second = ClientMessage::Game(ClientGameMessage::RequestController {
-        controller_id: ControllerId(7),
+    let second = ClientMessage::Game(ClientGameMessage::UsePlayerController {
+        command: PlayerControllerCommand::Movement3D(ControllerCommand {
+            sequence: 7,
+            action: Movement3DAction {
+                translation_delta: [1.0, 0.0, 0.0],
+            },
+        }),
     });
 
     timeout(TEST_TIMEOUT, async {
@@ -61,13 +78,9 @@ async fn consecutive_frames_preserve_boundaries_and_order() {
 #[tokio::test]
 async fn arbitrarily_fragmented_frame_decodes_once_complete() {
     let (mut writer, reader) = tokio::io::duplex(1024);
-    let message = ClientMessage::Game(ClientGameMessage::ControllerInput {
-        controller_id: ControllerId(3),
-        input: ControllerInput::View(ViewInput {
-            sequence: 9,
-            translation: [1.0, -2.0, 3.0],
-            yaw_delta: 0.5,
-            pitch_delta: -0.25,
+    let message = ClientMessage::Game(ClientGameMessage::UsePlayerController {
+        command: PlayerControllerCommand::SyncRotation(RotationSync {
+            rotation: [0.0, 0.25, -0.5, 1.0],
         }),
     });
     let payload = frame::encode(&message).expect("message should encode");
@@ -132,9 +145,16 @@ async fn unauthenticated_game_intent_is_rejected() {
     let mut client: ClientConnection<_> = ClientConnection::new(client_stream);
     timeout(
         TEST_TIMEOUT,
-        client.send(&ClientMessage::Game(ClientGameMessage::ReleaseController {
-            controller_id: ControllerId(11),
-        })),
+        client.send(&ClientMessage::Game(
+            ClientGameMessage::UsePlayerController {
+                command: PlayerControllerCommand::Movement3D(ControllerCommand {
+                    sequence: 11,
+                    action: Movement3DAction {
+                        translation_delta: [0.0, 0.0, 1.0],
+                    },
+                }),
+            },
+        )),
     )
     .await
     .expect("malicious client write must finish")
@@ -228,6 +248,7 @@ async fn normal_and_abnormal_disconnects_end_connection_tasks() {
     let (outbound, receiver) = mpsc::unbounded_channel();
     outbound
         .send(ClientMessage::Ready {
+            stream: StreamId::Stream0,
             protocol_version: 1,
         })
         .expect("test sender should be open");
@@ -254,47 +275,41 @@ fn client_messages() -> Vec<ClientMessage> {
             connection_token: ConnectionToken::new("connection-token"),
         },
         ClientMessage::Ready {
+            stream: StreamId::Stream0,
             protocol_version: 1,
         },
-        ClientMessage::Game(ClientGameMessage::RequestController {
-            controller_id: ControllerId(1),
-        }),
-        ClientMessage::Game(ClientGameMessage::UpdatePlayerPosition {
-            translation: [8.0, 4.0, -2.0],
-        }),
-        ClientMessage::Game(ClientGameMessage::ReleaseController {
-            controller_id: ControllerId(2),
-        }),
-        ClientMessage::Game(ClientGameMessage::ControllerInput {
-            controller_id: ControllerId(3),
-            input: ControllerInput::Locomotion(LocomotionInput {
+        ClientMessage::Game(ClientGameMessage::UsePlayerController {
+            command: PlayerControllerCommand::Movement3D(ControllerCommand {
                 sequence: 4,
-                world_direction: [1.0, 0.0, -1.0],
-                jump: true,
-                sprint: false,
+                action: Movement3DAction {
+                    translation_delta: [0.0, 0.0, 0.0],
+                },
             }),
         }),
-        ClientMessage::Game(ClientGameMessage::ControllerInput {
-            controller_id: ControllerId(5),
-            input: ControllerInput::View(ViewInput {
-                sequence: 6,
-                translation: [0.0, 1.0, 2.0],
-                yaw_delta: 0.25,
-                pitch_delta: -0.5,
+        ClientMessage::Game(ClientGameMessage::UsePlayerController {
+            command: PlayerControllerCommand::SyncRotation(RotationSync {
+                rotation: [0.0, 0.125, -0.25, 1.0],
             }),
+        }),
+        ClientMessage::Game(ClientGameMessage::UsePlayerController {
+            command: PlayerControllerCommand::DestroyBlock(ControllerCommand {
+                sequence: 2,
+                action: DestroyBlockControllerAction,
+            }),
+        }),
+        ClientMessage::Game(ClientGameMessage::UsePlayerController {
+            command: PlayerControllerCommand::PlaceBlock(ControllerCommand {
+                sequence: 3,
+                action: PlaceBlockControllerAction { voxel_id: 1 },
+            }),
+        }),
+        ClientMessage::Resource(ClientResourceMessage::RequestLocalCoordinateChunks {
+            chunks: vec![test_chunk_version().id()],
         }),
     ]
 }
 
 fn server_messages() -> Vec<ServerMessage> {
-    let descriptor = ControllerDescriptor {
-        controller_id: ControllerId(12),
-        kind: ControllerKind::Locomotion,
-        access_policy: ControllerAccessPolicy::Exclusive,
-        scope: ControllerScope::CharacterLocomotion {
-            character_id: CharacterId(13),
-        },
-    };
     vec![
         ServerMessage::Authenticated {
             info: authentication_info(),
@@ -308,8 +323,13 @@ fn server_messages() -> Vec<ServerMessage> {
         ServerMessage::Error {
             code: ProtocolErrorCode::UnsupportedProtocolVersion,
         },
-        ServerMessage::Game(ServerGameMessage::ControllerGranted {
-            controller: descriptor,
+        ServerMessage::Game(ServerGameMessage::PlayerState {
+            state: PlayerState {
+                player_id: PlayerId(13),
+                scene_id: SceneId::S1,
+                translation: [0.0, 2.0, 0.0],
+                rotation: [-0.707, 0.0, 0.0, 0.707],
+            },
         }),
         ServerMessage::Game(ServerGameMessage::PresenceSnapshot {
             snapshot: PresenceSnapshot {
@@ -317,6 +337,7 @@ fn server_messages() -> Vec<ServerMessage> {
                 players: vec![NearbyPlayer {
                     player_id: PlayerId(17),
                     translation: [1.0, 2.0, 3.0],
+                    rotation: [0.0, 0.0, 0.0, 1.0],
                 }],
                 joinable_worlds: vec![NearbyJoinableWorld {
                     world_id: JoinableWorldId(1),
@@ -325,16 +346,25 @@ fn server_messages() -> Vec<ServerMessage> {
                 }],
             },
         }),
-        ServerMessage::Game(ServerGameMessage::ControllerRevoked {
-            controller_id: ControllerId(14),
+        ServerMessage::Resource(ServerResourceMessage::LocalCoordinateChunkVersions {
+            chunks: vec![test_chunk_version()],
         }),
-        ServerMessage::Game(ServerGameMessage::ViewCameraState {
-            controller_id: ControllerId(15),
-            state: ControllerCameraState {
-                translation: [2.0, 3.0, 4.0],
-                yaw: 0.75,
-                pitch: -0.5,
-            },
+        ServerMessage::Resource(ServerResourceMessage::LocalCoordinateChunk {
+            chunk: test_chunk_version(),
+            edge_length: 16,
+            svo: test_chunk_svo(),
         }),
     ]
+}
+
+fn test_chunk_version() -> ChunkVersion {
+    ChunkVersion {
+        local_coordinate_id: LocalCoordinateId(1),
+        coordinate: [2, -1, 4],
+        version: UpdateVersion::new(9),
+    }
+}
+
+fn test_chunk_svo() -> SerializedPayload {
+    SerializedPayload::encode(&[0_u32, 7, 11]).unwrap()
 }

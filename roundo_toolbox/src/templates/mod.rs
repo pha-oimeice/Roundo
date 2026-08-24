@@ -3,6 +3,8 @@ mod crossbeam_thread_pipe;
 mod crud_request;
 #[allow(unused)]
 mod graph;
+mod linear_interpolation;
+mod registry;
 
 pub use self::{
     bit_mask::BitMask,
@@ -10,4 +12,6 @@ pub use self::{
         CrossbeamThreadPipe, CrossbeamThreadPipeEndpointA, CrossbeamThreadPipeEndpointB,
     },
     crud_request::CRUDRequest,
+    linear_interpolation::LinearInterpolation,
+    registry::{Registry, RegistryDefinitionTrait, RegistryInsertError},
 };

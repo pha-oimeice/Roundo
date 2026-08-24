@@ -35,6 +35,21 @@ impl ProtocolError {
             maximum: MAX_FRAME_SIZE,
         }
     }
+
+    pub fn is_peer_disconnect(&self) -> bool {
+        matches!(
+            self,
+            Self::Io(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::UnexpectedEof
+                        | std::io::ErrorKind::ConnectionAborted
+                        | std::io::ErrorKind::ConnectionReset
+                        | std::io::ErrorKind::BrokenPipe
+                        | std::io::ErrorKind::NotConnected
+                )
+        )
+    }
 }
 
 impl Display for ProtocolError {

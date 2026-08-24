@@ -1,0 +1,5 @@
+error: UnixCommand requires #[unix(path = "…")]
+ --> tests/ui/missing_path.rs:2:8
+  |
+2 | struct MissingPath {
+  |        ^^^^^^^^^^^

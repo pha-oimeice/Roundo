@@ -1,0 +1,10 @@
+
+[general]
+action_name = "example_action"
+duration = 1
+
+[[definition]]
+# Definition of given tick
+tick = 0
+events = []
+updates = []

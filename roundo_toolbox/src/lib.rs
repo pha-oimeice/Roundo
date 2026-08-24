@@ -1,11 +1,15 @@
 mod config_serialization;
 pub mod fs;
 pub mod macros;
+pub mod request_response_pipe;
 mod templates;
 mod traits;
+pub mod version;
 
 #[allow(unused_imports)]
-pub use self::{config_serialization::load_or_create_config, templates::*, traits::*};
+pub use self::{
+    config_serialization::load_or_create_config, templates::*, traits::*, version::UpdateVersion,
+};
 use std::net::{SocketAddr, ToSocketAddrs};
 
 pub struct ErrorWithData<T> {

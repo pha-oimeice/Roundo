@@ -1,0 +1,5 @@
+error: UnixCommand requires named fields
+ --> tests/ui/tuple_struct.rs:3:8
+  |
+3 | struct TupleUnix(String);
+  |        ^^^^^^^^^

@@ -1,7 +1,8 @@
 //! Although all struct can be serialized, but please use 'Config' only so that only 1 config file is used.
 
-use roundo_user_config::{DatabaseConfig, GameplayConfig, ServerNetworkConfig};
-use serde::{Deserialize, Serialize};
+#[cfg(test)]
+use roundo_user_config::DatabaseConfig;
+use roundo_user_config::ServerConfig;
 use std::sync::LazyLock;
 
 const CONFIG_FILE_NAME: &str = "roundo-server-config.toml";
@@ -22,17 +23,15 @@ fn apply_database_url_override(
     config
 }
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
-#[serde(default)]
-pub struct ServerConfig {
-    pub network: ServerNetworkConfig,
-    pub database: DatabaseConfig,
-    pub gameplay: GameplayConfig,
-}
-
 #[cfg(test)]
 mod tests {
     use super::{DatabaseConfig, ServerConfig, apply_database_url_override};
+
+    #[test]
+    fn missing_dev_mode_defaults_to_false() {
+        let config: ServerConfig = toml::from_str("[network]").unwrap();
+        assert!(!config.dev_mode);
+    }
 
     #[test]
     fn database_url_environment_overrides_generated_config() {

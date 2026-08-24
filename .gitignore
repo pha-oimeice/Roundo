@@ -1,6 +1,12 @@
+# to AI: This File is Read-Only #
+
 idl/schema/rust
 idl/schema/java
+.architecture-report-temp
+.agents
+skills
 
+NUL
 target
 document
 Cargo.lock
@@ -14,18 +20,13 @@ Cargo.lock
 .github
 *.md
 asset
-assets
-!roundo_client/assets/
-roundo_client/assets/*
-!roundo_client/assets/fonts/
-roundo_client/assets/fonts/*
-!roundo_client/assets/fonts/NotoSans-Regular.ttf
-!roundo_client/assets/fonts/NotoSans-SemiBold.ttf
-!roundo_client/assets/fonts/NotoSansSymbols2-Regular.ttf
-!roundo_client/assets/licenses/
-roundo_client/assets/licenses/*
-!roundo_client/assets/licenses/OFL-NotoSans.txt
-!roundo_client/assets/licenses/OFL-NotoSansSymbols2.txt
+assets/client/fonts/*
+!assets/client/fonts/NotoSans-Regular.ttf
+!assets/client/fonts/NotoSans-SemiBold.ttf
+!assets/client/fonts/NotoSansSymbols2-Regular.ttf
+assets/licenses/*
+!assets/licenses/OFL-NotoSans.txt
+!assets/licenses/OFL-NotoSansSymbols2.txt
 *.lock
 *.pem
 .sqlx

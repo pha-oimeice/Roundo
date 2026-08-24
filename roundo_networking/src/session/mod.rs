@@ -1,10 +1,10 @@
-//! Authentication and game-session ordering for typed connections.
+//! Authentication and stream setup ordering for typed connections.
 
 use crate::ProtocolError;
 use crate::connection::{ClientConnection, ServerConnection};
 use crate::protocol::{
     AuthenticationInfo, ClientMessage, ConnectionToken, GAME_PROTOCOL_VERSION, ProtocolErrorCode,
-    ServerMessage,
+    RESOURCE_PROTOCOL_VERSION, ServerMessage, StreamId,
 };
 use tokio::io::{AsyncRead, AsyncWrite};
 
@@ -14,6 +14,7 @@ pub enum SessionState {
     Authenticating,
     Authenticated,
     InGame,
+    InResource,
     Closed,
 }
 
@@ -29,6 +30,10 @@ pub struct ClientAuthenticatedSession<Stream> {
 }
 
 pub struct ClientGameSession<Stream> {
+    connection: ClientConnection<Stream>,
+}
+
+pub struct ClientResourceSession<Stream> {
     connection: ClientConnection<Stream>,
 }
 
@@ -89,6 +94,7 @@ where
     pub async fn enter_game(mut self) -> Result<ClientGameSession<Stream>, ProtocolError> {
         self.connection
             .send(&ClientMessage::Ready {
+                stream: StreamId::Stream0,
                 protocol_version: GAME_PROTOCOL_VERSION,
             })
             .await?;
@@ -110,6 +116,33 @@ impl<Stream> ClientGameSession<Stream> {
     }
 }
 
+impl<Stream> ClientResourceSession<Stream> {
+    pub const fn state(&self) -> SessionState {
+        SessionState::InResource
+    }
+
+    pub fn into_connection(self) -> ClientConnection<Stream> {
+        self.connection
+    }
+}
+
+impl<Stream> ClientResourceSession<Stream>
+where
+    Stream: AsyncRead + AsyncWrite + Unpin,
+{
+    /// Initialize `stream1` after `stream0` authenticated the QUIC connection.
+    pub async fn open(stream: Stream) -> Result<Self, ProtocolError> {
+        let mut connection = ClientConnection::new(stream);
+        connection
+            .send(&ClientMessage::Ready {
+                stream: StreamId::Stream1,
+                protocol_version: RESOURCE_PROTOCOL_VERSION,
+            })
+            .await?;
+        Ok(Self { connection })
+    }
+}
+
 /// Server-side session waiting for the first client authentication message.
 pub struct ServerSession<Stream> {
     connection: ServerConnection<Stream>,
@@ -125,6 +158,10 @@ pub struct ServerAuthenticatedSession<Stream> {
 }
 
 pub struct ServerGameSession<Stream> {
+    connection: ServerConnection<Stream>,
+}
+
+pub struct ServerResourceSession<Stream> {
     connection: ServerConnection<Stream>,
 }
 
@@ -203,14 +240,16 @@ where
     /// Accept the client's version advertisement, then enable game messages.
     pub async fn enter_game(mut self) -> Result<ServerGameSession<Stream>, ProtocolError> {
         match self.connection.receive().await? {
-            ClientMessage::Ready { protocol_version }
-                if protocol_version == GAME_PROTOCOL_VERSION =>
-            {
-                Ok(ServerGameSession {
-                    connection: self.connection,
-                })
-            }
-            ClientMessage::Ready { protocol_version } => {
+            ClientMessage::Ready {
+                stream: StreamId::Stream0,
+                protocol_version,
+            } if protocol_version == GAME_PROTOCOL_VERSION => Ok(ServerGameSession {
+                connection: self.connection,
+            }),
+            ClientMessage::Ready {
+                stream: StreamId::Stream0,
+                protocol_version,
+            } => {
                 let _ = self
                     .connection
                     .send(&ServerMessage::Error {
@@ -219,6 +258,39 @@ where
                     .await;
                 Err(ProtocolError::UnsupportedProtocolVersion {
                     expected: GAME_PROTOCOL_VERSION,
+                    received: protocol_version,
+                })
+            }
+            message => Err(ProtocolError::unexpected("Ready", client_name(&message))),
+        }
+    }
+}
+
+impl<Stream> ServerResourceSession<Stream>
+where
+    Stream: AsyncRead + AsyncWrite + Unpin,
+{
+    /// Accept `stream1` after `stream0` authenticated the QUIC connection.
+    pub async fn accept(stream: Stream) -> Result<Self, ProtocolError> {
+        let mut connection = ServerConnection::new(stream);
+        match connection.receive().await? {
+            ClientMessage::Ready {
+                stream: StreamId::Stream1,
+                protocol_version,
+            } if protocol_version == RESOURCE_PROTOCOL_VERSION => {
+                Ok(ServerResourceSession { connection })
+            }
+            ClientMessage::Ready {
+                stream: StreamId::Stream1,
+                protocol_version,
+            } => {
+                let _ = connection
+                    .send(&ServerMessage::Error {
+                        code: ProtocolErrorCode::UnsupportedProtocolVersion,
+                    })
+                    .await;
+                Err(ProtocolError::UnsupportedProtocolVersion {
+                    expected: RESOURCE_PROTOCOL_VERSION,
                     received: protocol_version,
                 })
             }
@@ -237,11 +309,22 @@ impl<Stream> ServerGameSession<Stream> {
     }
 }
 
+impl<Stream> ServerResourceSession<Stream> {
+    pub const fn state(&self) -> SessionState {
+        SessionState::InResource
+    }
+
+    pub fn into_connection(self) -> ServerConnection<Stream> {
+        self.connection
+    }
+}
+
 fn client_name(message: &ClientMessage) -> &'static str {
     match message {
         ClientMessage::Authenticate { .. } => "Authenticate",
         ClientMessage::Ready { .. } => "Ready",
         ClientMessage::Game(_) => "Game",
+        ClientMessage::Resource(_) => "Resource",
     }
 }
 
@@ -250,5 +333,6 @@ fn server_name(message: &ServerMessage) -> &'static str {
         ServerMessage::Authenticated { .. } => "Authenticated",
         ServerMessage::Error { .. } => "Error",
         ServerMessage::Game(_) => "Game",
+        ServerMessage::Resource(_) => "Resource",
     }
 }

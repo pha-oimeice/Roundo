@@ -1,0 +1,8 @@
+[package]
+name = "roundo_portal"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+avian3d.workspace = true
+bevy.workspace = true

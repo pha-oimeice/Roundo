@@ -1,0 +1,51 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Roundo</title>
+  <style>
+    body { margin: 0; background: #10151d; color: #f4f7fb; font: 20px sans-serif; display: grid; place-items: center; height: 100vh }
+    main { text-align: center }
+    h1 { font-size: 72px; letter-spacing: 12px; animation: intro 2.4s ease both }
+    #menu { animation: menu 2.4s ease both }
+    button { display: block; width: 260px; margin: 12px; padding: 14px; background: #26384c; border: 1px solid #8eb9db; color: white; font: inherit; cursor: pointer }
+    button:disabled { cursor: wait; opacity: .65 }
+    #error { min-height: 1.5em; color: #ff9b9b; font-size: 16px }
+    @keyframes intro { 0% { opacity: 0; transform: scale(.75) } 25% { opacity: 1; transform: scale(1) } 70% { opacity: 1; transform: scale(1) } 100% { opacity: 0; transform: scale(1.08) } }
+    @keyframes menu { 0%, 65% { opacity: 0; transform: translateY(12px) } 100% { opacity: 1; transform: none } }
+    .skip h1, .skip #menu { animation: none; opacity: 1; transform: none }
+  </style>
+</head>
+<body>
+<main>
+  <h1>ROUNDO</h1>
+  <div id="menu">
+    <button onclick="run('ui.open',{slot:'roundo.server-selection'})">Start</button>
+    <button onclick="run('ui.open',{slot:'roundo.settings'})">Settings</button>
+    <button onclick="run('app.quit',{})">Quit</button>
+    <p id="error" role="alert"></p>
+  </div>
+</main>
+<script>
+function skip() {
+  document.body.classList.add('skip');
+}
+
+async function run(command, argumentsValue) {
+  const error = document.querySelector('#error');
+  error.textContent = '';
+  try {
+    const result = await roundo.execute({ version: 1, command, arguments: argumentsValue });
+    if (!result?.ok) {
+      error.textContent = `[${result?.error?.code || 'command_error'}] ${result?.error?.message || 'Command failed'}`;
+    }
+  } catch (reason) {
+    error.textContent = `[command_error] ${reason?.message || String(reason)}`;
+  }
+}
+
+document.addEventListener('keydown', skip, { once: true });
+document.addEventListener('pointerdown', skip, { once: true });
+</script>
+</body>
+</html>

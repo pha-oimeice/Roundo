@@ -1,10 +1,11 @@
 use roundo_networking::protocol::{
-    ClientGameMessage, ConnectionId, ControllerId, ServerGameMessage, SessionId, UserId,
-    UserSession,
+    ClientGameMessage, ClientResourceMessage, ConnectionId, ControllerCommand, LocalCoordinateId,
+    Movement3DAction, PlayerControllerCommand, PlayerId, PlayerState, SceneId, ServerGameMessage,
+    ServerResourceMessage, SessionId, UserId, UserSession,
 };
 use roundo_networking::{
     CertificatePolicy, ClientHooks, ClientNetwork, ClientNetworkConfig, HookFuture, PublicSession,
-    ServerHooks, ServerNetwork, ServerNetworkConfig,
+    ServerHooks, ServerNetwork, ServerNetworkConfig, StreamId,
 };
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
@@ -15,24 +16,27 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 const TEST_TIMEOUT: Duration = Duration::from_secs(3);
 
 #[tokio::test]
-async fn client_and_server_exchange_game_messages_over_tls() {
+async fn client_and_server_exchange_messages_over_prioritized_quic_streams() {
     let (connected_sender, connected_receiver) = channel();
     let (client_message_sender, client_message_receiver) = channel();
+    let (client_resource_sender, client_resource_receiver) = channel();
     let certificate_directory = test_certificate_directory();
     let server = ServerNetwork::start(
         server_config(certificate_directory.clone()),
         Arc::new(TestServerHooks {
             connected_sender,
             client_message_sender,
+            client_resource_sender,
         }),
     )
     .expect("network server should start");
     let addresses = server.addresses();
     let (server_message_sender, server_message_receiver) = channel();
+    let (server_resource_sender, server_resource_receiver) = channel();
     let (connection_error_sender, connection_error_receiver) = channel();
     let client = ClientNetwork::start(
         ClientNetworkConfig {
-            game_address: addresses.game_address,
+            quic_address: addresses.quic_address,
             public_address: addresses.public_address,
             server_name: "localhost".to_string(),
             certificate_policy: CertificatePolicy::TrustOnFirstUse,
@@ -40,6 +44,7 @@ async fn client_and_server_exchange_game_messages_over_tls() {
         },
         Arc::new(TestClientHooks {
             server_message_sender,
+            server_resource_sender,
             connection_error_sender,
         }),
     )
@@ -49,11 +54,17 @@ async fn client_and_server_exchange_game_messages_over_tls() {
         receive_or_connection_error(connected_receiver, connection_error_receiver).await;
     assert_eq!(user_session, test_session());
 
-    let request = ClientGameMessage::RequestController {
-        controller_id: ControllerId(7),
+    let request = ClientGameMessage::UsePlayerController {
+        command: PlayerControllerCommand::Movement3D(ControllerCommand {
+            sequence: 7,
+            action: Movement3DAction {
+                translation_delta: [1.0, 0.0, 0.0],
+            },
+        }),
     };
+    assert!(client.send(StreamId::Stream1, request.clone()).is_err());
     client
-        .send(request.clone())
+        .send(StreamId::Stream0, request.clone())
         .expect("connected client should send game message");
     let (received_connection_id, received_session, received_message) =
         receive(client_message_receiver).await;
@@ -61,11 +72,33 @@ async fn client_and_server_exchange_game_messages_over_tls() {
     assert_eq!(received_session, test_session());
     assert_eq!(received_message, request);
 
-    let outbound = ServerGameMessage::ControllerRevoked {
-        controller_id: ControllerId(7),
+    let outbound = ServerGameMessage::PlayerState {
+        state: PlayerState {
+            player_id: PlayerId(1),
+            scene_id: SceneId::S1,
+            translation: [0.25, 2.0, 0.0],
+            rotation: [0.0, 0.0, 0.0, 1.0],
+        },
     };
-    assert!(server.send_to_connection(connection_id, outbound.clone()));
+    assert!(!server.send_to_connection(connection_id, StreamId::Stream1, outbound.clone()));
+    assert!(server.send_to_connection(connection_id, StreamId::Stream0, outbound.clone()));
     assert_eq!(receive(server_message_receiver).await, outbound);
+
+    let resource_request = ClientResourceMessage::RequestLocalCoordinateChunks { chunks: vec![] };
+    client
+        .send(StreamId::Stream1, resource_request.clone())
+        .expect("connected client should send resource message");
+    let (received_connection_id, received_session, received_message) =
+        receive(client_resource_receiver).await;
+    assert_eq!(received_connection_id, connection_id);
+    assert_eq!(received_session, test_session());
+    assert_eq!(received_message, resource_request);
+
+    let resource_outbound = ServerResourceMessage::LocalCoordinateSpawned {
+        local_coordinate_id: LocalCoordinateId(1),
+    };
+    assert!(server.send_to_connection(connection_id, StreamId::Stream1, resource_outbound.clone()));
+    assert_eq!(receive(server_resource_receiver).await, resource_outbound);
 
     client.shutdown();
     server.shutdown();
@@ -75,6 +108,7 @@ async fn client_and_server_exchange_game_messages_over_tls() {
 struct TestServerHooks {
     connected_sender: Sender<(ConnectionId, UserSession)>,
     client_message_sender: Sender<(ConnectionId, UserSession, ClientGameMessage)>,
+    client_resource_sender: Sender<(ConnectionId, UserSession, ClientResourceMessage)>,
 }
 
 impl ServerHooks for TestServerHooks {
@@ -111,16 +145,32 @@ impl ServerHooks for TestServerHooks {
             .client_message_sender
             .send((connection_id, user_session, message));
     }
+
+    fn on_client_resource_message(
+        &self,
+        connection_id: ConnectionId,
+        user_session: UserSession,
+        message: ClientResourceMessage,
+    ) {
+        let _ = self
+            .client_resource_sender
+            .send((connection_id, user_session, message));
+    }
 }
 
 struct TestClientHooks {
     server_message_sender: Sender<ServerGameMessage>,
+    server_resource_sender: Sender<ServerResourceMessage>,
     connection_error_sender: Sender<String>,
 }
 
 impl ClientHooks for TestClientHooks {
     fn on_server_game_message(&self, message: ServerGameMessage) {
         let _ = self.server_message_sender.send(message);
+    }
+
+    fn on_server_resource_message(&self, message: ServerResourceMessage) {
+        let _ = self.server_resource_sender.send(message);
     }
 
     fn on_connection_error(&self, error: &roundo_networking::NetworkError) {
@@ -159,7 +209,7 @@ async fn receive_or_connection_error(
 
 fn server_config(certificate_directory: PathBuf) -> ServerNetworkConfig {
     ServerNetworkConfig {
-        game_address: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+        quic_address: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
         public_address: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
         certificate_directory,
         server_alternative_names: vec!["localhost".to_string()],

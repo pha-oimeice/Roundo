@@ -1,0 +1,5 @@
+error: Unix positional Option<T> fields must form a trailing suffix
+ --> tests/ui/optional_before_required.rs:4:15
+  |
+4 |     optional: Option<String>,
+  |               ^^^^^^^^^^^^^^

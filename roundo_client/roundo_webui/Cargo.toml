@@ -1,0 +1,20 @@
+[package]
+name = "roundo_webui"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+bevy.workspace = true
+bevy_winit = "0.19.1"
+log.workspace = true
+roundo_mod_loader = { path = "../../game/common/roundo_mod_loader" }
+roundo_lifecycle = { path = "../../game/server/roundo_lifecycle" }
+roundo_toolbox = { path = "../../roundo_toolbox" }
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+wry.workspace = true
+
+[target.'cfg(target_os = "windows")'.dependencies]
+webview2-com = "0.38.2"
+windows.workspace = true

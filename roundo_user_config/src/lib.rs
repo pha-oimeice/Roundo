@@ -1,14 +1,15 @@
 mod client_settings;
 mod my_default_configurations;
 mod my_impls;
+mod process_config;
 
 pub use client_settings::*;
+pub use process_config::*;
 
 use roundo_toolbox::fs::get_exe_root_path;
-use roundo_toolbox::{load_or_create_config, string_to_socket_addr};
+use roundo_toolbox::load_or_create_config;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
-use std::net::SocketAddr;
 
 pub fn load_config<T>(config_file_name: &str) -> T
 where
@@ -23,6 +24,14 @@ where
             .unwrap_or_else(|| unreachable!("Default configuration should always be available."))
     })
 }
+
+pub fn save_config<T: Serialize>(config_file_name: &str, config: &T) -> Result<(), String> {
+    let content = toml::to_string_pretty(config)
+        .map_err(|error| format!("cannot serialize config: {error}"))?;
+    std::fs::write(get_exe_root_path().join(config_file_name), content)
+        .map_err(|error| format!("cannot save config: {error}"))
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ClientNetworkConfig {
@@ -41,7 +50,8 @@ pub struct ServerNetworkConfig {
 #[serde(default)]
 pub struct EndpointConfig {
     pub host: String,
-    pub game_port: u16,
+    #[serde(alias = "game_port")]
+    pub quic_port: u16,
     pub https_port: u16,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]

@@ -4,11 +4,12 @@ use bevy::prelude::KeyCode;
 use roundo_marionette::{ClientKeyBindings, ClientMarionetteInputSettings, MovementAction};
 use roundo_presence::ClientPresenceSettings;
 use roundo_toolbox::fs::get_exe_root_path;
+pub use roundo_user_config::ServerEntry;
 use roundo_user_config::{
-    ClientCameraSettingsConfig, ClientControlSettingsConfig, ClientKeyBindingConfig, ClientKeyCode,
-    ClientMovementAction, ClientNetworkConfig, ClientSettingsConfig, ClientWorldSettingsConfig,
+    ClientCameraSettingsConfig, ClientConfig, ClientControlSettingsConfig, ClientKeyBindingConfig,
+    ClientKeyCode, ClientMovementAction, ClientNetworkConfig, ClientSettingsConfig,
+    ClientWorldSettingsConfig,
 };
-use serde::{Deserialize, Serialize};
 use std::sync::{LazyLock, RwLock};
 
 const CONFIG_FILE_NAME: &str = "roundo-client-config.toml";
@@ -105,38 +106,6 @@ fn update_config(update: impl FnOnce(&mut ClientConfig)) -> Result<(), String> {
         .map_err(|error| format!("Failed to serialize client config: {error}"))?;
     std::fs::write(get_exe_root_path().join(CONFIG_FILE_NAME), serialized)
         .map_err(|error| format!("Failed to save client config: {error}"))
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(default)]
-pub struct ClientConfig {
-    pub network: ClientNetworkConfig,
-    pub servers: Vec<ServerEntry>,
-    pub settings: ClientSettingsConfig,
-}
-
-impl Default for ClientConfig {
-    fn default() -> Self {
-        let network = ClientNetworkConfig::default();
-        let endpoint = &network.endpoint;
-        Self {
-            servers: vec![ServerEntry {
-                name: "Local server".to_string(),
-                game_addr: format!("{}:{}", endpoint.host, endpoint.game_port),
-                https_addr: format!("{}:{}", endpoint.host, endpoint.https_port),
-            }],
-            network,
-            settings: ClientSettingsConfig::default(),
-        }
-    }
-}
-
-#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
-pub struct ServerEntry {
-    pub name: String,
-    pub game_addr: String,
-    pub https_addr: String,
 }
 
 const KEY_CODE_PAIRS: [(ClientKeyCode, KeyCode); 52] = [
@@ -258,6 +227,12 @@ mod tests {
     }
 
     #[test]
+    fn missing_dev_mode_defaults_to_false() {
+        let config: ClientConfig = toml::from_str("[network]").unwrap();
+        assert!(!config.dev_mode);
+    }
+
+    #[test]
     fn missing_settings_deserialize_to_the_shared_defaults() {
         let config: ClientConfig = toml::from_str(
             r#"
@@ -268,5 +243,6 @@ mod tests {
         .expect("legacy client config should deserialize");
 
         assert_eq!(config.settings, ClientSettingsConfig::default());
+        assert_eq!(config.network.endpoint.quic_port, 12358);
     }
 }

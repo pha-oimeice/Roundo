@@ -1,0 +1,119 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Servers</title>
+  <style>
+    body { margin: 0; background: #10151d; color: #f4f7fb; font: 18px sans-serif; display: grid; place-items: center; min-height: 100vh }
+    main { min-width: 620px }
+    button, input { margin: 5px; padding: 9px; background: #26384c; border: 1px solid #8eb9db; color: white; font: inherit }
+    li { list-style: none; padding: 8px; border-bottom: 1px solid #425 }
+    li.selected { background: #26384c }
+    .muted { color: #aab }
+  </style>
+</head>
+<body>
+<main>
+  <h1>Servers</h1>
+  <ul id="servers"></ul>
+  <button onclick="connect()">Connect selected</button>
+  <button onclick="refresh()">Refresh probes</button>
+  <form onsubmit="add(event)">
+    <input id="name" placeholder="Name" required>
+    <input id="quic" placeholder="host:quic-port" required>
+    <input id="https" placeholder="host:https-port" required>
+    <button>Add</button>
+    <button type="button" onclick="edit()">Edit selected</button>
+  </form>
+  <p id="error"></p>
+  <button onclick="back()">Back</button>
+</main>
+<script>
+let selected = null;
+let loading = false;
+let renderedServers = null;
+const e = value => document.querySelector('#error').textContent = value || '';
+
+async function back() {
+  const result = await roundo.execute({ version: 1, command: 'ui.back', arguments: {} });
+  if (!result.ok) e(result.error?.message);
+}
+
+async function openConnecting() {
+  const result = await roundo.execute({ version: 1, command: 'ui.open', arguments: { slot: 'roundo.connecting' } });
+  if (!result.ok) e(result.error?.message);
+}
+
+async function load() {
+  if (loading) return;
+  loading = true;
+  try {
+    const result = await roundo.execute({ version: 1, command: 'server.list', arguments: {} });
+    if (!result.ok) {
+      e(result.error?.message);
+      return;
+    }
+    const list = result.data?.servers || [];
+    window.serverEntries = list;
+    if (selected !== null && !list[selected]) selected = null;
+    const nextServers = JSON.stringify({ list, selected });
+    if (renderedServers === nextServers) return;
+    renderedServers = nextServers;
+    document.querySelector('#servers').innerHTML = list.map(server =>
+      `<li class="${selected === server.index ? 'selected' : ''}" onclick="select(${server.index})"><b>${server.index}: ${server.name}</b> <span class="muted">${server.quic_addr} — ${server.probe.status}${server.probe.message ? `: ${server.probe.message}` : ''}</span> <button onclick="event.stopPropagation();del(${server.index})">Delete</button></li>`
+    ).join('');
+  } finally { loading = false; }
+}
+
+function select(index) {
+  selected = index;
+  const server = window.serverEntries?.[index];
+  if (server) {
+    name.value = server.name;
+    quic.value = server.quic_addr;
+    https.value = server.https_addr;
+  }
+  load();
+}
+
+async function refresh() {
+  const result = await roundo.execute({ version: 1, command: 'server.refresh', arguments: {} });
+  e(result.ok ? 'Probing servers…' : result.error?.message);
+  load();
+}
+
+async function connect() {
+  if (selected === null) return e('Select a server first');
+  const result = await roundo.execute({ version: 1, command: 'server.connect', arguments: { index: selected } });
+  if (!result.ok) e(result.error?.message);
+  else await openConnecting();
+}
+
+async function add(event) {
+  event.preventDefault();
+  const result = await roundo.execute({ version: 1, command: 'server.add', arguments: { name: name.value, quic_addr: quic.value, https_addr: https.value } });
+  if (result.ok) {
+    event.target.reset();
+    load();
+  } else e(result.error?.message);
+}
+
+async function edit() {
+  if (selected === null) return e('Select a server first');
+  const result = await roundo.execute({ version: 1, command: 'server.edit', arguments: { index: selected, server: { name: name.value, quic_addr: quic.value, https_addr: https.value } } });
+  if (!result.ok) e(result.error?.message);
+  load();
+}
+
+async function del(index) {
+  const result = await roundo.execute({ version: 1, command: 'server.delete', arguments: { index } });
+  if (!result.ok) e(result.error?.message);
+  load();
+}
+
+refresh();
+load();
+setInterval(load, 1000);
+</script>
+</body>
+</html>

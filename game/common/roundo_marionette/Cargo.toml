@@ -1,0 +1,16 @@
+[package]
+name = "roundo_marionette"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+bevy.workspace = true
+roundo_networking.workspace = true
+roundo_toolbox.workspace = true
+
+[features]
+dev = [
+    "bevy/dev",
+]
+release = [
+]

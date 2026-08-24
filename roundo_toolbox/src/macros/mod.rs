@@ -1,6 +1,9 @@
 #[macro_export]
 macro_rules! identifier {
     ($name:ident) => {
+        $crate::identifier!($name, u64);
+    };
+    ($name:ident, $value:ty) => {
         #[derive(
             Clone,
             Copy,
@@ -14,7 +17,8 @@ macro_rules! identifier {
             PartialOrd,
             Serialize,
         )]
-        pub struct $name(pub u64);
+        #[repr(transparent)]
+        pub struct $name(pub $value);
     };
 }
 
