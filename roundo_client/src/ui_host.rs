@@ -76,9 +76,8 @@ fn apply_recovery_action(
             RecoveryAction::Retry => {}
             RecoveryAction::Disconnect => {
                 network.disconnect();
-                if let Err(error) = navigation
-                    .replace_root(&mut manager, UiLifecycleState::Disconnected)
-                    .and_then(|_| navigation.open_configured_root(&mut manager).map(|_| ()))
+                if let Err(error) =
+                    navigation.replace_root(&mut manager, UiLifecycleState::Disconnected)
                 {
                     log::error!("cannot recover to the Disconnected Root: {error}");
                 }
@@ -117,7 +116,22 @@ fn sync_authoritative_root(
 ) {
     let connection = network.status();
     let previous = manager.lifecycle_state();
+    if manager.recovery_surface().is_some() {
+        // A failed transactional replacement leaves the old Root authoritative
+        // until the user chooses Retry, Disconnect, or Quit. Do not silently
+        // start another replacement behind the Recovery Surface.
+        return;
+    }
     let expected = authoritative_lifecycle_state(previous, &connection.status);
+    if let Some(pending) = manager.pending_root_replacement_lifecycle() {
+        if pending == expected {
+            return;
+        }
+        navigation.cancel_root_replacement(&mut manager);
+        log::info!(
+            "Cancelled pending {pending:?} Root replacement because the authoritative target is {expected:?}"
+        );
+    }
     if previous == expected {
         return;
     }
@@ -125,27 +139,17 @@ fn sync_authoritative_root(
         "Client UI lifecycle transition requested: {previous:?} -> {expected:?}; connection_status={:?}",
         connection.status
     );
-    let destroyed = match navigation.replace_root(&mut manager, expected) {
-        Ok(destroyed) => destroyed,
-        Err(error) => {
-            log::error!(
-                "Client UI lifecycle transition failed while replacing Root: {previous:?} -> {expected:?}; error={error}"
-            );
-            return;
-        }
-    };
-    log::info!(
-        "Client UI Root replaced: {previous:?} -> {expected:?}; destroyed_instances={}",
-        destroyed.len()
-    );
-    match navigation.open_configured_root(&mut manager) {
-        Ok(Some(instance)) => log::info!(
-            "Configured {expected:?} Root UI staged: pending_instance={}",
+    match navigation.replace_root(&mut manager, expected) {
+        Ok(roundo_webui::UiRootReplacement::Pending(instance)) => log::info!(
+            "Configured {expected:?} Root UI staged transactionally: pending_instance={}; {previous:?} Root remains live until commit",
             instance.get()
         ),
-        Ok(None) => log::info!("No configured Root UI for {expected:?}"),
+        Ok(roundo_webui::UiRootReplacement::Completed(destroyed)) => log::info!(
+            "Client UI Root replaced without a configured Root UI: {previous:?} -> {expected:?}; destroyed_instances={}",
+            destroyed.len()
+        ),
         Err(error) => log::error!(
-            "Client UI lifecycle transition could not stage {expected:?} Root UI: {error}"
+            "Client UI lifecycle transition failed while staging Root replacement: {previous:?} -> {expected:?}; error={error}"
         ),
     }
 }

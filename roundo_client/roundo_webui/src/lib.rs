@@ -337,6 +337,19 @@ struct PendingUiOpen {
     root_generation: u64,
     target: UiOpenTarget,
     root_ui: bool,
+    replacement_lifecycle: Option<UiLifecycleState>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum UiRootReplacement {
+    Pending(UiInstanceId),
+    Completed(Vec<UiInstanceId>),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UiRootCommit {
+    pub instance: UiInstanceId,
+    pub destroyed: Vec<UiInstanceId>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -697,7 +710,7 @@ impl UiLifecycleManager {
         source: UiCommandSource,
         target: UiOpenTarget,
     ) -> Result<u64, UiLifecycleError> {
-        self.begin_open_internal(source, target, false)
+        self.begin_open_internal(source, target, false, None)
     }
 
     fn begin_open_internal(
@@ -705,6 +718,7 @@ impl UiLifecycleManager {
         source: UiCommandSource,
         target: UiOpenTarget,
         root_ui: bool,
+        replacement_lifecycle: Option<UiLifecycleState>,
     ) -> Result<u64, UiLifecycleError> {
         let parent = match source {
             UiCommandSource::Host => 0,
@@ -722,7 +736,9 @@ impl UiLifecycleManager {
             .registry
             .resource(&target.resource)
             .ok_or_else(|| UiLifecycleError::Registry(target.resource.clone()))?;
-        if self.live_count(&target.resource) >= definition.max_instances {
+        if replacement_lifecycle.is_none()
+            && self.live_count(&target.resource) >= definition.max_instances
+        {
             return Err(UiLifecycleError::UiInstanceLimit);
         }
         let pending_id = self.next_id;
@@ -735,6 +751,7 @@ impl UiLifecycleManager {
                 root_generation: self.root_generation,
                 target,
                 root_ui,
+                replacement_lifecycle,
             },
         );
         Ok(pending_id)
@@ -769,7 +786,7 @@ impl UiLifecycleManager {
         let target = self
             .resolve_resource_path(&recovery.failed_resource, None)
             .map_err(|error| UiLifecycleError::Registry(error.to_string()))?;
-        let pending = self.begin_open_internal(UiCommandSource::Host, target, true)?;
+        let pending = self.begin_root_replacement_open(recovery.lifecycle, target)?;
         self.recovery = None;
         Ok(pending)
     }
@@ -784,7 +801,9 @@ impl UiLifecycleManager {
             .ok_or(UiLifecycleError::StaleUiInstance)?;
         if pending.root_ui && pending.root_generation == self.root_generation {
             self.recovery = Some(RecoverySurface {
-                lifecycle: self.lifecycle_state,
+                lifecycle: pending
+                    .replacement_lifecycle
+                    .unwrap_or(self.lifecycle_state),
                 failed_resource: pending.target.resource,
                 message: message.into(),
             });
@@ -866,6 +885,56 @@ impl UiLifecycleManager {
         self.recompute_presentation();
         Ok(id)
     }
+
+    pub fn pending_root_replacement(&self, pending_id: u64) -> Option<UiLifecycleState> {
+        self.pending
+            .get(&pending_id)
+            .and_then(|pending| pending.replacement_lifecycle)
+    }
+
+    pub fn pending_root_replacement_lifecycle(&self) -> Option<UiLifecycleState> {
+        self.pending
+            .values()
+            .find_map(|pending| pending.replacement_lifecycle)
+    }
+
+    pub fn cancel_root_replacement(&mut self) -> Vec<u64> {
+        let cancelled = self
+            .pending
+            .iter()
+            .filter_map(|(id, pending)| pending.replacement_lifecycle.map(|_| *id))
+            .collect::<Vec<_>>();
+        for id in &cancelled {
+            self.pending.remove(id);
+        }
+        cancelled
+    }
+
+    pub fn commit_root_replacement(
+        &mut self,
+        pending_id: u64,
+    ) -> Result<UiRootCommit, UiLifecycleError> {
+        let mut pending = self
+            .pending
+            .remove(&pending_id)
+            .ok_or(UiLifecycleError::StaleUiInstance)?;
+        let lifecycle = pending
+            .replacement_lifecycle
+            .ok_or(UiLifecycleError::StaleUiInstance)?;
+        if pending.root_generation != self.root_generation {
+            return Err(UiLifecycleError::StaleUiInstance);
+        }
+        let destroyed = self.replace_root(lifecycle)?;
+        pending.root_generation = self.root_generation;
+        pending.replacement_lifecycle = None;
+        self.pending.insert(pending_id, pending);
+        let instance = self.commit_open(pending_id)?;
+        Ok(UiRootCommit {
+            instance,
+            destroyed,
+        })
+    }
+
     pub fn open(
         &mut self,
         source: UiCommandSource,
@@ -945,8 +1014,11 @@ impl UiLifecycleManager {
         self.lifecycle_state = state;
         Ok(destroyed)
     }
-    fn configured_root_target(&self) -> Result<Option<UiOpenTarget>, UiLifecycleError> {
-        let slot = match self.lifecycle_state {
+    fn configured_root_target_for(
+        &self,
+        lifecycle: UiLifecycleState,
+    ) -> Result<Option<UiOpenTarget>, UiLifecycleError> {
+        let slot = match lifecycle {
             UiLifecycleState::Disconnected => DISCONNECTED_ROOT_SLOT,
             UiLifecycleState::Connected => CONNECTED_ROOT_SLOT,
         };
@@ -957,11 +1029,51 @@ impl UiLifecycleManager {
             .map(Some)
             .map_err(|error| UiLifecycleError::Registry(error.to_string()))
     }
+    fn begin_root_replacement_open(
+        &mut self,
+        lifecycle: UiLifecycleState,
+        target: UiOpenTarget,
+    ) -> Result<u64, UiLifecycleError> {
+        if let Some((id, _)) = self
+            .pending
+            .iter()
+            .find(|(_, pending)| pending.replacement_lifecycle == Some(lifecycle))
+        {
+            return Ok(*id);
+        }
+        self.begin_open_internal(UiCommandSource::Host, target, true, Some(lifecycle))
+    }
+
+    pub fn begin_root_replacement(
+        &mut self,
+        lifecycle: UiLifecycleState,
+    ) -> Result<UiRootReplacement, UiLifecycleError> {
+        if let Some((id, _)) = self
+            .pending
+            .iter()
+            .find(|(_, pending)| pending.replacement_lifecycle == Some(lifecycle))
+        {
+            return Ok(UiRootReplacement::Pending(UiInstanceId(*id)));
+        }
+        // Opens staged from the old Root can never survive this replacement.
+        // Cancel them now so the platform adapter does not spend a WebView2
+        // creation slot loading a document that will be stale at commit.
+        self.pending
+            .retain(|_, pending| pending.replacement_lifecycle.is_some());
+        let Some(target) = self.configured_root_target_for(lifecycle)? else {
+            return self
+                .replace_root(lifecycle)
+                .map(UiRootReplacement::Completed);
+        };
+        self.begin_root_replacement_open(lifecycle, target)
+            .map(|id| UiRootReplacement::Pending(UiInstanceId(id)))
+    }
+
     pub fn begin_configured_root(&mut self) -> Result<Option<u64>, UiLifecycleError> {
-        let Some(target) = self.configured_root_target()? else {
+        let Some(target) = self.configured_root_target_for(self.lifecycle_state)? else {
             return Ok(None);
         };
-        self.begin_open_internal(UiCommandSource::Host, target, true)
+        self.begin_open_internal(UiCommandSource::Host, target, true, None)
             .map(Some)
     }
     pub fn open_configured_root(&mut self) -> Result<Option<UiInstanceId>, UiLifecycleError> {
@@ -1164,7 +1276,16 @@ impl RoundoWebUiPlugin {
 impl Plugin for RoundoWebUiPlugin {
     fn build(&self, app: &mut App) {
         #[cfg(target_os = "windows")]
-        app.insert_resource(bevy_winit::WinitSettings::continuous());
+        app.insert_resource(bevy_winit::WinitSettings {
+            // On Windows, Bevy implements `Continuous` for a visible window by
+            // waiting for parent-window redraw requests. A WebView2 child HWND
+            // can satisfy its own paint cycle without producing that parent
+            // redraw, leaving queued IPC commands and staged loads asleep until
+            // the user touches the title bar. A bounded reactive deadline gives
+            // the host a real timer wake while retaining event-driven updates.
+            focused_mode: bevy_winit::UpdateMode::reactive(Duration::from_millis(16)),
+            unfocused_mode: bevy_winit::UpdateMode::reactive(Duration::from_millis(16)),
+        });
         let mods = LoadedMods::discover(&self.mods_root).unwrap_or_else(|error| {
             panic!(
                 "cannot load Mods from {}: {error}",
@@ -1311,8 +1432,20 @@ pub struct UiNavigationExecutor {
     /// operation is allowed to reuse another instance's document.
     #[cfg(target_os = "windows")]
     committed: BTreeMap<UiInstanceId, WebViewOverlay>,
+    /// Presentations from the replaced Root remain physically visible until
+    /// the replacement Root has itself been made visible. They are no longer
+    /// live command sources in the lifecycle model.
+    #[cfg(target_os = "windows")]
+    retiring: BTreeMap<UiInstanceId, WebViewOverlay>,
+    #[cfg(target_os = "windows")]
+    retained_root_presentations: Vec<UiInstanceId>,
     #[cfg(target_os = "windows")]
     staged: BTreeMap<u64, StagedWebView>,
+    /// Superseded staged WebViews are moved here instead of dropped while a
+    /// WebView2 navigation callback may still be on the Win32 stack. They are
+    /// released after the replacement presentation becomes visible.
+    #[cfg(target_os = "windows")]
+    superseded_staged: BTreeMap<u64, StagedWebView>,
     #[cfg(target_os = "windows")]
     deferred_open_responses: BTreeMap<u64, DeferredOpenResponse>,
     #[cfg(target_os = "windows")]
@@ -1326,7 +1459,13 @@ impl Default for UiNavigationExecutor {
             #[cfg(target_os = "windows")]
             committed: BTreeMap::new(),
             #[cfg(target_os = "windows")]
+            retiring: BTreeMap::new(),
+            #[cfg(target_os = "windows")]
+            retained_root_presentations: Vec::new(),
+            #[cfg(target_os = "windows")]
             staged: BTreeMap::new(),
+            #[cfg(target_os = "windows")]
+            superseded_staged: BTreeMap::new(),
             #[cfg(target_os = "windows")]
             deferred_open_responses: BTreeMap::new(),
             #[cfg(target_os = "windows")]
@@ -1335,6 +1474,39 @@ impl Default for UiNavigationExecutor {
     }
 }
 impl UiNavigationExecutor {
+    #[cfg(target_os = "windows")]
+    fn begin_root_presentation_handoff(
+        &mut self,
+        presentations: impl IntoIterator<Item = UiInstanceId>,
+    ) {
+        for id in presentations {
+            if !self.retained_root_presentations.contains(&id) {
+                self.retained_root_presentations.push(id);
+            }
+        }
+    }
+
+    /// Returns true only when a visible replacement releases the retained
+    /// presentation. A pending or hidden replacement must leave coverage in
+    /// place.
+    #[cfg(target_os = "windows")]
+    fn finish_root_presentation_handoff(&mut self, replacement_visible: bool) -> bool {
+        if !replacement_visible || self.retained_root_presentations.is_empty() {
+            return false;
+        }
+        for (id, overlay) in &self.retiring {
+            log::info!(
+                "Destroying retained Web UI instance {} after Root presentation handoff",
+                id.get()
+            );
+            dispatch_lifecycle_event(&overlay.webview, "roundo:destroying", "destroying");
+        }
+        self.retiring.clear();
+        self.retained_root_presentations.clear();
+        self.superseded_staged.clear();
+        true
+    }
+
     pub fn set_load_timeout(&mut self, timeout: Duration) {
         assert!(!timeout.is_zero(), "UI load timeout must be positive");
         self.load_timeout = timeout;
@@ -1413,9 +1585,16 @@ impl UiNavigationExecutor {
     ) -> Result<Option<UiInstanceId>, UiLifecycleError> {
         #[cfg(target_os = "windows")]
         {
-            state
+            let pending = state
                 .begin_configured_root()
-                .map(|pending| pending.map(UiInstanceId::from_host_id))
+                .map(|pending| pending.map(UiInstanceId::from_host_id));
+            if matches!(pending, Ok(None)) {
+                // A Root UI is optional. The game/world itself is the new
+                // presentation, so no WebView readiness edge will release the
+                // retained old Root for us.
+                self.finish_root_presentation_handoff(true);
+            }
+            pending
         }
         #[cfg(not(target_os = "windows"))]
         {
@@ -1486,14 +1665,53 @@ impl UiNavigationExecutor {
         Ok(destroyed)
     }
 
+    pub fn cancel_root_replacement(&mut self, state: &mut UiLifecycleManager) {
+        #[cfg(target_os = "windows")]
+        for id in state.cancel_root_replacement() {
+            self.staged.remove(&id);
+            self.resolve_open_response(
+                id,
+                Some((
+                    "stale_ui_instance",
+                    "authoritative Root target changed".into(),
+                )),
+            );
+        }
+        #[cfg(not(target_os = "windows"))]
+        let _ = state.cancel_root_replacement();
+    }
+
     pub fn replace_root(
         &mut self,
         state: &mut UiLifecycleManager,
         lifecycle: UiLifecycleState,
-    ) -> Result<Vec<UiInstanceId>, UiLifecycleError> {
-        let destroyed = state.replace_root(lifecycle)?;
+    ) -> Result<UiRootReplacement, UiLifecycleError> {
+        let replacement = state.begin_root_replacement(lifecycle)?;
         #[cfg(target_os = "windows")]
         {
+            let stale_staged = self
+                .staged
+                .keys()
+                .copied()
+                .filter(|id| state.pending_descriptor(*id).is_none())
+                .collect::<Vec<_>>();
+            for id in stale_staged {
+                // Do not drop a WebView2 controller from inside the same host
+                // update in which its initial navigation callback may be on
+                // the Win32 stack. Moving ownership is non-destructive; the
+                // replacement presentation releases it after becoming visible.
+                if let Some(staged) = self.staged.remove(&id) {
+                    self.superseded_staged.insert(id, staged);
+                }
+            }
+            // Keep deferred responses unresolved during the handoff. Resolving
+            // one evaluates JavaScript in the old WebView and can re-enter
+            // WebView2 while another controller's NavigationStarting callback
+            // is active. The transactional commit resolves every now-stale
+            // response after the replacement document has finished loading.
+        }
+        #[cfg(target_os = "windows")]
+        if let UiRootReplacement::Completed(destroyed) = &replacement {
             let pending = self
                 .deferred_open_responses
                 .keys()
@@ -1507,22 +1725,13 @@ impl UiNavigationExecutor {
             }
             self.staged.clear();
             self.recovery = None;
-            for id in &destroyed {
+            for id in destroyed {
                 if let Some(overlay) = self.committed.remove(id) {
-                    log::info!(
-                        "Destroying Web UI instance {} during authoritative Root replacement",
-                        id.get()
-                    );
                     dispatch_lifecycle_event(&overlay.webview, "roundo:destroying", "destroying");
-                    drop(overlay);
-                    log::info!(
-                        "Destroyed Web UI instance {} during authoritative Root replacement",
-                        id.get()
-                    );
                 }
             }
         }
-        Ok(destroyed)
+        Ok(replacement)
     }
 }
 
@@ -1705,12 +1914,9 @@ fn stage_pending_webview(world: &mut bevy::prelude::World) {
             };
             use wry::WebViewExtWindows;
 
-            use windows::Win32::UI::WindowsAndMessaging::GetParent;
-            let native_parent = unsafe { GetParent(webview.hwnd()) }.unwrap_or_default();
-            parent_hwnd.store(
-                native_parent.0 as isize,
-                std::sync::atomic::Ordering::Release,
-            );
+            use windows::Win32::UI::WindowsAndMessaging::{GA_ROOT, GetAncestor};
+            let host_window = unsafe { GetAncestor(webview.hwnd(), GA_ROOT) };
+            parent_hwnd.store(host_window.0 as isize, std::sync::atomic::Ordering::Release);
 
             let target_navigation_id = Arc::new(Mutex::new(None::<u64>));
             let starting_target_navigation_id = Arc::clone(&target_navigation_id);
@@ -1924,15 +2130,27 @@ fn advance_staged_webviews(world: &mut bevy::prelude::World) {
     for resolution in resolutions {
         match resolution {
             Resolution::Commit(pending_id) => {
-                let commit = world
-                    .resource_mut::<UiLifecycleManager>()
-                    .commit_open(pending_id);
+                let replacing_root = world
+                    .resource::<UiLifecycleManager>()
+                    .pending_root_replacement(pending_id)
+                    .is_some();
+                let commit = if replacing_root {
+                    world
+                        .resource_mut::<UiLifecycleManager>()
+                        .commit_root_replacement(pending_id)
+                        .map(|commit| (commit.instance, commit.destroyed))
+                } else {
+                    world
+                        .resource_mut::<UiLifecycleManager>()
+                        .commit_open(pending_id)
+                        .map(|instance| (instance, Vec::new()))
+                };
                 let staged = world
                     .non_send_mut::<UiNavigationExecutor>()
                     .staged
                     .remove(&pending_id);
                 match (commit, staged) {
-                    (Ok(instance), Some(staged)) => {
+                    (Ok((instance, destroyed)), Some(staged)) => {
                         let queued = {
                             let mut gate = staged
                                 .command_gate
@@ -1949,6 +2167,40 @@ fn advance_staged_webviews(world: &mut bevy::prelude::World) {
                             );
                         }
                         let mut executor = world.non_send_mut::<UiNavigationExecutor>();
+                        if !destroyed.is_empty() {
+                            let stale_staged = executor.staged.keys().copied().collect::<Vec<_>>();
+                            for id in stale_staged {
+                                executor.staged.remove(&id);
+                                executor.resolve_open_response(
+                                    id,
+                                    Some(("stale_ui_instance", "UI root was replaced".into())),
+                                );
+                            }
+                            let stale_responses = executor
+                                .deferred_open_responses
+                                .keys()
+                                .copied()
+                                .filter(|id| *id != pending_id)
+                                .collect::<Vec<_>>();
+                            for id in stale_responses {
+                                executor.resolve_open_response(
+                                    id,
+                                    Some(("stale_ui_instance", "UI root was replaced".into())),
+                                );
+                            }
+                            let mut retained = Vec::new();
+                            for id in &destroyed {
+                                if let Some(overlay) = executor.committed.remove(id) {
+                                    executor.retiring.insert(*id, overlay);
+                                    retained.push(*id);
+                                }
+                            }
+                            executor.begin_root_presentation_handoff(retained);
+                            log::info!(
+                                "Committed transactional Root replacement; destroyed_instances={}",
+                                destroyed.len()
+                            );
+                        }
                         executor.committed.insert(
                             instance,
                             WebViewOverlay {
@@ -2133,15 +2385,15 @@ fn sync_recovery_surface(world: &mut bevy::prelude::World) {
     });
     match result {
         Ok(webview) => {
-            use windows::Win32::UI::WindowsAndMessaging::GetParent;
+            use windows::Win32::UI::WindowsAndMessaging::{GA_ROOT, GetAncestor};
             use wry::WebViewExtWindows;
-            let native_parent = unsafe { GetParent(webview.hwnd()) }.unwrap_or_default();
-            parent_hwnd.store(
-                native_parent.0 as isize,
-                std::sync::atomic::Ordering::Release,
-            );
-            world.non_send_mut::<UiNavigationExecutor>().recovery =
-                Some(RecoveryOverlay { webview, actions });
+            let host_window = unsafe { GetAncestor(webview.hwnd(), GA_ROOT) };
+            parent_hwnd.store(host_window.0 as isize, std::sync::atomic::Ordering::Release);
+            let mut executor = world.non_send_mut::<UiNavigationExecutor>();
+            executor.recovery = Some(RecoveryOverlay { webview, actions });
+            if executor.finish_root_presentation_handoff(true) {
+                log::info!("Recovery Surface is visible; released retained Root presentations");
+            }
         }
         Err(error) => {
             log::error!("cannot create host Recovery Surface: {error}");
@@ -2250,6 +2502,7 @@ fn apply_windows_input_mode(
         return;
     };
     let focused = state.focused_instance();
+    let mut replacement_visible = false;
     for id in state.stacking_order() {
         let Some(instance) = state.instance(id) else {
             continue;
@@ -2286,20 +2539,21 @@ fn apply_windows_input_mode(
                     id.get(),
                     instance.visible
                 );
+                dispatch_lifecycle_event(
+                    &overlay.webview,
+                    "roundo:visibility",
+                    if instance.visible {
+                        "visible"
+                    } else {
+                        "hidden"
+                    },
+                );
+                overlay.last_visible = instance.visible;
+                should_raise |= instance.visible;
+                presentation_changed = true;
             }
-            dispatch_lifecycle_event(
-                &overlay.webview,
-                "roundo:visibility",
-                if instance.visible {
-                    "visible"
-                } else {
-                    "hidden"
-                },
-            );
-            overlay.last_visible = instance.visible;
-            should_raise |= instance.visible;
-            presentation_changed = true;
         }
+        replacement_visible |= instance.visible && overlay.last_visible;
         if overlay.last_interaction_mode != Some(resource.interaction_mode) {
             apply_windows_webview_mode(overlay, resource.interaction_mode);
             overlay.last_interaction_mode = Some(resource.interaction_mode);
@@ -2330,6 +2584,9 @@ fn apply_windows_input_mode(
             invalidate_webview_parent(&overlay.webview);
         }
     }
+    if executor.finish_root_presentation_handoff(replacement_visible) {
+        log::info!("Replacement Root is visible; released retained Root presentations");
+    }
 }
 
 #[cfg(target_os = "windows")]
@@ -2345,12 +2602,15 @@ fn invalidate_parent_window(parent: &std::sync::atomic::AtomicIsize) {
 
 #[cfg(target_os = "windows")]
 fn invalidate_webview_parent(webview: &wry::WebView) {
-    use windows::Win32::{Graphics::Gdi::InvalidateRect, UI::WindowsAndMessaging::GetParent};
+    use windows::Win32::{
+        Graphics::Gdi::InvalidateRect,
+        UI::WindowsAndMessaging::{GA_ROOT, GetAncestor},
+    };
     use wry::WebViewExtWindows;
-    let parent = unsafe { GetParent(webview.hwnd()) }.unwrap_or_default();
-    if !parent.is_invalid() {
+    let host_window = unsafe { GetAncestor(webview.hwnd(), GA_ROOT) };
+    if !host_window.is_invalid() {
         unsafe {
-            let _ = InvalidateRect(Some(parent), None, false);
+            let _ = InvalidateRect(Some(host_window), None, false);
         }
     }
 }
@@ -2925,6 +3185,50 @@ mod tests {
 
     #[cfg(target_os = "windows")]
     #[test]
+    fn root_replacement_keeps_the_old_root_live_until_the_new_root_commits() {
+        let root = fixture_root();
+        let registry = UiRegistry::load(&LoadedMods::discover(&root).unwrap()).unwrap();
+        let mut manager = UiLifecycleManager::new(registry);
+        manager
+            .registry
+            .slots
+            .insert(CONNECTED_ROOT_SLOT.into(), "vanilla.vanilla_ui.main".into());
+        let old_root = manager.open_configured_root().unwrap().unwrap();
+        let obsolete_target = manager
+            .resolve_resource_path("vanilla.vanilla_ui.main", Some("about.html"))
+            .unwrap();
+        let obsolete_pending = manager
+            .begin_open(UiCommandSource::WebView(old_root), obsolete_target)
+            .unwrap();
+        let mut executor = UiNavigationExecutor::default();
+
+        let pending = match executor
+            .replace_root(&mut manager, UiLifecycleState::Connected)
+            .unwrap()
+        {
+            UiRootReplacement::Pending(pending) => pending,
+            UiRootReplacement::Completed(_) => panic!("configured Root must load before commit"),
+        };
+
+        assert_eq!(manager.lifecycle_state(), UiLifecycleState::Disconnected);
+        assert!(manager.instance(old_root).is_some());
+        assert!(manager.command_source_is_live(old_root));
+        assert_eq!(
+            manager.commit_open(obsolete_pending),
+            Err(UiLifecycleError::StaleUiInstance),
+            "a pending open owned by the old Root must not race its replacement"
+        );
+
+        let committed = manager.commit_root_replacement(pending.get()).unwrap();
+        assert_eq!(manager.lifecycle_state(), UiLifecycleState::Connected);
+        assert_eq!(committed.destroyed, vec![old_root]);
+        assert!(manager.instance(old_root).is_none());
+        assert!(manager.instance(committed.instance).is_some());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
     fn staged_command_gate_flushes_in_order_and_never_requeues_after_commit() {
         let mut gate = StagedCommandGate::default();
         assert!(gate.queue_until_commit("first"));
@@ -3329,6 +3633,25 @@ mod tests {
         assert!(connecting.contains("const connectionStatus=s.status?.status"));
         assert!(!connecting.contains("roundo.hud"));
         assert!(!connecting.contains("command:'ui.open'"));
+    }
+
+    #[test]
+    fn server_selection_commits_the_connecting_surface_before_starting_the_network() {
+        let selection =
+            include_str!("../../../mods/vanilla_ui/assets/webui/server-selection/index.html");
+        let connect = selection
+            .split("async function connect() {")
+            .nth(1)
+            .unwrap()
+            .split("\n}")
+            .next()
+            .unwrap();
+
+        assert!(
+            connect.find("await openConnecting()").unwrap()
+                < connect.find("command: 'server.connect'").unwrap(),
+            "the connecting UI must commit before a fast local connection can replace its Root"
+        );
     }
 
     #[test]

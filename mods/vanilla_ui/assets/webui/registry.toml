@@ -1,3 +1,13 @@
+[slots]
+"roundo.disconnected-root" = "main-menu"
+"roundo.connected-root" = "hud"
+"roundo.main-menu" = "main-menu"
+"roundo.server-selection" = "server-selection"
+"roundo.connecting" = "connecting"
+"roundo.hud" = "hud"
+"roundo.settings" = "settings"
+"roundo.pause-menu" = "pause-menu"
+
 [[ui]]
 name = "main-menu"
 project = "main-menu"
@@ -57,12 +67,3 @@ interaction_mode = "web-ui"
 world_visibility = "hidden"
 max_instances = 1
 
-[slots]
-"roundo.disconnected-root" = "main-menu"
-"roundo.connected-root" = "hud"
-"roundo.main-menu" = "main-menu"
-"roundo.server-selection" = "server-selection"
-"roundo.connecting" = "connecting"
-"roundo.hud" = "hud"
-"roundo.settings" = "settings"
-"roundo.pause-menu" = "pause-menu"

@@ -84,9 +84,9 @@ async function refresh() {
 
 async function connect() {
   if (selected === null) return e('Select a server first');
+  await openConnecting();
   const result = await roundo.execute({ version: 1, command: 'server.connect', arguments: { index: selected } });
   if (!result.ok) e(result.error?.message);
-  else await openConnecting();
 }
 
 async function add(event) {
