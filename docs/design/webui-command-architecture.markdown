@@ -706,7 +706,8 @@ mods/vanilla_ui/
     │   ├── bridge.js
     │   └── fonts/
     │       ├── NotoSans-Regular.ttf
-    │       └── NotoSans-SemiBold.ttf
+    │       ├── NotoSans-SemiBold.ttf
+    │       └── OFL-NotoSans.txt
     ├── main-menu/
     ├── server-selection/
     ├── connecting/
@@ -715,7 +716,7 @@ mods/vanilla_ui/
     └── pause-menu/
 ```
 
-`shared` 本身是已注册 UI Resource；其中 CSS、JS、字体和许可证相关文件是 UI Asset，不单独注册。现有 `assets/client/fonts` 中 UI 使用的字体及对应许可证迁入 Vanilla UI Mod。Project 使用原生 HTML/CSS/ES modules，不引入 npm/Node 构建步骤。
+`shared` 本身是已注册 UI Resource；其中 CSS、JS、字体和许可证相关文件是 UI Asset，不单独注册。UI 使用的字体及对应许可证位于 Vanilla UI Mod。Project 使用原生 HTML/CSS/ES modules，不引入 npm/Node 构建步骤。
 
 Vanilla 资源及 slot：
 

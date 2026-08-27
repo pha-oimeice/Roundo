@@ -1,4 +1,4 @@
-use crate::assets::{register_common_asset_source, server_asset_plugin};
+use crate::mod_assets::mod_asset_plugin;
 use avian3d::PhysicsPlugins;
 use bevy::MinimalPlugins;
 use bevy::app::App;
@@ -54,7 +54,6 @@ pub fn configure_server_presence_radius(radius: f32) {
 
 pub fn create_ecs_server_app() -> App {
     let mut app = App::new();
-    register_common_asset_source(&mut app);
     app.insert_resource(Time::<Fixed>::from_hz(f64::from(
         TICK_RATE.load(Ordering::Relaxed),
     )))
@@ -63,7 +62,7 @@ pub fn create_ecs_server_app() -> App {
     )));
     app.add_plugins((
         MinimalPlugins,
-        server_asset_plugin(),
+        mod_asset_plugin(),
         MeshPlugin,
         PhysicsPlugins::default(),
         RoundoPortalPlugin,

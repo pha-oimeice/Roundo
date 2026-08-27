@@ -20,13 +20,6 @@ Cargo.lock
 .github
 *.md
 asset
-assets/client/fonts/*
-!assets/client/fonts/NotoSans-Regular.ttf
-!assets/client/fonts/NotoSans-SemiBold.ttf
-!assets/client/fonts/NotoSansSymbols2-Regular.ttf
-assets/licenses/*
-!assets/licenses/OFL-NotoSans.txt
-!assets/licenses/OFL-NotoSansSymbols2.txt
 *.lock
 *.pem
 .sqlx

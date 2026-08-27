@@ -1,4 +1,4 @@
-use crate::assets::{client_asset_plugin, register_common_asset_source};
+use crate::mod_assets::mod_asset_plugin;
 use bevy::{
     DefaultPlugins,
     app::{App, PostStartup},
@@ -37,9 +37,8 @@ pub fn client_local_coordinate_ipc() -> LocalCoordinateClientIpc {
 
 pub fn create_ecs_client_app() -> App {
     let mut app = App::new();
-    register_common_asset_source(&mut app);
     app.add_plugins((
-        DefaultPlugins.set(client_asset_plugin()).set(WindowPlugin {
+        DefaultPlugins.set(mod_asset_plugin()).set(WindowPlugin {
             primary_window: Some(Window {
                 title: "Roundo".to_string(),
                 position: WindowPosition::At(IVec2::new(0, 0)),

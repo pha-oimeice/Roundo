@@ -1,6 +1,7 @@
-mod assets;
 #[cfg(feature = "client")]
 mod client;
+#[cfg(any(feature = "client", feature = "server"))]
+mod mod_assets;
 #[cfg(feature = "server")]
 mod server;
 
