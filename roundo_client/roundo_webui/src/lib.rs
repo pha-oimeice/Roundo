@@ -21,6 +21,8 @@ use std::{
 
 pub const DISCONNECTED_ROOT_SLOT: &str = "roundo.disconnected-root";
 pub const CONNECTED_ROOT_SLOT: &str = "roundo.connected-root";
+const MAX_PREPARED_UI_CANDIDATES: usize = 8;
+const MAX_PREPARED_COMMANDS: usize = 64;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ClientInteractionMode {
@@ -46,6 +48,10 @@ pub struct UiResource {
     pub lifecycle_independent: bool,
     pub presentation: PresentationMode,
     pub layout: UiLayout,
+    /// Definition names that are likely to be opened after this one. The
+    /// platform adapter may prepare them physically, but they do not become
+    /// lifecycle instances until a real `ui.open` claims them.
+    pub prefetch: Vec<String>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -149,6 +155,7 @@ impl UiRegistry {
                 .dependency_closure(&loaded.id)
                 .map_err(UiRegistryError::ModLoader)?;
             let mut local = BTreeSet::new();
+            let mut local_prefetch = Vec::new();
             for definition in manifest.ui {
                 if !valid_local_name(&definition.name) || !local.insert(definition.name.clone()) {
                     return Err(UiRegistryError::InvalidLocalName {
@@ -164,6 +171,7 @@ impl UiRegistry {
                     });
                 }
                 let name = format!("{}.{}", loaded.id, definition.name);
+                local_prefetch.push((name.clone(), definition.prefetch.clone()));
                 let project_root = checked_directory(&web_root, &definition.project)?;
                 let entry = checked_file(&project_root, &definition.entry)?;
                 let resource = UiResource {
@@ -185,6 +193,7 @@ impl UiRegistry {
                             name: definition.name.clone(),
                             message,
                         })?,
+                    prefetch: Vec::new(),
                 };
                 if resources.insert(name, resource).is_some() {
                     unreachable!("full names include unique Mod ID and local name")
@@ -192,6 +201,16 @@ impl UiRegistry {
             }
             let resolve =
                 |reference: &str| resolve_reference(reference, &loaded.id, &closure, &local);
+            for (source, targets) in local_prefetch {
+                let resolved = targets
+                    .iter()
+                    .map(|target| resolve(target))
+                    .collect::<Result<Vec<_>, _>>()?;
+                resources
+                    .get_mut(&source)
+                    .expect("prefetch source was just registered")
+                    .prefetch = resolved;
+            }
             for (slot, reference) in manifest.slots {
                 if slot.is_empty() {
                     return Err(UiRegistryError::InvalidSlot(slot));
@@ -204,6 +223,13 @@ impl UiRegistry {
                         value: resolve(&reference)?,
                     },
                 ));
+            }
+        }
+        for resource in resources.values() {
+            for target in &resource.prefetch {
+                if !resources.contains_key(target) {
+                    return Err(UiRegistryError::UnknownResource(target.clone()));
+                }
             }
         }
         let mut grouped: BTreeMap<String, Vec<ResourceCandidate<String>>> = BTreeMap::new();
@@ -320,7 +346,7 @@ pub struct UiInstance {
     pub z_order: u64,
     pub pointer_enabled: bool,
 }
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct UiOpenTarget {
     resource: String,
     path: String,
@@ -338,6 +364,9 @@ struct PendingUiOpen {
     target: UiOpenTarget,
     root_ui: bool,
     replacement_lifecycle: Option<UiLifecycleState>,
+    /// A physically prepared candidate is not a logical open until a caller
+    /// claims it. Its opener and parent are rebound atomically on claim.
+    prefetched: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -377,6 +406,7 @@ pub struct PendingUiDescriptor {
     pub id: u64,
     pub target: UiOpenTarget,
     pub root_generation: u64,
+    pub prefetched: bool,
 }
 #[derive(Clone, Debug)]
 struct UiAdapterRecord {
@@ -710,7 +740,64 @@ impl UiLifecycleManager {
         source: UiCommandSource,
         target: UiOpenTarget,
     ) -> Result<u64, UiLifecycleError> {
-        self.begin_open_internal(source, target, false, None)
+        self.begin_open_internal(source, target, false, None, false)
+    }
+
+    /// Reserves one hidden physical candidate without creating a logical UI
+    /// instance or consuming the Definition's live-instance allowance.
+    pub fn begin_prefetch(&mut self, target: UiOpenTarget) -> Result<u64, UiLifecycleError> {
+        if let Some((id, _)) = self
+            .pending
+            .iter()
+            .find(|(_, pending)| pending.prefetched && pending.target == target)
+        {
+            return Ok(*id);
+        }
+        if self.instances.values().any(|instance| {
+            instance.definition == target.resource && instance.current_path == target.path
+        }) {
+            return Err(UiLifecycleError::UiInstanceLimit);
+        }
+        self.begin_open_internal(UiCommandSource::Host, target, false, None, true)
+    }
+
+    /// Converts a prepared candidate into the caller's real Pending UI Open.
+    /// The document keeps its future instance identity, while ownership is
+    /// assigned only now so speculative work cannot mutate the lifecycle tree.
+    pub fn claim_prefetch(
+        &mut self,
+        source: UiCommandSource,
+        target: &UiOpenTarget,
+    ) -> Result<Option<u64>, UiLifecycleError> {
+        let parent = self.pending_parent(source)?;
+        let Some(id) = self.pending.iter().find_map(|(id, pending)| {
+            (pending.prefetched && &pending.target == target).then_some(*id)
+        }) else {
+            return Ok(None);
+        };
+        let definition = self
+            .registry
+            .resource(&target.resource)
+            .ok_or_else(|| UiLifecycleError::Registry(target.resource.clone()))?;
+        if self.live_count(&target.resource) >= definition.max_instances {
+            return Err(UiLifecycleError::UiInstanceLimit);
+        }
+        let pending = self
+            .pending
+            .get_mut(&id)
+            .expect("selected pending candidate");
+        pending.source = source;
+        pending.parent = parent;
+        pending.prefetched = false;
+        Ok(Some(id))
+    }
+
+    fn pending_parent(&self, source: UiCommandSource) -> Result<u64, UiLifecycleError> {
+        match source {
+            UiCommandSource::Host => Ok(0),
+            UiCommandSource::WebView(id) if self.command_source_is_live(id) => Ok(id.0),
+            UiCommandSource::WebView(_) => Err(UiLifecycleError::StaleUiInstance),
+        }
     }
 
     fn begin_open_internal(
@@ -719,12 +806,9 @@ impl UiLifecycleManager {
         target: UiOpenTarget,
         root_ui: bool,
         replacement_lifecycle: Option<UiLifecycleState>,
+        prefetched: bool,
     ) -> Result<u64, UiLifecycleError> {
-        let parent = match source {
-            UiCommandSource::Host => 0,
-            UiCommandSource::WebView(id) if self.command_source_is_live(id) => id.0,
-            UiCommandSource::WebView(_) => return Err(UiLifecycleError::StaleUiInstance),
-        };
+        let parent = self.pending_parent(source)?;
         if self.pending.values().any(|pending| {
             pending.source == source
                 && pending.target == target
@@ -752,6 +836,7 @@ impl UiLifecycleManager {
                 target,
                 root_ui,
                 replacement_lifecycle,
+                prefetched,
             },
         );
         Ok(pending_id)
@@ -763,6 +848,7 @@ impl UiLifecycleManager {
                 id: pending_id,
                 target: pending.target.clone(),
                 root_generation: pending.root_generation,
+                prefetched: pending.prefetched,
             })
     }
     pub fn pending_descriptors(&self) -> Vec<PendingUiDescriptor> {
@@ -772,6 +858,7 @@ impl UiLifecycleManager {
                 id: *id,
                 target: pending.target.clone(),
                 root_generation: pending.root_generation,
+                prefetched: pending.prefetched,
             })
             .collect()
     }
@@ -1007,9 +1094,17 @@ impl UiLifecycleManager {
             .map(UiInstanceId)
             .collect::<Vec<_>>();
         self.remove_instances(&destroyed);
-        self.pending.clear();
+        // Prepared candidates have no lifecycle parent until claimed, so a
+        // Root replacement must not throw away their already-loaded views.
+        // Ordinary Pending UI Opens remain owned by the old Root and die here.
+        self.pending.retain(|_, pending| pending.prefetched);
         self.recovery = None;
         self.root_generation += 1;
+        for pending in self.pending.values_mut() {
+            pending.root_generation = self.root_generation;
+            pending.source = UiCommandSource::Host;
+            pending.parent = 0;
+        }
         self.tree = roundo_lifecycle::lifecycle_tree::AnchorTree::new(0, None);
         self.lifecycle_state = state;
         Ok(destroyed)
@@ -1041,7 +1136,7 @@ impl UiLifecycleManager {
         {
             return Ok(*id);
         }
-        self.begin_open_internal(UiCommandSource::Host, target, true, Some(lifecycle))
+        self.begin_open_internal(UiCommandSource::Host, target, true, Some(lifecycle), false)
     }
 
     pub fn begin_root_replacement(
@@ -1059,7 +1154,7 @@ impl UiLifecycleManager {
         // Cancel them now so the platform adapter does not spend a WebView2
         // creation slot loading a document that will be stale at commit.
         self.pending
-            .retain(|_, pending| pending.replacement_lifecycle.is_some());
+            .retain(|_, pending| pending.prefetched || pending.replacement_lifecycle.is_some());
         let Some(target) = self.configured_root_target_for(lifecycle)? else {
             return self
                 .replace_root(lifecycle)
@@ -1073,7 +1168,7 @@ impl UiLifecycleManager {
         let Some(target) = self.configured_root_target_for(self.lifecycle_state)? else {
             return Ok(None);
         };
-        self.begin_open_internal(UiCommandSource::Host, target, true, None)
+        self.begin_open_internal(UiCommandSource::Host, target, true, None, false)
             .map(Some)
     }
     pub fn open_configured_root(&mut self) -> Result<Option<UiInstanceId>, UiLifecycleError> {
@@ -1317,6 +1412,7 @@ impl Plugin for RoundoWebUiPlugin {
                 retire_superseded_staged_webviews,
                 stage_pending_webview,
                 advance_staged_webviews,
+                schedule_graph_prefetches,
                 sync_recovery_surface,
                 sync_committed_navigation,
                 resize_webview,
@@ -1388,6 +1484,7 @@ struct RecoveryOverlay {
 struct StagedCommandGate {
     admitted: bool,
     queued: Vec<String>,
+    overflow_logged: bool,
 }
 
 #[cfg(target_os = "windows")]
@@ -1396,7 +1493,15 @@ impl StagedCommandGate {
         if self.admitted {
             false
         } else {
-            self.queued.push(body.to_owned());
+            if self.queued.len() < MAX_PREPARED_COMMANDS {
+                self.queued.push(body.to_owned());
+            } else if !self.overflow_logged {
+                log::warn!(
+                    "prepared Web UI command gate reached its {}-command limit",
+                    MAX_PREPARED_COMMANDS
+                );
+                self.overflow_logged = true;
+            }
             true
         }
     }
@@ -1442,6 +1547,10 @@ pub struct UiNavigationExecutor {
     retained_root_presentations: Vec<UiInstanceId>,
     #[cfg(target_os = "windows")]
     staged: BTreeMap<u64, StagedWebView>,
+    /// Fully loaded graph-prefetched documents. They remain command-gated and
+    /// consume neither a lifecycle instance nor `max_instances` until claimed.
+    #[cfg(target_os = "windows")]
+    prepared: BTreeMap<u64, StagedWebView>,
     /// Superseded staged WebViews are moved here instead of dropped while a
     /// WebView2 navigation callback may still be on the Win32 stack. The next
     /// host update retires them, followed by one creation-free update so COM
@@ -1469,6 +1578,8 @@ impl Default for UiNavigationExecutor {
             #[cfg(target_os = "windows")]
             staged: BTreeMap::new(),
             #[cfg(target_os = "windows")]
+            prepared: BTreeMap::new(),
+            #[cfg(target_os = "windows")]
             superseded_staged: BTreeMap::new(),
             #[cfg(target_os = "windows")]
             webview_creation_cooldown: false,
@@ -1482,7 +1593,11 @@ impl Default for UiNavigationExecutor {
 impl UiNavigationExecutor {
     #[cfg(target_os = "windows")]
     fn supersede_staged_webview(&mut self, id: u64) {
-        if let Some(staged) = self.staged.remove(&id) {
+        if let Some(staged) = self
+            .staged
+            .remove(&id)
+            .or_else(|| self.prepared.remove(&id))
+        {
             self.superseded_staged.insert(id, staged);
         }
     }
@@ -1535,9 +1650,18 @@ impl UiNavigationExecutor {
         // The pending id is process-unique and becomes the committed instance
         // id only after `commit_open` succeeds.
         #[cfg(target_os = "windows")]
-        let opened = state
-            .begin_open(source, target)
-            .map(UiInstanceId::from_host_id);
+        let opened = match state.claim_prefetch(source, &target)? {
+            Some(pending) => {
+                log::debug!(
+                    "claimed prepared Web UI candidate {pending} for `{}`",
+                    target.resource()
+                );
+                Ok(UiInstanceId::from_host_id(pending))
+            }
+            None => state
+                .begin_open(source, target)
+                .map(UiInstanceId::from_host_id),
+        };
         #[cfg(not(target_os = "windows"))]
         let opened = state.open(source, target);
         if let Ok(id) = &opened {
@@ -1622,6 +1746,7 @@ impl UiNavigationExecutor {
         let destroyed = state.back(source)?;
         #[cfg(target_os = "windows")]
         {
+            let restore_parent_focus = state.focused_declaration().is_none();
             let cancelled = self
                 .deferred_open_responses
                 .keys()
@@ -1637,6 +1762,17 @@ impl UiNavigationExecutor {
             }
             for id in &destroyed {
                 if let Some(overlay) = self.committed.remove(id) {
+                    if restore_parent_focus && *id == source {
+                        match overlay.webview.focus_parent() {
+                            Ok(()) => log::debug!(
+                                "restored game-window focus while closing UI instance {}",
+                                id.get()
+                            ),
+                            Err(error) => log::error!(
+                                "cannot restore game-window focus while closing Web UI: {error}"
+                            ),
+                        }
+                    }
                     dispatch_lifecycle_event(&overlay.webview, "roundo:destroying", "destroying");
                     drop(overlay);
                 }
@@ -1668,6 +1804,7 @@ impl UiNavigationExecutor {
             let stale_staged = self
                 .staged
                 .keys()
+                .chain(self.prepared.keys())
                 .copied()
                 .filter(|id| state.pending_descriptor(*id).is_none())
                 .collect::<Vec<_>>();
@@ -1711,6 +1848,7 @@ impl UiNavigationExecutor {
             let stale_staged = self
                 .staged
                 .keys()
+                .chain(self.prepared.keys())
                 .copied()
                 .filter(|id| state.pending_descriptor(*id).is_none())
                 .collect::<Vec<_>>();
@@ -1740,7 +1878,12 @@ impl UiNavigationExecutor {
                     Some(("stale_ui_instance", "UI root was replaced".into())),
                 );
             }
-            let stale_staged = self.staged.keys().copied().collect::<Vec<_>>();
+            let stale_staged = self
+                .staged
+                .keys()
+                .chain(self.prepared.keys())
+                .copied()
+                .collect::<Vec<_>>();
             for id in stale_staged {
                 self.supersede_staged_webview(id);
             }
@@ -1810,6 +1953,56 @@ fn retire_superseded_staged_webviews(world: &mut bevy::prelude::World) {
 }
 
 #[cfg(target_os = "windows")]
+fn schedule_graph_prefetches(mut state: bevy::prelude::ResMut<UiLifecycleManager>) {
+    let targets = state
+        .instances()
+        .filter(|instance| instance.visible && instance.loaded)
+        .filter_map(|instance| state.registry.resource(&instance.definition))
+        .flat_map(|definition| definition.prefetch.iter().cloned())
+        .collect::<BTreeSet<_>>();
+    let descriptors = state.pending_descriptors();
+    let mut available = MAX_PREPARED_UI_CANDIDATES.saturating_sub(
+        descriptors
+            .iter()
+            .filter(|pending| pending.prefetched)
+            .count(),
+    );
+    let pending_targets = descriptors
+        .into_iter()
+        .map(|pending| pending.target)
+        .collect::<BTreeSet<_>>();
+    for definition in targets {
+        if available == 0 {
+            break;
+        }
+        let Some(resource) = state.registry.resource(&definition) else {
+            continue;
+        };
+        if state.live_count(&definition) >= resource.max_instances {
+            continue;
+        }
+        let target = match state.resolve_resource_path(&definition, None) {
+            Ok(target) => target,
+            Err(error) => {
+                log::warn!("cannot resolve graph-prefetch target `{definition}`: {error}");
+                continue;
+            }
+        };
+        if pending_targets.contains(&target) {
+            continue;
+        }
+        match state.begin_prefetch(target) {
+            Ok(id) => {
+                available -= 1;
+                log::debug!("queued graph-prefetch candidate {id} for `{definition}`");
+            }
+            Err(UiLifecycleError::UiInstanceLimit | UiLifecycleError::DuplicatePendingOpen) => {}
+            Err(error) => log::warn!("cannot queue graph-prefetch for `{definition}`: {error}"),
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
 fn stage_pending_webview(world: &mut bevy::prelude::World) {
     let entity = world.query_filtered::<bevy::prelude::Entity, bevy::ecs::query::With<bevy::window::PrimaryWindow>>().iter(world).next();
     let Some(entity) = entity else {
@@ -1830,6 +2023,7 @@ fn stage_pending_webview(world: &mut bevy::prelude::World) {
         let executor = world.non_send::<UiNavigationExecutor>();
         state.pending_descriptors().into_iter().find(|pending| {
             !executor.staged.contains_key(&pending.id)
+                && !executor.prepared.contains_key(&pending.id)
                 && !executor
                     .committed
                     .contains_key(&UiInstanceId::from_host_id(pending.id))
@@ -1880,6 +2074,14 @@ fn stage_pending_webview(world: &mut bevy::prelude::World) {
     let native_target_path = descriptor.target.path.clone();
     let command_source = UiInstanceId::from_host_id(descriptor.id);
     let initialization_script = webui_initialization_script(&source_definition);
+    // WebView2 controller creation can move Win32 keyboard focus even when the
+    // child starts hidden. Speculative work must be presentation-neutral: a
+    // prepared candidate may never steal WASD/Escape from the active view.
+    let previous_focus = if descriptor.prefetched {
+        Some(unsafe { windows::Win32::UI::Input::KeyboardAndMouse::GetFocus() })
+    } else {
+        None
+    };
     let result = bevy_winit::WINIT_WINDOWS.with(|all_windows| {
         let all_windows = all_windows.borrow();
         let window = all_windows
@@ -1976,6 +2178,15 @@ fn stage_pending_webview(world: &mut bevy::prelude::World) {
             .build_as_child(&**window)
             .map_err(|error| error.to_string())
     });
+    if let Some(previous_focus) = previous_focus.filter(|window| !window.is_invalid()) {
+        use windows::Win32::UI::Input::KeyboardAndMouse::{GetFocus, SetFocus};
+        if unsafe { GetFocus() } != previous_focus {
+            unsafe {
+                let _ = SetFocus(Some(previous_focus));
+            }
+            log::debug!("restored Win32 focus after preparing hidden Web UI candidate");
+        }
+    }
     match result {
         Ok(webview) => {
             use webview2_com::{
@@ -2132,6 +2343,36 @@ fn stage_pending_webview(world: &mut bevy::prelude::World) {
 
 #[cfg(target_os = "windows")]
 fn advance_staged_webviews(world: &mut bevy::prelude::World) {
+    // A real open claims a prepared document by clearing its speculative flag.
+    // Move it back through the ordinary commit path so lifecycle admission,
+    // command-gate release and presentation stay identical to cold opens.
+    let (claimed, stale) = {
+        let state = world.resource::<UiLifecycleManager>();
+        let executor = world.non_send::<UiNavigationExecutor>();
+        let mut claimed = Vec::new();
+        let mut stale = Vec::new();
+        for id in executor.prepared.keys().copied() {
+            match state.pending_descriptor(id) {
+                Some(descriptor) if !descriptor.prefetched => claimed.push(id),
+                Some(_) => {}
+                None => stale.push(id),
+            }
+        }
+        (claimed, stale)
+    };
+    {
+        let mut executor = world.non_send_mut::<UiNavigationExecutor>();
+        for id in claimed {
+            if let Some(prepared) = executor.prepared.remove(&id) {
+                resume_prepared_webview(&prepared.webview);
+                executor.staged.insert(id, prepared);
+            }
+        }
+        for id in stale {
+            executor.supersede_staged_webview(id);
+        }
+    }
+
     // Wry starts an asynchronous initial about:blank navigation while building
     // a WebView. Starting the real URL before that finishes lets the initial
     // navigation cancel it. Wait for about:blank, then navigate with native
@@ -2166,6 +2407,7 @@ fn advance_staged_webviews(world: &mut bevy::prelude::World) {
 
     enum Resolution {
         Commit(u64),
+        Prepared(u64),
         Failed(u64, String),
         Timeout(u64),
         Stale(u64),
@@ -2181,14 +2423,18 @@ fn advance_staged_webviews(world: &mut bevy::prelude::World) {
                     .load_state
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner());
+                let descriptor = state.pending_descriptor(*id);
                 match staged_readiness(
-                    state.pending_descriptor(*id).is_some(),
+                    descriptor.is_some(),
                     load.navigation_result.as_ref(),
                     load.bridge_ready,
                     staged.created_at.elapsed(),
                     executor.load_timeout,
                 ) {
                     StagedReadiness::Pending => None,
+                    StagedReadiness::Commit if descriptor.is_some_and(|value| value.prefetched) => {
+                        Some(Resolution::Prepared(*id))
+                    }
                     StagedReadiness::Commit => Some(Resolution::Commit(*id)),
                     StagedReadiness::Failed(error) => Some(Resolution::Failed(*id, error)),
                     StagedReadiness::Timeout => Some(Resolution::Timeout(*id)),
@@ -2199,6 +2445,20 @@ fn advance_staged_webviews(world: &mut bevy::prelude::World) {
     };
     for resolution in resolutions {
         match resolution {
+            Resolution::Prepared(pending_id) => {
+                let prepared = world
+                    .non_send_mut::<UiNavigationExecutor>()
+                    .staged
+                    .remove(&pending_id);
+                if let Some(prepared) = prepared {
+                    suspend_prepared_webview(&prepared.webview);
+                    world
+                        .non_send_mut::<UiNavigationExecutor>()
+                        .prepared
+                        .insert(pending_id, prepared);
+                    log::debug!("prepared Web UI candidate {pending_id} for graph-prefetch");
+                }
+            }
             Resolution::Commit(pending_id) => {
                 let replacing_root = world
                     .resource::<UiLifecycleManager>()
@@ -2236,9 +2496,21 @@ fn advance_staged_webviews(world: &mut bevy::prelude::World) {
                                 &body,
                             );
                         }
+                        let still_pending = world
+                            .resource::<UiLifecycleManager>()
+                            .pending_descriptors()
+                            .into_iter()
+                            .map(|pending| pending.id)
+                            .collect::<BTreeSet<_>>();
                         let mut executor = world.non_send_mut::<UiNavigationExecutor>();
                         if !destroyed.is_empty() {
-                            let stale_staged = executor.staged.keys().copied().collect::<Vec<_>>();
+                            let stale_staged = executor
+                                .staged
+                                .keys()
+                                .chain(executor.prepared.keys())
+                                .copied()
+                                .filter(|id| !still_pending.contains(id))
+                                .collect::<Vec<_>>();
                             for id in stale_staged {
                                 executor.supersede_staged_webview(id);
                                 executor.resolve_open_response(
@@ -2345,6 +2617,38 @@ fn advance_staged_webviews(world: &mut bevy::prelude::World) {
                 );
             }
         }
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn suspend_prepared_webview(webview: &wry::WebView) {
+    use webview2_com::{
+        Microsoft::Web::WebView2::Win32::ICoreWebView2_3, TrySuspendCompletedHandler,
+    };
+    use windows::core::Interface;
+    use wry::WebViewExtWindows;
+
+    let Ok(core): Result<ICoreWebView2_3, _> = webview.webview().cast() else {
+        log::debug!("WebView2 suspension is unavailable for a prepared UI candidate");
+        return;
+    };
+    let completed = TrySuspendCompletedHandler::create(Box::new(|_, _| Ok(())));
+    if let Err(error) = unsafe { core.TrySuspend(&completed) } {
+        log::debug!("cannot suspend prepared Web UI candidate: {error}");
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn resume_prepared_webview(webview: &wry::WebView) {
+    use webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2_3;
+    use windows::core::Interface;
+    use wry::WebViewExtWindows;
+
+    let Ok(core): Result<ICoreWebView2_3, _> = webview.webview().cast() else {
+        return;
+    };
+    if let Err(error) = unsafe { core.Resume() } {
+        log::debug!("cannot resume prepared Web UI candidate: {error}");
     }
 }
 
@@ -2879,12 +3183,12 @@ fn enqueue_webui_command(
             )),
         },
     };
-    log::debug!("Web UI IPC request {request_id}: transport submission completed");
+    log::trace!("Web UI IPC request {request_id}: transport submission completed");
     pending
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .push(item);
-    log::debug!("Web UI IPC request {request_id}: queued for response polling");
+    log::trace!("Web UI IPC request {request_id}: queued for response polling");
 }
 
 #[cfg(target_os = "windows")]
@@ -3026,6 +3330,8 @@ struct RegistryUi {
     layout: LayoutRegistration,
     initial_width: Option<u32>,
     initial_height: Option<u32>,
+    #[serde(default)]
+    prefetch: Vec<String>,
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -3248,7 +3554,7 @@ mod tests {
         .unwrap();
         fs::write(mod_root.join("assets/webui/main/index.html"), "ok").unwrap();
         fs::write(mod_root.join("assets/webui/main/about.html"), "about").unwrap();
-        fs::write(mod_root.join("assets/webui/registry.toml"), "[[ui]]\nname='main'\nproject='main'\nentry='index.html'\ninteraction_mode='web-ui'\nworld_visibility='hidden'\nmax_instances=2\n[slots]\n'roundo.disconnected-root'='main'
+        fs::write(mod_root.join("assets/webui/registry.toml"), "[[ui]]\nname='main'\nproject='main'\nentry='index.html'\ninteraction_mode='web-ui'\nworld_visibility='hidden'\nmax_instances=2\nprefetch=['main']\n[slots]\n'roundo.disconnected-root'='main'
 'roundo.main-menu'='main'\n").unwrap();
         root
     }
@@ -3294,6 +3600,48 @@ mod tests {
         assert_eq!(committed.destroyed, vec![old_root]);
         assert!(manager.instance(old_root).is_none());
         assert!(manager.instance(committed.instance).is_some());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn registry_resolves_definition_prefetch_edges() {
+        let root = fixture_root();
+        let registry = UiRegistry::load(&LoadedMods::discover(&root).unwrap()).unwrap();
+        assert_eq!(
+            registry
+                .resource("vanilla.vanilla_ui.main")
+                .unwrap()
+                .prefetch,
+            vec!["vanilla.vanilla_ui.main"]
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn prefetched_document_is_not_live_until_claimed_and_committed() {
+        let root = fixture_root();
+        let registry = UiRegistry::load(&LoadedMods::discover(&root).unwrap()).unwrap();
+        let mut manager = UiLifecycleManager::new(registry);
+        let owner = manager.open_configured_root().unwrap().unwrap();
+        let target = manager
+            .resolve_resource_path("vanilla.vanilla_ui.main", Some("about.html"))
+            .unwrap();
+
+        let pending = manager.begin_prefetch(target.clone()).unwrap();
+        assert!(manager.pending_descriptor(pending).unwrap().prefetched);
+        assert_eq!(manager.live_count("vanilla.vanilla_ui.main"), 1);
+        assert_eq!(manager.parent_instance(owner), None);
+
+        assert_eq!(
+            manager
+                .claim_prefetch(UiCommandSource::WebView(owner), &target)
+                .unwrap(),
+            Some(pending)
+        );
+        assert!(!manager.pending_descriptor(pending).unwrap().prefetched);
+        let instance = manager.commit_open(pending).unwrap();
+        assert_eq!(manager.parent_instance(instance), Some(owner));
+        assert_eq!(manager.live_count("vanilla.vanilla_ui.main"), 2);
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -3583,6 +3931,7 @@ mod tests {
             lifecycle_independent: false,
             presentation: PresentationMode::Exclusive,
             layout: UiLayout::Fullscreen,
+            prefetch: Vec::new(),
         };
         let mut registry = UiRegistry::default();
         registry.resources.insert(
@@ -4070,6 +4419,29 @@ mod tests {
         assert!(manager.recovery_surface().is_none());
         manager.replace_root(UiLifecycleState::Connected).unwrap();
         assert!(manager.recovery_surface().is_none());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn prepared_candidate_survives_root_replacement_until_claimed() {
+        let root = fixture_root();
+        let registry = UiRegistry::load(&LoadedMods::discover(&root).unwrap()).unwrap();
+        let mut manager = UiLifecycleManager::new(registry);
+        let target = manager
+            .resolve_resource_path("vanilla.vanilla_ui.main", Some("about.html"))
+            .unwrap();
+        let prepared = manager.begin_prefetch(target.clone()).unwrap();
+
+        manager.replace_root(UiLifecycleState::Connected).unwrap();
+
+        assert!(manager.pending_descriptor(prepared).unwrap().prefetched);
+        assert_eq!(
+            manager
+                .claim_prefetch(UiCommandSource::Host, &target)
+                .unwrap(),
+            Some(prepared)
+        );
+        assert!(manager.commit_open(prepared).is_ok());
         fs::remove_dir_all(root).unwrap();
     }
 

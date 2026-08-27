@@ -15,6 +15,7 @@ entry = "index.html"
 interaction_mode = "web-ui"
 world_visibility = "hidden"
 max_instances = 1
+prefetch = ["server-selection", "settings"]
 
 [[ui]]
 name = "server-selection"
@@ -23,6 +24,7 @@ entry = "index.html"
 interaction_mode = "web-ui"
 world_visibility = "hidden"
 max_instances = 1
+prefetch = ["connecting"]
 
 [[ui]]
 name = "connecting"
@@ -31,6 +33,7 @@ entry = "index.html"
 interaction_mode = "web-ui"
 world_visibility = "hidden"
 max_instances = 1
+prefetch = ["pause-menu"]
 
 [[ui]]
 name = "hud"
@@ -42,6 +45,7 @@ max_instances = 1
 lifecycle_independent = false
 presentation = "exclusive"
 layout = "fullscreen"
+prefetch = ["pause-menu"]
 
 [[ui]]
 name = "settings"
@@ -58,6 +62,7 @@ entry = "index.html"
 interaction_mode = "web-ui"
 world_visibility = "visible"
 max_instances = 1
+prefetch = ["settings"]
 
 [[ui]]
 name = "shared"

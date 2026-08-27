@@ -491,6 +491,7 @@ project = "main-menu"
 entry = "index.html"
 interaction_mode = "web-ui"
 world_visibility = "hidden"
+prefetch = ["settings", "server-selection"]
 
 [[ui]]
 name = "hud"
@@ -526,6 +527,8 @@ vanilla.vanilla_ui.main-menu
 每个 Mod 最多提名一个 initial。所有 initial 提名竞争同一个全局 Initial UI Slot，使用 Mod Load Priority/同级 Mod ID 顺序决胜。该 slot 保存可追踪 UI Resource Name。
 
 普通 `[slots]` key 是全局互斥位置。高优先级 Mod 可以让同一个 slot 指向自己的 UI Resource，但不会改变或伪造原资源身份。
+
+`[[ui]].prefetch` 声明当前 Definition 可见时可能打开的相邻 Definition。它使用与 slot value 相同的局部名/依赖闭包引用规则。该声明只允许平台 Adapter 准备隐藏物理视图，不会打开 UI、修改 Lifecycle Tree 或消耗 `max_instances`。
 
 ### 15.3 Project 路径
 
@@ -570,16 +573,18 @@ Custom protocol 应返回正确 MIME type，并对 HTML/JS/CSS/font/image 做一
 
 - 等待 Bevy primary window 创建。
 - 通过 `bevy_winit` 获取 Bevy 提供的原生窗口。
-- 创建一个覆盖 client area 的 Wry child WebView。
-- WebView 作为主线程 NonSend resource 保存。
+- 为每个已提交 UI Instance 创建或认领一个覆盖其 bounds 的 Wry child WebView。
+- 已提交、加载中及已准备的 WebView 均由主线程 NonSend resource 保存。
 - 窗口 resize 时更新 WebView bounds。
 - 所有 Wry/WebView2/Windows 细节不暴露给 `roundo_client`。
 
-### 17.2 一个持久 WebView
+### 17.2 每实例物理视图与图预取
 
-客户端只创建一个 WebView。打开另一个 UI Resource 时导航该 WebView，不创建多个叠加实例。
+每个已提交 UI Instance 独占一个 child WebView，使并发展示、独立 document state 和窗口化布局互不覆盖。生命周期销毁仍会销毁该实例拥有的物理视图。
 
-导航会卸载前一个页面；Project 若要跨导航保留临时状态，应自行使用以 UI Resource Name 为 key 的 `sessionStorage`。客户端不保存页面内部状态，也不保证 back-forward cache。
+平台 Adapter 根据当前可见 Definition 的 `prefetch` 邻接边，串行创建隐藏的 Prepared UI Candidate。候选必须完成 `about:blank`、目标文档导航及 bridge handshake，但 IPC command gate 在认领前保持关闭；Windows WebView2 在准备完成后进入 suspend，认领时 resume，避免隐藏页面持续运行 timer。候选没有 opener、生命周期 parent 或命令权限，不进入 Lifecycle Tree，也不消耗 `max_instances`。宿主当前最多保留 8 个候选，单个候选在认领前最多缓存 64 条启动命令。
+
+真实 `ui.open` 命中相同 Definition/path 时，为候选绑定真实 source/parent 并沿普通 Pending UI Open commit 路径提交；未命中则保持冷加载行为。候选只可认领一次，不能作为两个实例共享的 document。候选在认领前没有 Root 身份，因此可跨 Root replacement 保留并在认领时绑定新 Root；Definition unload 或候选身份失效时通过安全 retirement 路径淘汰。
 
 ### 17.3 打开 UI 的原子语义
 
@@ -590,9 +595,9 @@ Custom protocol 应返回正确 MIME type，并对 HTML/JS/CSS/font/image 做一
 3. 验证 project/entry/path。
 4. 构造合法 URL。
 
-全部成功后再原子应用：
+全部成功并且物理视图加载、bridge handshake 完成后再原子应用：
 
-1. 导航 WebView。
+1. 提交 Pending UI Open（命中 Prepared UI Candidate 时认领其物理视图）。
 2. 应用资源声明的 `ClientInteractionMode`。
 3. 应用 `UI World Visibility`。
 

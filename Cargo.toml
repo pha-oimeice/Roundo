@@ -111,7 +111,7 @@ webpki-roots = "1"
 wry = {
     version = "0.56"
 }
-windows = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_UI_WindowsAndMessaging"] }
+windows = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_WindowsAndMessaging"] }
 roundo_proc_macros = { path = "roundo_proc_macros" }
 # ---
 roundo_algorithm = {path = "game/common/roundo_algorithm" }
