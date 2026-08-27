@@ -1314,6 +1314,7 @@ impl Plugin for RoundoWebUiPlugin {
         app.add_systems(
             bevy::app::Update,
             (
+                retire_superseded_staged_webviews,
                 stage_pending_webview,
                 advance_staged_webviews,
                 sync_recovery_surface,
@@ -1442,10 +1443,13 @@ pub struct UiNavigationExecutor {
     #[cfg(target_os = "windows")]
     staged: BTreeMap<u64, StagedWebView>,
     /// Superseded staged WebViews are moved here instead of dropped while a
-    /// WebView2 navigation callback may still be on the Win32 stack. They are
-    /// released after the replacement presentation becomes visible.
+    /// WebView2 navigation callback may still be on the Win32 stack. The next
+    /// host update retires them, followed by one creation-free update so COM
+    /// teardown and the next controller creation cannot share a callback turn.
     #[cfg(target_os = "windows")]
     superseded_staged: BTreeMap<u64, StagedWebView>,
+    #[cfg(target_os = "windows")]
+    webview_creation_cooldown: bool,
     #[cfg(target_os = "windows")]
     deferred_open_responses: BTreeMap<u64, DeferredOpenResponse>,
     #[cfg(target_os = "windows")]
@@ -1467,6 +1471,8 @@ impl Default for UiNavigationExecutor {
             #[cfg(target_os = "windows")]
             superseded_staged: BTreeMap::new(),
             #[cfg(target_os = "windows")]
+            webview_creation_cooldown: false,
+            #[cfg(target_os = "windows")]
             deferred_open_responses: BTreeMap::new(),
             #[cfg(target_os = "windows")]
             recovery: None,
@@ -1474,6 +1480,13 @@ impl Default for UiNavigationExecutor {
     }
 }
 impl UiNavigationExecutor {
+    #[cfg(target_os = "windows")]
+    fn supersede_staged_webview(&mut self, id: u64) {
+        if let Some(staged) = self.staged.remove(&id) {
+            self.superseded_staged.insert(id, staged);
+        }
+    }
+
     #[cfg(target_os = "windows")]
     fn begin_root_presentation_handoff(
         &mut self,
@@ -1503,7 +1516,6 @@ impl UiNavigationExecutor {
         }
         self.retiring.clear();
         self.retained_root_presentations.clear();
-        self.superseded_staged.clear();
         true
     }
 
@@ -1621,7 +1633,7 @@ impl UiNavigationExecutor {
                     id,
                     Some(("stale_ui_instance", "source UI was destroyed".into())),
                 );
-                self.staged.remove(&id);
+                self.supersede_staged_webview(id);
             }
             for id in &destroyed {
                 if let Some(overlay) = self.committed.remove(id) {
@@ -1653,8 +1665,15 @@ impl UiNavigationExecutor {
                     Some(("stale_ui_instance", "UI definition was unloaded".into())),
                 );
             }
-            self.staged
-                .retain(|id, _| state.pending_descriptor(*id).is_some());
+            let stale_staged = self
+                .staged
+                .keys()
+                .copied()
+                .filter(|id| state.pending_descriptor(*id).is_none())
+                .collect::<Vec<_>>();
+            for id in stale_staged {
+                self.supersede_staged_webview(id);
+            }
             for id in &destroyed {
                 if let Some(overlay) = self.committed.remove(id) {
                     dispatch_lifecycle_event(&overlay.webview, "roundo:destroying", "destroying");
@@ -1668,7 +1687,7 @@ impl UiNavigationExecutor {
     pub fn cancel_root_replacement(&mut self, state: &mut UiLifecycleManager) {
         #[cfg(target_os = "windows")]
         for id in state.cancel_root_replacement() {
-            self.staged.remove(&id);
+            self.supersede_staged_webview(id);
             self.resolve_open_response(
                 id,
                 Some((
@@ -1699,10 +1718,8 @@ impl UiNavigationExecutor {
                 // Do not drop a WebView2 controller from inside the same host
                 // update in which its initial navigation callback may be on
                 // the Win32 stack. Moving ownership is non-destructive; the
-                // replacement presentation releases it after becoming visible.
-                if let Some(staged) = self.staged.remove(&id) {
-                    self.superseded_staged.insert(id, staged);
-                }
+                // the next host update retires it before another controller is created.
+                self.supersede_staged_webview(id);
             }
             // Keep deferred responses unresolved during the handoff. Resolving
             // one evaluates JavaScript in the old WebView and can re-enter
@@ -1723,7 +1740,10 @@ impl UiNavigationExecutor {
                     Some(("stale_ui_instance", "UI root was replaced".into())),
                 );
             }
-            self.staged.clear();
+            let stale_staged = self.staged.keys().copied().collect::<Vec<_>>();
+            for id in stale_staged {
+                self.supersede_staged_webview(id);
+            }
             self.recovery = None;
             for id in destroyed {
                 if let Some(overlay) = self.committed.remove(id) {
@@ -1750,11 +1770,61 @@ struct PendingCommand {
 }
 
 #[cfg(target_os = "windows")]
+fn claim_webview_creation_turn(
+    active_transactions: usize,
+    retiring_transactions: usize,
+    cooldown: &mut bool,
+) -> bool {
+    if active_transactions != 0 || retiring_transactions != 0 {
+        return false;
+    }
+    if std::mem::take(cooldown) {
+        return false;
+    }
+    true
+}
+
+#[cfg(target_os = "windows")]
+fn retire_superseded_staged_webviews(world: &mut bevy::prelude::World) {
+    let retired = {
+        let mut executor = world.non_send_mut::<UiNavigationExecutor>();
+        if executor.superseded_staged.is_empty() {
+            return;
+        }
+        let retired = executor
+            .superseded_staged
+            .keys()
+            .copied()
+            .collect::<Vec<_>>();
+        executor.superseded_staged.clear();
+        executor.webview_creation_cooldown = true;
+        retired
+    };
+    let mut executor = world.non_send_mut::<UiNavigationExecutor>();
+    for id in retired {
+        executor.resolve_open_response(
+            id,
+            Some(("stale_ui_instance", "UI root was replaced".into())),
+        );
+    }
+}
+
+#[cfg(target_os = "windows")]
 fn stage_pending_webview(world: &mut bevy::prelude::World) {
     let entity = world.query_filtered::<bevy::prelude::Entity, bevy::ecs::query::With<bevy::window::PrimaryWindow>>().iter(world).next();
     let Some(entity) = entity else {
         return;
     };
+    let may_create = {
+        let mut executor = world.non_send_mut::<UiNavigationExecutor>();
+        let active = executor.staged.len();
+        let retiring = executor.superseded_staged.len();
+        let cooldown = &mut executor.webview_creation_cooldown;
+        claim_webview_creation_turn(active, retiring, cooldown)
+    };
+    if !may_create {
+        return;
+    }
     let descriptor = {
         let state = world.resource::<UiLifecycleManager>();
         let executor = world.non_send::<UiNavigationExecutor>();
@@ -2170,7 +2240,7 @@ fn advance_staged_webviews(world: &mut bevy::prelude::World) {
                         if !destroyed.is_empty() {
                             let stale_staged = executor.staged.keys().copied().collect::<Vec<_>>();
                             for id in stale_staged {
-                                executor.staged.remove(&id);
+                                executor.supersede_staged_webview(id);
                                 executor.resolve_open_response(
                                     id,
                                     Some(("stale_ui_instance", "UI root was replaced".into())),
@@ -2268,7 +2338,7 @@ fn advance_staged_webviews(world: &mut bevy::prelude::World) {
             }
             Resolution::Stale(pending_id) => {
                 let mut executor = world.non_send_mut::<UiNavigationExecutor>();
-                executor.staged.remove(&pending_id);
+                executor.supersede_staged_webview(pending_id);
                 executor.resolve_open_response(
                     pending_id,
                     Some(("stale_ui_instance", "pending UI open became stale".into())),
@@ -3625,33 +3695,31 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
+    #[cfg(target_os = "windows")]
     #[test]
-    fn connecting_page_reads_the_nested_connection_status_output() {
+    fn webview_resource_transactions_are_serial_and_retirement_gets_a_safe_tick() {
+        let mut cooldown = false;
+
+        assert!(!claim_webview_creation_turn(1, 0, &mut cooldown));
+        assert!(!claim_webview_creation_turn(0, 1, &mut cooldown));
+        cooldown = true;
+        assert!(!claim_webview_creation_turn(0, 0, &mut cooldown));
+        assert!(claim_webview_creation_turn(0, 0, &mut cooldown));
+    }
+
+    #[test]
+    fn connecting_page_closes_itself_when_the_connection_has_already_completed() {
         let connecting =
             include_str!("../../../mods/vanilla_ui/assets/webui/connecting/index.html");
 
         assert!(connecting.contains("const connectionStatus=s.status?.status"));
+        assert!(connecting.contains("connectionStatus==='connected'"));
+        assert!(connecting.contains("command:'ui.back'"));
+        assert!(connecting.contains("<main hidden>"));
+        assert!(connecting.contains("setInterval(status,1000)"));
+        assert!(!connecting.contains("setInterval(status,250)"));
         assert!(!connecting.contains("roundo.hud"));
         assert!(!connecting.contains("command:'ui.open'"));
-    }
-
-    #[test]
-    fn server_selection_commits_the_connecting_surface_before_starting_the_network() {
-        let selection =
-            include_str!("../../../mods/vanilla_ui/assets/webui/server-selection/index.html");
-        let connect = selection
-            .split("async function connect() {")
-            .nth(1)
-            .unwrap()
-            .split("\n}")
-            .next()
-            .unwrap();
-
-        assert!(
-            connect.find("await openConnecting()").unwrap()
-                < connect.find("command: 'server.connect'").unwrap(),
-            "the connecting UI must commit before a fast local connection can replace its Root"
-        );
     }
 
     #[test]

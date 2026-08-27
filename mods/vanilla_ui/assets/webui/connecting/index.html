@@ -1,1 +1,65 @@
-<!doctype html><html><head><meta charset="utf-8"><title>Connecting</title><style>body{margin:0;background:#10151d;color:#f4f7fb;font:18px sans-serif;display:grid;place-items:center;height:100vh}main{text-align:center;min-width:360px}button{margin:8px;padding:10px 22px;background:#26384c;border:1px solid #8eb9db;color:white;font:inherit}</style></head><body><main><h1 id="title">Connecting…</h1><p id="server">No server selected</p><p id="detail"></p><button onclick="retry()">Retry</button><button onclick="disconnect()">Cancel</button></main><script>let pending=false;async function status(){if(pending)return;pending=true;try{const r=await roundo.execute({version:1,command:'server.status',arguments:{}});const s=r.data;if(!s)return;const connectionStatus=s.status?.status;if(!connectionStatus)throw new Error('server.status returned no connection status');document.querySelector('#server').textContent=s.server?`${s.server.name} — ${s.server.quic_addr}`:'No server selected';document.querySelector('#title').textContent=connectionStatus.replaceAll('_',' ');document.querySelector('#detail').textContent=connectionStatus==='error'?s.status.message||'Connection failed':'';}finally{pending=false}}async function retry(){await roundo.execute({version:1,command:'server.retry',arguments:{}});status()}async function disconnect(){const r=await roundo.execute({version:1,command:'server.disconnect',arguments:{}});if(!r.ok)document.querySelector('#detail').textContent=r.error?.message||'Unable to cancel connection'}status();setInterval(status,250)</script></body></html>
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Connecting</title>
+  <style>
+    body { margin: 0; background: #10151d; color: #f4f7fb; font: 18px sans-serif; display: grid; place-items: center; height: 100vh; }
+    main { text-align: center; min-width: 360px; }
+    button { margin: 8px; padding: 10px 22px; background: #26384c; border: 1px solid #8eb9db; color: white; font: inherit; }
+  </style>
+</head>
+<body>
+<main hidden>
+  <h1 id="title">Connecting…</h1>
+  <p id="server">No server selected</p>
+  <p id="detail"></p>
+  <button onclick="retry()">Retry</button>
+  <button onclick="disconnect()">Cancel</button>
+</main>
+<script>
+const main = document.querySelector('main');
+const title = document.querySelector('#title');
+const server = document.querySelector('#server');
+const detail = document.querySelector('#detail');
+let pending = false;
+let closing = false;
+
+async function status() {
+  if (pending || closing) return;
+  pending = true;
+  try {
+    const result = await roundo.execute({ version: 1, command: 'server.status', arguments: {} });
+    const s = result.data;
+    if (!s) return;
+    const connectionStatus=s.status?.status;
+    if (!connectionStatus) throw new Error('server.status returned no connection status');
+    if (connectionStatus==='connected') {
+      closing = true;
+      await roundo.execute({version:1,command:'ui.back',arguments:{}});
+      return;
+    }
+    server.textContent = s.server ? `${s.server.name} — ${s.server.quic_addr}` : 'No server selected';
+    title.textContent = connectionStatus.replaceAll('_', ' ');
+    detail.textContent = connectionStatus === 'error' ? s.status.message || 'Connection failed' : '';
+    main.hidden = false;
+  } finally {
+    pending = false;
+  }
+}
+
+async function retry() {
+  await roundo.execute({ version: 1, command: 'server.retry', arguments: {} });
+  status();
+}
+
+async function disconnect() {
+  const result = await roundo.execute({ version: 1, command: 'server.disconnect', arguments: {} });
+  if (!result.ok) detail.textContent = result.error?.message || 'Unable to cancel connection';
+}
+
+status();
+setInterval(status,1000);
+</script>
+</body>
+</html>
