@@ -1,7 +1,0 @@
-
-[general]
-mod_name = "example_mod"
-author = "example_author"
-dependencies = [
-]
-

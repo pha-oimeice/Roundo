@@ -1,9 +1,0 @@
-
-[[usd_asset]]
-# key represents its in-game name.
-key = "example_usd_asset"
-# value represents prim inside usd asset.
-value = "example_usd_skinned_model"
-# accepted types: skinned_model, skeleton, animation, static_model, material
-type = "skinned_model"
-
