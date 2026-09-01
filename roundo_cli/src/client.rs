@@ -101,15 +101,13 @@ struct DevArguments {
 #[serde(deny_unknown_fields)]
 struct ServerEntryArguments {
     name: String,
-    quic_addr: String,
-    https_addr: String,
+    address: String,
 }
 impl From<ServerEntryArguments> for ServerEntry {
     fn from(value: ServerEntryArguments) -> Self {
         Self {
             name: value.name,
-            quic_addr: value.quic_addr,
-            https_addr: value.https_addr,
+            address: value.address,
         }
     }
 }
@@ -390,15 +388,13 @@ struct AcceptedOutput {
 #[derive(Serialize, JsonSchema)]
 struct ServerEntryDisplay {
     name: String,
-    quic_addr: String,
-    https_addr: String,
+    address: String,
 }
 impl From<&ServerEntry> for ServerEntryDisplay {
     fn from(server: &ServerEntry) -> Self {
         Self {
             name: server.name.clone(),
-            quic_addr: server.quic_addr.clone(),
-            https_addr: server.https_addr.clone(),
+            address: server.address.clone(),
         }
     }
 }
@@ -425,8 +421,7 @@ struct ProbeOutput {
 struct ServerListEntryOutput {
     index: usize,
     name: String,
-    quic_addr: String,
-    https_addr: String,
+    address: String,
     probe: ProbeOutput,
 }
 #[derive(Serialize, JsonSchema)]
@@ -827,8 +822,7 @@ impl ClientCommandDefinition for UnixDev {
 #[unix(path = "server add")]
 struct UnixServerAdd {
     name: String,
-    quic_addr: String,
-    https_addr: String,
+    address: String,
 }
 impl ClientCommandDefinition for UnixServerAdd {
     type Input = Self;
@@ -847,9 +841,9 @@ impl ClientCommandDefinition for UnixServerEdit {
 impl UnixCommand for UnixServerEdit {
     const UNIX_PATH: &'static [&'static str] = &["server", "edit"];
     fn parse_unix(arguments: &[String]) -> Result<serde_json::Value, UnixCommandParseError> {
-        if arguments.len() != 4 {
+        if arguments.len() != 3 {
             return Err(UnixCommandParseError::new(
-                "usage: server edit <index> <name> <quic_addr> <https_addr>",
+                "usage: server edit <index> <name> <address>",
             ));
         }
         let index = arguments[0]
@@ -859,13 +853,12 @@ impl UnixCommand for UnixServerEdit {
             "index": index,
             "server": {
                 "name": arguments[1],
-                "quic_addr": arguments[2],
-                "https_addr": arguments[3],
+                "address": arguments[2],
             }
         }))
     }
     fn usage() -> String {
-        "server edit <index> <name> <quic_addr> <https_addr>".into()
+        "server edit <index> <name> <address>".into()
     }
 }
 
@@ -1362,8 +1355,7 @@ fn dispatch_typed_command(
             .map(|(index, server)| ServerListEntryOutput {
                 index,
                 name: server.name.clone(),
-                quic_addr: server.quic_addr.clone(),
-                https_addr: server.https_addr.clone(),
+                address: server.address.clone(),
                 probe: probe_output(probes.result(index)),
             })
             .collect();
@@ -1371,13 +1363,10 @@ fn dispatch_typed_command(
     });
     registry.register_typed::<ServerAddDefinition>(|input, _| {
         let server = ServerEntry::from(input);
-        if server.name.trim().is_empty()
-            || server.quic_addr.trim().is_empty()
-            || server.https_addr.trim().is_empty()
-        {
+        if server.name.trim().is_empty() || server.address.trim().is_empty() {
             return Err(crate::json_command::CommandError::new(
                 "invalid_arguments",
-                "name, quic_addr and https_addr are required",
+                "name and address are required",
             ));
         }
         let mut config = config.borrow_mut();
@@ -1391,10 +1380,7 @@ fn dispatch_typed_command(
     });
     registry.register_typed::<ServerEditDefinition>(|input, _| {
         let server = ServerEntry::from(input.server);
-        if server.name.trim().is_empty()
-            || server.quic_addr.trim().is_empty()
-            || server.https_addr.trim().is_empty()
-        {
+        if server.name.trim().is_empty() || server.address.trim().is_empty() {
             return Err(crate::json_command::CommandError::new(
                 "invalid_arguments",
                 "index and a complete server are required",
@@ -2063,7 +2049,7 @@ mod tests {
         assert_eq!(
             super::project_terminal_line(
                 &adapter.registry,
-                "server add 'Local Server' 127.0.0.1:5000 https://localhost:5001",
+                "server add 'Local Server' 127.0.0.1:5000",
             )
             .unwrap(),
             serde_json::json!({
@@ -2071,8 +2057,7 @@ mod tests {
                 "command": "server.add",
                 "arguments": {
                     "name": "Local Server",
-                    "quic_addr": "127.0.0.1:5000",
-                    "https_addr": "https://localhost:5001",
+                    "address": "127.0.0.1:5000",
                 },
             })
         );
@@ -2089,11 +2074,9 @@ mod tests {
     #[test]
     fn terminal_projects_server_edit_to_the_existing_nested_json_contract() {
         let adapter = super::ClientUnixAdapter::default();
-        let request = super::project_terminal_line(
-            &adapter.registry,
-            "server edit 2 Local 127.0.0.1:5000 https://localhost:5001",
-        )
-        .unwrap();
+        let request =
+            super::project_terminal_line(&adapter.registry, "server edit 2 Local 127.0.0.1:5000")
+                .unwrap();
         assert_eq!(request["command"], "server.edit");
         assert_eq!(request["arguments"]["index"], 2);
         assert_eq!(request["arguments"]["server"]["name"], "Local");

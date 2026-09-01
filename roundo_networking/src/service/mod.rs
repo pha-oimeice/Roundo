@@ -1,27 +1,20 @@
 mod client;
-mod http;
 mod quic;
 mod registry;
 mod server;
-mod ticket;
 
 pub use client::ClientNetwork;
 pub use server::ServerNetwork;
 
 use crate::connection::{ConnectionIo, ConnectionIoEvent};
 use crate::protocol::{
-    ClientGameMessage, ClientMessage, ClientResourceMessage, ConnectionId, ConnectionToken,
-    ServerGameMessage, ServerMessage, ServerResourceMessage, SessionId, StreamId, UserSession,
+    ClientGameMessage, ClientMessage, ClientResourceMessage, ConnectionId, ServerGameMessage,
+    ServerMessage, ServerResourceMessage, SessionId, StreamId, UserSession,
 };
 use crate::session::{
     ClientGameSession, ClientResourceSession, ClientSession, ServerResourceSession, ServerSession,
 };
 use crate::tls;
-use axum::extract::State;
-use axum::http::StatusCode;
-use axum::routing::{get, post};
-use axum::{Json, Router};
-use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::error::Error as StdError;
 use std::fmt::{Display, Formatter};
@@ -33,11 +26,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{RecvTimeoutError, SyncSender, sync_channel};
 use std::sync::{Arc, RwLock};
 use std::thread;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 use tokio::runtime::Builder;
 use tokio::sync::{mpsc, watch};
 
-const CONNECTION_TOKEN_TTL: Duration = Duration::from_secs(60);
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Clone, Debug)]
@@ -75,7 +67,6 @@ pub enum CertificatePolicy {
 #[derive(Clone, Debug)]
 pub struct ServerNetworkConfig {
     pub quic_address: SocketAddr,
-    pub public_address: SocketAddr,
     pub certificate_directory: PathBuf,
     pub server_alternative_names: Vec<String>,
     pub generate_self_signed_certificate: bool,
@@ -84,13 +75,11 @@ pub struct ServerNetworkConfig {
 #[derive(Clone, Copy, Debug)]
 pub struct ServerAddresses {
     pub quic_address: SocketAddr,
-    pub public_address: SocketAddr,
 }
 
 #[derive(Clone, Debug)]
 pub struct ClientNetworkConfig {
     pub quic_address: SocketAddr,
-    pub public_address: SocketAddr,
     pub server_name: String,
     pub certificate_policy: CertificatePolicy,
     pub reconnect_delay: Duration,

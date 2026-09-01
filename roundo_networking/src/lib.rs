@@ -1,7 +1,7 @@
-//! Shared HTTPS and prioritized QUIC networking implementation.
+//! Shared prioritized QUIC networking implementation.
 //!
 //! Client and server hosts configure the network, implement hooks, and exchange
-//! protocol messages. Runtime ownership, QUIC/TLS, framing, authentication,
+//! protocol messages. Runtime ownership, QUIC/TLS, framing, session establishment,
 //! unidirectional I/O tasks, reconnects, and connection lifecycle stay inside
 //! this crate. Game traffic uses high-priority `stream0`; resource traffic uses
 //! low-priority `stream1`.

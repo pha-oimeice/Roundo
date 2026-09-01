@@ -1367,6 +1367,15 @@ impl RoundoWebUiPlugin {
             command_io: None,
         }
     }
+    pub fn with_mods_root_and_command_io(
+        path: impl Into<PathBuf>,
+        command_io: JsonRequestResponseIo<Value>,
+    ) -> Self {
+        Self {
+            mods_root: path.into(),
+            command_io: Some(command_io),
+        }
+    }
 }
 impl Plugin for RoundoWebUiPlugin {
     fn build(&self, app: &mut App) {
@@ -4080,6 +4089,9 @@ mod tests {
         assert!(selection.contains("finally { loading = false; }"));
         assert!(selection.contains("if (renderedServers === nextServers) return"));
         assert!(selection.contains("setInterval(load, 1000)"));
+        assert!(selection.contains("address: addressInput.value"));
+        assert!(!selection.contains("quic_addr"));
+        assert!(!selection.contains("https"));
         assert!(!selection.contains("setInterval(load,250)"));
     }
 

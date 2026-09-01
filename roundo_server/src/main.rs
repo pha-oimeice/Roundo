@@ -11,9 +11,9 @@ use roundo_ecs_entry::{
 };
 
 fn main() {
-    // load .env file if exists
-    dotenvy::dotenv().ok();
     roundo_toolbox::init_logger();
+    // Load the one installation-wide configuration shared with the client.
+    std::sync::LazyLock::force(&config::COMMON_CONFIG);
     configure_server_tick_rate(config::SERVER_CONFIG.gameplay.tick_rate);
     configure_server_presence_radius(config::SERVER_CONFIG.gameplay.presence_radius);
     start_server(

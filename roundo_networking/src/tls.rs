@@ -1,4 +1,4 @@
-//! TLS configuration shared by HTTPS and QUIC.
+//! TLS configuration for the QUIC transport.
 
 use crate::service::{CertificatePolicy, NetworkError};
 use rcgen::{CertifiedKey, generate_simple_self_signed};
@@ -18,7 +18,6 @@ use std::sync::{Arc, RwLock};
 
 pub(crate) struct PreparedServerTls {
     pub config: Arc<ServerConfig>,
-    pub certificate_pem: String,
 }
 
 pub(crate) fn prepare_server_tls(
@@ -45,8 +44,6 @@ pub(crate) fn prepare_server_tls(
             .map_err(NetworkError::from_display)?;
     }
 
-    let certificate_pem =
-        fs::read_to_string(&certificate_path).map_err(NetworkError::from_display)?;
     let certificates = CertificateDer::pem_file_iter(&certificate_path)
         .map_err(NetworkError::from_display)?
         .collect::<Result<Vec<_>, _>>()
@@ -64,7 +61,6 @@ pub(crate) fn prepare_server_tls(
 
     Ok(PreparedServerTls {
         config: Arc::new(config),
-        certificate_pem,
     })
 }
 

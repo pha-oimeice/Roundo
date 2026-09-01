@@ -7,12 +7,12 @@ use roundo_marionette::{ClientMarionetteCommand, ClientMarionetteEvent, ClientMa
 use roundo_networking::{
     CertificatePolicy, ClientGameMessage, ClientHooks, ClientNetwork, ClientNetworkConfig,
     ClientResourceMessage, NetworkError, ServerGameMessage, ServerResourceMessage, StreamId,
+    probe_quic_endpoint,
 };
 use roundo_presence::{ClientPresenceCommand, ClientPresenceIpc};
-use roundo_user_config::{ClientConfig, ServerEntry};
+use roundo_user_config::ServerEntry;
 use serde::Serialize;
 use std::collections::BTreeMap;
-use std::net::TcpStream;
 use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
@@ -110,8 +110,8 @@ impl ServerProbeManager {
 }
 
 fn probe_server(server: &ServerEntry) -> ProbeResult {
-    let address = match resolve_socket_address(&server.https_addr, 443, "HTTPS address") {
-        Ok((address, _)) => address,
+    let config = match network_config(server) {
+        Ok(config) => config,
         Err(error) => {
             return ProbeResult {
                 status: "error",
@@ -119,7 +119,12 @@ fn probe_server(server: &ServerEntry) -> ProbeResult {
             };
         }
     };
-    match TcpStream::connect_timeout(&address, Duration::from_secs(2)) {
+    match probe_quic_endpoint(
+        config.quic_address,
+        &config.server_name,
+        config.certificate_policy,
+        Duration::from_secs(2),
+    ) {
         Ok(_) => ProbeResult {
             status: "reachable",
             message: None,
@@ -251,8 +256,8 @@ impl ActiveClientConnection {
         let name = server.name.trim();
         let network_config = network_config(server)?;
         info!(
-            "Starting client connection: server={}, quic_address={}, public_address={}",
-            name, network_config.quic_address, network_config.public_address
+            "Starting client connection: server={}, quic_address={}",
+            name, network_config.quic_address
         );
         let status = Arc::new(RwLock::new(ClientConnectionStatus::Connecting));
         let hooks = Arc::new(ClientHooksAdapter {
@@ -315,21 +320,14 @@ pub fn validate_server_entry(server: &ServerEntry) -> Result<(), String> {
 }
 
 fn network_config(server: &ServerEntry) -> Result<ClientNetworkConfig, String> {
-    let configured =
-        roundo_user_config::load_config::<ClientConfig>("roundo-client-config.toml").network;
+    let configured = roundo_user_config::load_client_config("roundo-client-config.toml").network;
     let (quic_address, server_name) = resolve_socket_address(
-        &server.quic_addr,
+        &server.address,
         configured.endpoint.quic_port,
         "QUIC address",
     )?;
-    let (public_address, _) = resolve_socket_address(
-        &server.https_addr,
-        configured.endpoint.https_port,
-        "HTTPS address",
-    )?;
     Ok(ClientNetworkConfig {
         quic_address,
-        public_address,
         server_name,
         certificate_policy: if configured.ca_verification {
             CertificatePolicy::SystemRoots
@@ -650,16 +648,14 @@ mod tests {
     }
 
     #[test]
-    fn builds_config_from_separate_quic_and_https_addresses() {
+    fn builds_config_from_server_address() {
         let config = network_config(&ServerEntry {
             name: "Test".to_string(),
-            quic_addr: "127.0.0.1:4000".to_string(),
-            https_addr: "127.0.0.1:5000".to_string(),
+            address: "127.0.0.1:4000".to_string(),
         })
         .unwrap();
 
         assert_eq!(config.quic_address.to_string(), "127.0.0.1:4000");
-        assert_eq!(config.public_address.to_string(), "127.0.0.1:5000");
         assert_eq!(config.server_name, "127.0.0.1");
     }
 
@@ -683,8 +679,7 @@ mod tests {
         let mut manager = network_manager();
         let invalid = ServerEntry {
             name: String::new(),
-            quic_addr: String::new(),
-            https_addr: String::new(),
+            address: String::new(),
         };
         assert!(manager.connect(&invalid).is_err());
         assert!(matches!(

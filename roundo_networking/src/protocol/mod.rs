@@ -4,7 +4,7 @@ use crate::ProtocolError;
 use roundo_toolbox::{UpdateVersion, macros::identifier};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
-pub const GAME_PROTOCOL_VERSION: u16 = 13;
+pub const GAME_PROTOCOL_VERSION: u16 = 14;
 pub const RESOURCE_PROTOCOL_VERSION: u16 = 1;
 
 /// The logical QUIC stream used by an application message.
@@ -55,42 +55,23 @@ pub struct UserSession {
     pub session_id: SessionId,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct ConnectionToken(String);
-
-impl ConnectionToken {
-    pub fn new(token: impl Into<String>) -> Self {
-        Self(token.into())
-    }
-
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-
-    pub fn into_inner(self) -> String {
-        self.0
-    }
-}
-
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub enum ProtocolErrorCode {
-    AuthenticationRejected,
+    SessionRejected,
     UnexpectedMessage,
     UnsupportedProtocolVersion,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct AuthenticationInfo {
+pub struct SessionInfo {
     pub user_session: UserSession,
 }
 
-/// Every message a client can send. Authentication and gameplay share one
-/// versioned schema, while [`crate::session`] enforces their ordering.
+/// Every message a client can send. Session establishment and gameplay share
+/// one versioned schema, while [`crate::session`] enforces their ordering.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub enum ClientMessage {
-    Authenticate {
-        connection_token: ConnectionToken,
-    },
+    JoinPublicSession,
     Ready {
         stream: StreamId,
         protocol_version: u16,
@@ -102,7 +83,7 @@ pub enum ClientMessage {
 /// Every message a server can send.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub enum ServerMessage {
-    Authenticated { info: AuthenticationInfo },
+    SessionEstablished { info: SessionInfo },
     Error { code: ProtocolErrorCode },
     Game(ServerGameMessage),
     Resource(ServerResourceMessage),

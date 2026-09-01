@@ -20,9 +20,8 @@ pub fn start_server(
 ) {
     let config = network_config();
     debug!(
-        "Starting network server: quic={}, public={}, certificate_directory={}",
+        "Starting network server: quic={}, certificate_directory={}",
         config.quic_address,
-        config.public_address,
         config.certificate_directory.display()
     );
     let hooks = Arc::new(ServerHooksAdapter {
@@ -35,10 +34,7 @@ pub fn start_server(
             .unwrap_or_else(|error| panic!("failed to start network server: {error}")),
     );
     let addresses = network.addresses();
-    info!(
-        "Network server is ready: quic={}, public={}",
-        addresses.quic_address, addresses.public_address
-    );
+    info!("Network server is ready: quic={}", addresses.quic_address);
 
     let game_network = Arc::clone(&network);
     let game_local_coordinate_ipc = local_coordinate_ipc.clone();
@@ -52,7 +48,6 @@ fn network_config() -> ServerNetworkConfig {
     let network = &crate::config::SERVER_CONFIG.network;
     ServerNetworkConfig {
         quic_address: network.endpoint.get_quic_addr(),
-        public_address: network.endpoint.get_https_addr(),
         certificate_directory: PathBuf::from(&network.certificate_path).join("certs"),
         server_alternative_names: network.server_alternative_names.clone(),
         generate_self_signed_certificate: network.generate_self_signed_certificate,

@@ -1,4 +1,3 @@
-use super::ticket::ConnectionTokenResponse;
 use super::*;
 
 pub struct ClientNetwork {
@@ -13,9 +12,8 @@ impl ClientNetwork {
         hooks: Arc<dyn ClientHooks>,
     ) -> Result<Self, NetworkError> {
         log::info!(
-            "starting network client: quic_address={}, public_address={}, server_name={}, certificate_policy={:?}, reconnect_delay_ms={}",
+            "starting network client: quic_address={}, server_name={}, certificate_policy={:?}, reconnect_delay_ms={}",
             config.quic_address,
-            config.public_address,
             config.server_name,
             config.certificate_policy,
             config.reconnect_delay.as_millis()
@@ -104,9 +102,8 @@ async fn run_client(
         }
         attempt += 1;
         log::info!(
-            "connecting to QUIC server: attempt={attempt}, quic_address={}, public_address={}",
-            config.quic_address,
-            config.public_address
+            "connecting to QUIC server: attempt={attempt}, quic_address={}",
+            config.quic_address
         );
         match establish_client_sessions(&config, Arc::clone(&tls_config)).await {
             Ok(sessions) => {
@@ -164,25 +161,20 @@ async fn establish_client_sessions(
     config: &ClientNetworkConfig,
     tls_config: Arc<rustls::ClientConfig>,
 ) -> Result<ClientSessions, NetworkError> {
-    log::debug!(
-        "requesting public connection ticket: public_address={}",
-        config.public_address
-    );
-    let connection_token = request_public_connection_token(config).await?;
     let endpoint = quic::client_endpoint(config.quic_address, tls_config)?;
     let connection = quic::connect(&endpoint, config.quic_address, &config.server_name).await?;
     let streams = quic::establish_streams(&connection).await?;
-    let authenticated = ClientSession::new(streams.stream0)
-        .authenticate(ConnectionToken::new(connection_token))
+    let established = ClientSession::new(streams.stream0)
+        .join_public_session()
         .await
         .map_err(NetworkError::from_display)?;
-    let authentication_info = authenticated.authentication_info();
+    let session_info = established.session_info();
     log::debug!(
-        "QUIC authentication confirmed: user_id={}, session_id={}",
-        authentication_info.user_session.user_id.0,
-        authentication_info.user_session.session_id.0
+        "QUIC public session established: user_id={}, session_id={}",
+        session_info.user_session.user_id.0,
+        session_info.user_session.session_id.0
     );
-    let stream0 = authenticated
+    let stream0 = established
         .enter_game()
         .await
         .map_err(NetworkError::from_display)?;
@@ -286,40 +278,17 @@ async fn run_client_sessions(
     endpoint.wait_idle().await;
 }
 
-async fn request_public_connection_token(
-    config: &ClientNetworkConfig,
-) -> Result<String, NetworkError> {
-    let client = reqwest::Client::builder()
-        .danger_accept_invalid_certs(config.certificate_policy != CertificatePolicy::SystemRoots)
-        .build()
-        .map_err(NetworkError::from_display)?;
-    let response = client
-        .post(format!(
-            "https://{}/public/connection-token",
-            config.public_address
-        ))
-        .send()
-        .await
-        .map_err(NetworkError::from_display)?
-        .error_for_status()
-        .map_err(NetworkError::from_display)?
-        .json::<ConnectionTokenResponse>()
-        .await
-        .map_err(NetworkError::from_display)?;
-    Ok(response.connection_token)
-}
-
 fn client_message_stream(message: &ClientMessage) -> Option<StreamId> {
     match message {
         ClientMessage::Game(_) => Some(StreamId::Stream0),
         ClientMessage::Resource(_) => Some(StreamId::Stream1),
-        ClientMessage::Authenticate { .. } | ClientMessage::Ready { .. } => None,
+        ClientMessage::JoinPublicSession | ClientMessage::Ready { .. } => None,
     }
 }
 
 fn client_message_kind(message: &ClientMessage) -> &'static str {
     match message {
-        ClientMessage::Authenticate { .. } => "Authenticate",
+        ClientMessage::JoinPublicSession => "JoinPublicSession",
         ClientMessage::Ready { .. } => "Ready",
         ClientMessage::Game(message) => message.kind(),
         ClientMessage::Resource(message) => message.kind(),
@@ -328,7 +297,7 @@ fn client_message_kind(message: &ClientMessage) -> &'static str {
 
 fn server_message_kind(message: &ServerMessage) -> &'static str {
     match message {
-        ServerMessage::Authenticated { .. } => "Authenticated",
+        ServerMessage::SessionEstablished { .. } => "SessionEstablished",
         ServerMessage::Error { .. } => "Error",
         ServerMessage::Game(message) => message.kind(),
         ServerMessage::Resource(message) => message.kind(),

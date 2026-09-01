@@ -18,7 +18,7 @@ roundo_networking.workspace = true
 roundo_presence.workspace = true
 roundo_rendering.workspace = true
 roundo_toolbox.workspace = true
-roundo_webui = { path = "roundo_webui" }
+roundo_webui.workspace = true
 roundo_user_config.workspace = true
 serde.workspace = true
 serde_json.workspace = true

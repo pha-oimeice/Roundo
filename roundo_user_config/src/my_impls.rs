@@ -7,8 +7,4 @@ impl EndpointConfig {
     pub fn get_quic_addr(&self) -> SocketAddr {
         string_to_socket_addr(&format!("{}:{}", self.host, self.quic_port))
     }
-    #[inline]
-    pub fn get_https_addr(&self) -> SocketAddr {
-        string_to_socket_addr(&format!("{}:{}", self.host, self.https_port))
-    }
 }

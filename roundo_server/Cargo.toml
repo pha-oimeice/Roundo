@@ -9,7 +9,6 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow.workspace = true
-dotenvy.workspace = true
 log.workspace = true
 roundo_cli = { workspace = true, features = ["server"] }
 roundo_ecs_entry = { workspace = true, features = ["server"] }

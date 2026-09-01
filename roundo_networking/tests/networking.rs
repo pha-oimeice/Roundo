@@ -4,12 +4,12 @@ use roundo_networking::connection::{
 };
 use roundo_networking::frame::{self, MAX_FRAME_SIZE};
 use roundo_networking::protocol::{
-    AuthenticationInfo, ChunkVersion, ClientGameMessage, ClientMessage, ClientResourceMessage,
-    ConnectionToken, ControllerCommand, DestroyBlockControllerAction, JoinableWorldId,
-    LocalCoordinateId, Movement3DAction, NearbyJoinableWorld, NearbyPlayer,
-    PlaceBlockControllerAction, PlayerControllerCommand, PlayerId, PlayerState, PresenceSnapshot,
-    ProtocolErrorCode, RotationSync, SceneId, SerializedPayload, ServerGameMessage, ServerMessage,
-    ServerResourceMessage, SessionId, StreamId, UserId, UserSession,
+    ChunkVersion, ClientGameMessage, ClientMessage, ClientResourceMessage, ControllerCommand,
+    DestroyBlockControllerAction, JoinableWorldId, LocalCoordinateId, Movement3DAction,
+    NearbyJoinableWorld, NearbyPlayer, PlaceBlockControllerAction, PlayerControllerCommand,
+    PlayerId, PlayerState, PresenceSnapshot, ProtocolErrorCode, RotationSync, SceneId,
+    SerializedPayload, ServerGameMessage, ServerMessage, ServerResourceMessage, SessionId,
+    SessionInfo, StreamId, UserId, UserSession,
 };
 use roundo_networking::session::{ClientSession, ServerSession, SessionState};
 use roundo_toolbox::UpdateVersion;
@@ -140,7 +140,7 @@ async fn oversized_frame_is_rejected_before_payload_allocation() {
 }
 
 #[tokio::test]
-async fn unauthenticated_game_intent_is_rejected() {
+async fn game_intent_before_session_establishment_is_rejected() {
     let (client_stream, server_stream) = tokio::io::duplex(1024);
     let mut client: ClientConnection<_> = ClientConnection::new(client_stream);
     timeout(
@@ -162,55 +162,53 @@ async fn unauthenticated_game_intent_is_rejected() {
 
     let result = timeout(
         TEST_TIMEOUT,
-        ServerSession::new(server_stream).receive_authentication(),
+        ServerSession::new(server_stream).receive_public_session_request(),
     )
     .await
     .expect("server must inspect the first message");
     let error = match result {
-        Ok(_) => panic!("game intent before authentication must be rejected"),
+        Ok(_) => panic!("game intent before session establishment must be rejected"),
         Err(error) => error,
     };
     assert!(matches!(error, ProtocolError::UnexpectedMessage { .. }));
 }
 
 #[tokio::test]
-async fn authentication_is_server_confirmed_and_client_state_changes_after_reply() {
+async fn public_session_is_server_confirmed_and_client_state_changes_after_reply() {
     let (client_stream, server_stream) = tokio::io::duplex(1024);
     let (client_done, mut client_result) = oneshot::channel();
     let client_task = tokio::spawn(async move {
         let result = ClientSession::new(client_stream)
-            .authenticate(ConnectionToken::new("valid-token"))
+            .join_public_session()
             .await;
-        let _ = client_done
-            .send(result.map(|session| (session.state(), session.authentication_info())));
+        let _ = client_done.send(result.map(|session| (session.state(), session.session_info())));
     });
 
-    let (pending, token) = timeout(
+    let pending = timeout(
         TEST_TIMEOUT,
-        ServerSession::new(server_stream).receive_authentication(),
+        ServerSession::new(server_stream).receive_public_session_request(),
     )
     .await
-    .expect("server must receive authentication")
-    .expect("authentication message must be valid");
-    assert_eq!(token, ConnectionToken::new("valid-token"));
+    .expect("server must receive public session request")
+    .expect("public session request must be valid");
     assert!(matches!(
         client_result.try_recv(),
         Err(oneshot::error::TryRecvError::Empty)
     ));
 
-    let info = authentication_info();
-    let authenticated = timeout(TEST_TIMEOUT, pending.confirm(info))
+    let info = session_info();
+    let established = timeout(TEST_TIMEOUT, pending.confirm(info))
         .await
         .expect("server confirmation must not deadlock")
         .expect("server confirmation must succeed");
-    assert_eq!(authenticated.state(), SessionState::Authenticated);
+    assert_eq!(established.state(), SessionState::Established);
 
     let (state, received_info) = timeout(TEST_TIMEOUT, client_result)
         .await
         .expect("client must receive confirmation")
         .expect("client task must keep its result")
-        .expect("client must accept the authenticated reply");
-    assert_eq!(state, SessionState::Authenticated);
+        .expect("client must accept the established session reply");
+    assert_eq!(state, SessionState::Established);
     assert_eq!(received_info, info);
     timeout(TEST_TIMEOUT, client_task)
         .await
@@ -260,8 +258,8 @@ async fn normal_and_abnormal_disconnects_end_connection_tasks() {
     assert!(matches!(abrupt_result, Err(ProtocolError::Io(_))));
 }
 
-fn authentication_info() -> AuthenticationInfo {
-    AuthenticationInfo {
+fn session_info() -> SessionInfo {
+    SessionInfo {
         user_session: UserSession {
             user_id: UserId(42),
             session_id: SessionId(7),
@@ -271,9 +269,7 @@ fn authentication_info() -> AuthenticationInfo {
 
 fn client_messages() -> Vec<ClientMessage> {
     vec![
-        ClientMessage::Authenticate {
-            connection_token: ConnectionToken::new("connection-token"),
-        },
+        ClientMessage::JoinPublicSession,
         ClientMessage::Ready {
             stream: StreamId::Stream0,
             protocol_version: 1,
@@ -311,11 +307,11 @@ fn client_messages() -> Vec<ClientMessage> {
 
 fn server_messages() -> Vec<ServerMessage> {
     vec![
-        ServerMessage::Authenticated {
-            info: authentication_info(),
+        ServerMessage::SessionEstablished {
+            info: session_info(),
         },
         ServerMessage::Error {
-            code: ProtocolErrorCode::AuthenticationRejected,
+            code: ProtocolErrorCode::SessionRejected,
         },
         ServerMessage::Error {
             code: ProtocolErrorCode::UnexpectedMessage,

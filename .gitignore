@@ -6,6 +6,12 @@ idl/schema/java
 .agents
 skills
 mods
+docs
+.pi
+.obsidian
+skills-lock.json
+*.bat
+
 
 NUL
 target
@@ -15,7 +21,6 @@ Cargo.lock
 .idea
 .vscode
 .kotlin
-.cargo
 .rustup
 .git
 .github

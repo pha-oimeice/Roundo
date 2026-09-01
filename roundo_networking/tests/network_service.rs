@@ -37,7 +37,6 @@ async fn client_and_server_exchange_messages_over_prioritized_quic_streams() {
     let client = ClientNetwork::start(
         ClientNetworkConfig {
             quic_address: addresses.quic_address,
-            public_address: addresses.public_address,
             server_name: "localhost".to_string(),
             certificate_policy: CertificatePolicy::TrustOnFirstUse,
             reconnect_delay: Duration::from_millis(10),
@@ -210,7 +209,6 @@ async fn receive_or_connection_error(
 fn server_config(certificate_directory: PathBuf) -> ServerNetworkConfig {
     ServerNetworkConfig {
         quic_address: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
-        public_address: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
         certificate_directory,
         server_alternative_names: vec!["localhost".to_string()],
         generate_self_signed_certificate: true,

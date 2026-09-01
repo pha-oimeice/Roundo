@@ -1,4 +1,3 @@
-use super::http::{HttpState, http_router};
 use super::registry::ConnectionRegistry;
 use super::*;
 
@@ -18,9 +17,8 @@ impl ServerNetwork {
         hooks: Arc<dyn ServerHooks>,
     ) -> Result<Self, NetworkError> {
         log::info!(
-            "starting network server: quic_address={}, public_address={}, certificate_directory={}",
+            "starting network server: quic_address={}, certificate_directory={}",
             config.quic_address,
-            config.public_address,
             config.certificate_directory.display()
         );
         let runtime = Builder::new_multi_thread()
@@ -203,45 +201,11 @@ async fn run_server(
             return Err(error);
         }
     };
-    let state = Arc::new(HttpState {
-        hooks: Arc::clone(&hooks),
-        tickets: registry.tickets(),
-        certificate_pem: tls.certificate_pem,
-    });
-    let http_config = axum_server::tls_rustls::RustlsConfig::from_config(tls.config);
-    let http_handle = axum_server::Handle::new();
-    let http_task = tokio::spawn(
-        axum_server::bind_rustls(config.public_address, http_config)
-            .handle(http_handle.clone())
-            .serve(http_router(state).into_make_service()),
-    );
-    let public_address = match http_handle.listening().await {
-        Some(address) => address,
-        None => {
-            let error = NetworkError::new("failed to bind public HTTPS listener");
-            let _ = ready_sender.send(Err(error.clone()));
-            return Err(error);
-        }
-    };
-    let addresses = ServerAddresses {
-        quic_address,
-        public_address,
-    };
-    log::info!(
-        "network listeners started: quic_address={}, public_address={}",
-        quic_address,
-        public_address
-    );
+    let addresses = ServerAddresses { quic_address };
+    log::info!("network listener started: quic_address={quic_address}");
     let _ = ready_sender.send(Ok(addresses));
 
     run_quic_listener(quic_endpoint, hooks, registry, shutdown).await;
-    log::info!("QUIC listener stopped; shutting down public HTTPS listener");
-    http_handle.shutdown();
-    match http_task.await {
-        Ok(Ok(())) => {}
-        Ok(Err(error)) => log::warn!("public HTTPS listener stopped: {error}"),
-        Err(error) => log::warn!("public HTTPS task stopped: {error}"),
-    }
     log::info!("network server stopped");
     Ok(())
 }
@@ -290,13 +254,13 @@ fn server_message_stream(message: &ServerMessage) -> Option<StreamId> {
     match message {
         ServerMessage::Game(_) => Some(StreamId::Stream0),
         ServerMessage::Resource(_) => Some(StreamId::Stream1),
-        ServerMessage::Authenticated { .. } | ServerMessage::Error { .. } => None,
+        ServerMessage::SessionEstablished { .. } | ServerMessage::Error { .. } => None,
     }
 }
 
 fn server_message_kind(message: &ServerMessage) -> &'static str {
     match message {
-        ServerMessage::Authenticated { .. } => "Authenticated",
+        ServerMessage::SessionEstablished { .. } => "SessionEstablished",
         ServerMessage::Error { .. } => "Error",
         ServerMessage::Game(message) => message.kind(),
         ServerMessage::Resource(message) => message.kind(),

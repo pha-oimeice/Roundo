@@ -21,8 +21,7 @@ impl Default for ClientConfig {
             dev_mode: false,
             servers: vec![ServerEntry {
                 name: "Local server".into(),
-                quic_addr: format!("{}:{}", endpoint.host, endpoint.quic_port),
-                https_addr: format!("{}:{}", endpoint.host, endpoint.https_port),
+                address: format!("{}:{}", endpoint.host, endpoint.quic_port),
             }],
             network,
             settings: ClientSettingsConfig::default(),
@@ -30,13 +29,35 @@ impl Default for ClientConfig {
     }
 }
 
-#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
 pub struct ServerEntry {
     pub name: String,
-    #[serde(alias = "game_addr")]
-    pub quic_addr: String,
-    pub https_addr: String,
+    pub address: String,
+}
+
+impl<'de> Deserialize<'de> for ServerEntry {
+    fn deserialize<Deserializer>(deserializer: Deserializer) -> Result<Self, Deserializer::Error>
+    where
+        Deserializer: serde::Deserializer<'de>,
+    {
+        #[derive(Default, Deserialize)]
+        #[serde(default, deny_unknown_fields)]
+        struct Input {
+            name: String,
+            address: Option<String>,
+            #[serde(alias = "game_addr")]
+            quic_addr: Option<String>,
+            // Accepted only to migrate configurations written before HTTPS was removed.
+            https_addr: Option<serde::de::IgnoredAny>,
+        }
+
+        let input = Input::deserialize(deserializer)?;
+        let _ = input.https_addr;
+        Ok(Self {
+            name: input.name,
+            address: input.address.or(input.quic_addr).unwrap_or_default(),
+        })
+    }
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -52,11 +73,24 @@ pub struct ServerConfig {
 mod tests {
     use super::*;
     #[test]
-    fn server_entry_rejects_unknown_fields() {
-        assert!(
-            toml::from_str::<ServerEntry>("name='x'\nquic_addr='a'\nhttps_addr='b'\nextra=1")
-                .is_err()
-        );
+    fn server_entry_uses_address_and_rejects_unknown_fields() {
+        let server = toml::from_str::<ServerEntry>("name='x'\naddress='localhost:12358'")
+            .expect("the current address field should deserialize");
+        assert_eq!(server.address, "localhost:12358");
+        assert!(toml::from_str::<ServerEntry>("name='x'\naddress='a'\nextra=1").is_err());
+    }
+
+    #[test]
+    fn legacy_server_addresses_load_without_preserving_the_https_endpoint() {
+        let server = toml::from_str::<ServerEntry>(
+            "name='x'\nquic_addr='localhost:12358'\nhttps_addr='localhost:35813'",
+        )
+        .expect("legacy server entries should migrate while loading");
+        assert_eq!(server.address, "localhost:12358");
+        let serialized = toml::to_string(&server).unwrap();
+        assert!(serialized.contains("address = \"localhost:12358\""));
+        assert!(!serialized.contains("quic_addr"));
+        assert!(!serialized.contains("https_addr"));
     }
 
     #[test]

@@ -18,6 +18,6 @@ serde_json.workspace = true
 schemars.workspace = true
 roundo_proc_macros.workspace = true
 roundo_marionette = { workspace = true, optional = true }
-roundo_webui = { path = "../roundo_client/roundo_webui", optional = true }
+roundo_webui = { workspace = true, optional = true }
 roundo_user_config = { workspace = true, optional = true }
 roundo_presence = { workspace = true, optional = true }

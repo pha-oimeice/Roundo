@@ -21,32 +21,35 @@ pub(super) async fn process_server_connection(
             return;
         }
     };
-    let (pending_session, token) = match ServerSession::new(streams.stream0)
-        .receive_authentication()
+    let pending_session = match ServerSession::new(streams.stream0)
+        .receive_public_session_request()
         .await
     {
         Ok(result) => result,
         Err(error) => {
             log::warn!(
-                "QUIC peer failed before authentication: peer={peer_address}, error={error}"
+                "QUIC peer failed before session establishment: peer={peer_address}, error={error}"
             );
-            connection.close(quinn::VarInt::from_u32(2), b"authentication required");
+            connection.close(
+                quinn::VarInt::from_u32(2),
+                b"public session request required",
+            );
             return;
         }
     };
-    let (connection_id, user_session) = match registry.tickets().claim(token.as_str()) {
-        Some(claim) => claim,
-        None => {
-            log::warn!(
-                "rejected QUIC authentication: peer={peer_address}, reason=invalid_or_expired_ticket"
-            );
+    let public_session = match hooks.public_session().await {
+        Ok(session) => session,
+        Err(error) => {
+            log::error!("failed to resolve public session: peer={peer_address}, error={error}");
             let _ = pending_session
-                .reject(crate::protocol::ProtocolErrorCode::AuthenticationRejected)
+                .reject(crate::protocol::ProtocolErrorCode::SessionRejected)
                 .await;
-            connection.close(quinn::VarInt::from_u32(2), b"authentication rejected");
+            connection.close(quinn::VarInt::from_u32(2), b"public session unavailable");
             return;
         }
     };
+    let user_session = public_session.user_session;
+    let connection_id = registry.next_connection_id();
     let is_open = match hooks.session_is_open(user_session.session_id).await {
         Ok(is_open) => is_open,
         Err(error) => {
@@ -56,7 +59,7 @@ pub(super) async fn process_server_connection(
                 user_session.session_id.0
             );
             let _ = pending_session
-                .reject(crate::protocol::ProtocolErrorCode::AuthenticationRejected)
+                .reject(crate::protocol::ProtocolErrorCode::SessionRejected)
                 .await;
             connection.close(quinn::VarInt::from_u32(2), b"session validation failed");
             return;
@@ -64,26 +67,26 @@ pub(super) async fn process_server_connection(
     };
     if !is_open {
         let _ = pending_session
-            .reject(crate::protocol::ProtocolErrorCode::AuthenticationRejected)
+            .reject(crate::protocol::ProtocolErrorCode::SessionRejected)
             .await;
         connection.close(quinn::VarInt::from_u32(2), b"session closed");
         return;
     }
-    let authenticated = match pending_session
-        .confirm(crate::protocol::AuthenticationInfo { user_session })
+    let established = match pending_session
+        .confirm(crate::protocol::SessionInfo { user_session })
         .await
     {
         Ok(session) => session,
         Err(error) => {
             log::warn!(
-                "failed to confirm QUIC authentication: peer={peer_address}, connection_id={}, error={error}",
+                "failed to confirm QUIC public session: peer={peer_address}, connection_id={}, error={error}",
                 connection_id.0
             );
-            connection.close(quinn::VarInt::from_u32(2), b"authentication failed");
+            connection.close(quinn::VarInt::from_u32(2), b"session establishment failed");
             return;
         }
     };
-    let stream0 = match authenticated.enter_game().await {
+    let stream0 = match established.enter_game().await {
         Ok(session) => session,
         Err(error) => {
             log::warn!("stream0 protocol setup failed: peer={peer_address}, error={error}");
@@ -197,7 +200,7 @@ pub(super) async fn process_server_connection(
 
 fn client_message_kind(message: &ClientMessage) -> &'static str {
     match message {
-        ClientMessage::Authenticate { .. } => "Authenticate",
+        ClientMessage::JoinPublicSession => "JoinPublicSession",
         ClientMessage::Ready { .. } => "Ready",
         ClientMessage::Game(message) => message.kind(),
         ClientMessage::Resource(message) => message.kind(),

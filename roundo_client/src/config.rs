@@ -1,4 +1,4 @@
-//! Although all structs can be serialized, only `ClientConfig` is written so the client uses one file.
+//! Client process configuration plus the installation-wide configuration shared with the server.
 
 use bevy::prelude::KeyCode;
 use roundo_marionette::{ClientKeyBindings, ClientMarionetteInputSettings, MovementAction};
@@ -8,21 +8,32 @@ pub use roundo_user_config::ServerEntry;
 use roundo_user_config::{
     ClientCameraSettingsConfig, ClientConfig, ClientControlSettingsConfig, ClientKeyBindingConfig,
     ClientKeyCode, ClientMovementAction, ClientNetworkConfig, ClientSettingsConfig,
-    ClientWorldSettingsConfig,
+    ClientWorldSettingsConfig, CommonConfig,
 };
-use std::sync::{LazyLock, RwLock};
+use std::{
+    path::PathBuf,
+    sync::{LazyLock, RwLock},
+};
 
 const CONFIG_FILE_NAME: &str = "roundo-client-config.toml";
+static COMMON_CONFIG: LazyLock<CommonConfig> =
+    LazyLock::new(roundo_user_config::load_common_config);
 static CLIENT_CONFIG: LazyLock<RwLock<ClientConfig>> = LazyLock::new(|| RwLock::new(load_config()));
 
 pub fn load_config() -> ClientConfig {
-    let mut config = roundo_user_config::load_config::<ClientConfig>(CONFIG_FILE_NAME);
+    let mut config = roundo_user_config::load_client_config(CONFIG_FILE_NAME);
     config.settings.normalize();
     config
 }
 
 pub fn network_config() -> ClientNetworkConfig {
     read_config().network.clone()
+}
+
+/// Resolves relative Mod paths against the directory containing the executable
+/// and its configuration files, rather than the caller's working directory.
+pub fn mod_path() -> PathBuf {
+    COMMON_CONFIG.resolved_mod_path()
 }
 
 pub fn servers() -> Vec<ServerEntry> {

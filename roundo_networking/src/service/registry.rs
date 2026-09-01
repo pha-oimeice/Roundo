@@ -1,11 +1,10 @@
-use super::ticket::TicketAuthority;
 use super::*;
 
 #[derive(Clone, Default)]
 pub(super) struct ConnectionRegistry {
     connections: Arc<RwLock<HashMap<ConnectionId, ConnectionSenders>>>,
     sessions: Arc<RwLock<HashMap<UserSession, HashSet<ConnectionId>>>>,
-    tickets: TicketAuthority,
+    next_connection_id: Arc<AtomicU64>,
 }
 
 struct ConnectionSenders {
@@ -109,8 +108,8 @@ impl ConnectionRegistry {
         (target_count, queued_count)
     }
 
-    pub(super) fn tickets(&self) -> TicketAuthority {
-        self.tickets.clone()
+    pub(super) fn next_connection_id(&self) -> ConnectionId {
+        ConnectionId(self.next_connection_id.fetch_add(1, Ordering::Relaxed))
     }
 }
 

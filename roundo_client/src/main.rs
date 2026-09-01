@@ -32,7 +32,10 @@ fn main() {
         .add_plugins((
             RoundoCliPlugin::client(),
             targeting::ClientVoxelTargetingPlugin,
-            roundo_webui::RoundoWebUiPlugin::from_current_dir_with_command_io(command_io),
+            roundo_webui::RoundoWebUiPlugin::with_mods_root_and_command_io(
+                config::mod_path(),
+                command_io,
+            ),
             ui_host::ClientWebUiHostPlugin,
         ));
     app.run();

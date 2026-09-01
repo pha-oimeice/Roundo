@@ -3,30 +3,30 @@
 use crate::ProtocolError;
 use crate::connection::{ClientConnection, ServerConnection};
 use crate::protocol::{
-    AuthenticationInfo, ClientMessage, ConnectionToken, GAME_PROTOCOL_VERSION, ProtocolErrorCode,
-    RESOURCE_PROTOCOL_VERSION, ServerMessage, StreamId,
+    ClientMessage, GAME_PROTOCOL_VERSION, ProtocolErrorCode, RESOURCE_PROTOCOL_VERSION,
+    ServerMessage, SessionInfo, StreamId,
 };
 use tokio::io::{AsyncRead, AsyncWrite};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SessionState {
-    Unauthenticated,
-    Authenticating,
-    Authenticated,
+    TransportConnected,
+    Establishing,
+    Established,
     InGame,
     InResource,
     Closed,
 }
 
-/// Client-side session before server-confirmed authentication.
+/// Client-side session before the server establishes a public session.
 pub struct ClientSession<Stream> {
     connection: ClientConnection<Stream>,
     state: SessionState,
 }
 
-pub struct ClientAuthenticatedSession<Stream> {
+pub struct ClientEstablishedSession<Stream> {
     connection: ClientConnection<Stream>,
-    info: AuthenticationInfo,
+    info: SessionInfo,
 }
 
 pub struct ClientGameSession<Stream> {
@@ -41,7 +41,7 @@ impl<Stream> ClientSession<Stream> {
     pub fn new(stream: Stream) -> Self {
         Self {
             connection: ClientConnection::new(stream),
-            state: SessionState::Unauthenticated,
+            state: SessionState::TransportConnected,
         }
     }
 
@@ -54,40 +54,39 @@ impl<Stream> ClientSession<Stream>
 where
     Stream: AsyncRead + AsyncWrite + Unpin,
 {
-    /// Send credentials and wait for the server's authoritative confirmation.
-    pub async fn authenticate(
+    /// Request the server's public session over the trusted QUIC connection.
+    pub async fn join_public_session(
         mut self,
-        connection_token: ConnectionToken,
-    ) -> Result<ClientAuthenticatedSession<Stream>, ProtocolError> {
-        self.state = SessionState::Authenticating;
+    ) -> Result<ClientEstablishedSession<Stream>, ProtocolError> {
+        self.state = SessionState::Establishing;
         self.connection
-            .send(&ClientMessage::Authenticate { connection_token })
+            .send(&ClientMessage::JoinPublicSession)
             .await?;
         match self.connection.receive().await? {
-            ServerMessage::Authenticated { info } => Ok(ClientAuthenticatedSession {
+            ServerMessage::SessionEstablished { info } => Ok(ClientEstablishedSession {
                 connection: self.connection,
                 info,
             }),
             ServerMessage::Error { code } => Err(ProtocolError::Rejected(code)),
             message => Err(ProtocolError::unexpected(
-                "Authenticated or Error",
+                "SessionEstablished or Error",
                 server_name(&message),
             )),
         }
     }
 }
 
-impl<Stream> ClientAuthenticatedSession<Stream> {
+impl<Stream> ClientEstablishedSession<Stream> {
     pub fn state(&self) -> SessionState {
-        SessionState::Authenticated
+        SessionState::Established
     }
 
-    pub fn authentication_info(&self) -> AuthenticationInfo {
+    pub fn session_info(&self) -> SessionInfo {
         self.info
     }
 }
 
-impl<Stream> ClientAuthenticatedSession<Stream>
+impl<Stream> ClientEstablishedSession<Stream>
 where
     Stream: AsyncRead + AsyncWrite + Unpin,
 {
@@ -130,7 +129,7 @@ impl<Stream> ClientResourceSession<Stream>
 where
     Stream: AsyncRead + AsyncWrite + Unpin,
 {
-    /// Initialize `stream1` after `stream0` authenticated the QUIC connection.
+    /// Initialize `stream1` after `stream0` established the public session.
     pub async fn open(stream: Stream) -> Result<Self, ProtocolError> {
         let mut connection = ClientConnection::new(stream);
         connection
@@ -143,17 +142,17 @@ where
     }
 }
 
-/// Server-side session waiting for the first client authentication message.
+/// Server-side session waiting for a public-session request.
 pub struct ServerSession<Stream> {
     connection: ServerConnection<Stream>,
     state: SessionState,
 }
 
-pub struct ServerAuthenticationPending<Stream> {
+pub struct ServerSessionEstablishmentPending<Stream> {
     connection: ServerConnection<Stream>,
 }
 
-pub struct ServerAuthenticatedSession<Stream> {
+pub struct ServerEstablishedSession<Stream> {
     connection: ServerConnection<Stream>,
 }
 
@@ -169,7 +168,7 @@ impl<Stream> ServerSession<Stream> {
     pub fn new(stream: Stream) -> Self {
         Self {
             connection: ServerConnection::new(stream),
-            state: SessionState::Unauthenticated,
+            state: SessionState::TransportConnected,
         }
     }
 
@@ -182,20 +181,17 @@ impl<Stream> ServerSession<Stream>
 where
     Stream: AsyncRead + AsyncWrite + Unpin,
 {
-    pub async fn receive_authentication(
+    pub async fn receive_public_session_request(
         mut self,
-    ) -> Result<(ServerAuthenticationPending<Stream>, ConnectionToken), ProtocolError> {
+    ) -> Result<ServerSessionEstablishmentPending<Stream>, ProtocolError> {
         match self.connection.receive().await? {
-            ClientMessage::Authenticate { connection_token } => Ok((
-                ServerAuthenticationPending {
-                    connection: self.connection,
-                },
-                connection_token,
-            )),
+            ClientMessage::JoinPublicSession => Ok(ServerSessionEstablishmentPending {
+                connection: self.connection,
+            }),
             message => {
                 self.state = SessionState::Closed;
                 Err(ProtocolError::unexpected(
-                    "Authenticate",
+                    "JoinPublicSession",
                     client_name(&message),
                 ))
             }
@@ -203,20 +199,19 @@ where
     }
 }
 
-impl<Stream> ServerAuthenticationPending<Stream>
+impl<Stream> ServerSessionEstablishmentPending<Stream>
 where
     Stream: AsyncRead + AsyncWrite + Unpin,
 {
-    /// Send the authoritative authentication confirmation before allowing
-    /// gameplay traffic.
+    /// Bind the public session before allowing gameplay traffic.
     pub async fn confirm(
         mut self,
-        info: AuthenticationInfo,
-    ) -> Result<ServerAuthenticatedSession<Stream>, ProtocolError> {
+        info: SessionInfo,
+    ) -> Result<ServerEstablishedSession<Stream>, ProtocolError> {
         self.connection
-            .send(&ServerMessage::Authenticated { info })
+            .send(&ServerMessage::SessionEstablished { info })
             .await?;
-        Ok(ServerAuthenticatedSession {
+        Ok(ServerEstablishedSession {
             connection: self.connection,
         })
     }
@@ -227,13 +222,13 @@ where
     }
 }
 
-impl<Stream> ServerAuthenticatedSession<Stream> {
+impl<Stream> ServerEstablishedSession<Stream> {
     pub const fn state(&self) -> SessionState {
-        SessionState::Authenticated
+        SessionState::Established
     }
 }
 
-impl<Stream> ServerAuthenticatedSession<Stream>
+impl<Stream> ServerEstablishedSession<Stream>
 where
     Stream: AsyncRead + AsyncWrite + Unpin,
 {
@@ -270,7 +265,7 @@ impl<Stream> ServerResourceSession<Stream>
 where
     Stream: AsyncRead + AsyncWrite + Unpin,
 {
-    /// Accept `stream1` after `stream0` authenticated the QUIC connection.
+    /// Accept `stream1` after `stream0` established the public session.
     pub async fn accept(stream: Stream) -> Result<Self, ProtocolError> {
         let mut connection = ServerConnection::new(stream);
         match connection.receive().await? {
@@ -321,7 +316,7 @@ impl<Stream> ServerResourceSession<Stream> {
 
 fn client_name(message: &ClientMessage) -> &'static str {
     match message {
-        ClientMessage::Authenticate { .. } => "Authenticate",
+        ClientMessage::JoinPublicSession => "JoinPublicSession",
         ClientMessage::Ready { .. } => "Ready",
         ClientMessage::Game(_) => "Game",
         ClientMessage::Resource(_) => "Resource",
@@ -330,7 +325,7 @@ fn client_name(message: &ClientMessage) -> &'static str {
 
 fn server_name(message: &ServerMessage) -> &'static str {
     match message {
-        ServerMessage::Authenticated { .. } => "Authenticated",
+        ServerMessage::SessionEstablished { .. } => "SessionEstablished",
         ServerMessage::Error { .. } => "Error",
         ServerMessage::Game(_) => "Game",
         ServerMessage::Resource(_) => "Resource",

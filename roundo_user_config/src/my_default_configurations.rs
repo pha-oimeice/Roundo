@@ -1,7 +1,17 @@
 use crate::{
-    ClientNetworkConfig, DatabaseConfig, EndpointConfig, GameplayConfig, ServerNetworkConfig,
+    ClientNetworkConfig, CommonConfig, DatabaseConfig, EndpointConfig, GameplayConfig,
+    ServerNetworkConfig,
 };
 use roundo_toolbox::fs::get_exe_root_path;
+
+impl Default for CommonConfig {
+    fn default() -> Self {
+        Self {
+            mod_path: "mods".to_string(),
+        }
+    }
+}
+
 impl Default for ClientNetworkConfig {
     fn default() -> Self {
         ClientNetworkConfig {
@@ -29,14 +39,13 @@ impl Default for EndpointConfig {
         EndpointConfig {
             host: "127.0.0.1".to_string(),
             quic_port: 12358,
-            https_port: 35813,
         }
     }
 }
 impl Default for DatabaseConfig {
     fn default() -> Self {
         DatabaseConfig {
-            url: "postgres://user:password@localhost/dbname".to_string(),
+            url: "postgres://postgres:12345678@localhost/roundo".to_string(),
             pool_size: 10,
         }
     }
