@@ -16,7 +16,8 @@ roundo_toolbox.workspace = true
 serde.workspace = true
 [features]
 dev = [
-    "bevy/dev",
+    "bevy/debug",
+    "bevy/file_watcher",
 ]
 release = [
 

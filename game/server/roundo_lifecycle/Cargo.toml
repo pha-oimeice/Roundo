@@ -8,7 +8,8 @@ bevy.workspace = true
 
 [features]
 dev = [
-    "bevy/dev",
+    "bevy/debug",
+    "bevy/file_watcher",
 ]
 release = [
 

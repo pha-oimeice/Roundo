@@ -364,8 +364,8 @@ struct PendingUiOpen {
     target: UiOpenTarget,
     root_ui: bool,
     replacement_lifecycle: Option<UiLifecycleState>,
-    /// A physically prepared candidate is not a logical open until a caller
-    /// claims it. Its opener and parent are rebound atomically on claim.
+    /// A physically prepared WebView is not a logical open until a caller
+    /// claims it. Its Mod document is loaded only after that claim.
     prefetched: bool,
 }
 
@@ -743,8 +743,8 @@ impl UiLifecycleManager {
         self.begin_open_internal(source, target, false, None, false)
     }
 
-    /// Reserves one hidden physical candidate without creating a logical UI
-    /// instance or consuming the Definition's live-instance allowance.
+    /// Reserves one hidden physical WebView without loading its Mod document,
+    /// creating a logical UI instance, or consuming the Definition's live allowance.
     pub fn begin_prefetch(&mut self, target: UiOpenTarget) -> Result<u64, UiLifecycleError> {
         if let Some((id, _)) = self
             .pending
@@ -761,9 +761,9 @@ impl UiLifecycleManager {
         self.begin_open_internal(UiCommandSource::Host, target, false, None, true)
     }
 
-    /// Converts a prepared candidate into the caller's real Pending UI Open.
-    /// The document keeps its future instance identity, while ownership is
-    /// assigned only now so speculative work cannot mutate the lifecycle tree.
+    /// Converts a prepared WebView into the caller's real Pending UI Open.
+    /// Its future identity is retained, while ownership is assigned only now;
+    /// the Mod document may start loading after this transition.
     pub fn claim_prefetch(
         &mut self,
         source: UiCommandSource,
@@ -1095,7 +1095,7 @@ impl UiLifecycleManager {
             .collect::<Vec<_>>();
         self.remove_instances(&destroyed);
         // Prepared candidates have no lifecycle parent until claimed, so a
-        // Root replacement must not throw away their already-loaded views.
+        // Root replacement must not throw away their prepared physical WebViews.
         // Ordinary Pending UI Opens remain owned by the old Root and die here.
         self.pending.retain(|_, pending| pending.prefetched);
         self.recovery = None;
@@ -1464,6 +1464,29 @@ enum StagedReadiness {
 }
 
 #[cfg(target_os = "windows")]
+fn should_start_document_load(prefetched: bool, initial_blank_finished: bool) -> bool {
+    !prefetched && initial_blank_finished
+}
+
+#[cfg(target_os = "windows")]
+fn prepared_webview_readiness(
+    pending_live: bool,
+    initial_blank_finished: bool,
+    elapsed: Duration,
+    timeout: Duration,
+) -> StagedReadiness {
+    if !pending_live {
+        StagedReadiness::Stale
+    } else if initial_blank_finished {
+        StagedReadiness::Commit
+    } else if elapsed >= timeout {
+        StagedReadiness::Timeout
+    } else {
+        StagedReadiness::Pending
+    }
+}
+
+#[cfg(target_os = "windows")]
 fn staged_readiness(
     pending_live: bool,
     navigation_result: Option<&Result<(), String>>,
@@ -1556,14 +1579,15 @@ pub struct UiNavigationExecutor {
     retained_root_presentations: Vec<UiInstanceId>,
     #[cfg(target_os = "windows")]
     staged: BTreeMap<u64, StagedWebView>,
-    /// Fully loaded graph-prefetched documents. They remain command-gated and
-    /// consume neither a lifecycle instance nor `max_instances` until claimed.
+    /// Graph-prefetched physical WebViews whose Mod documents are not loaded.
+    /// They consume neither a lifecycle instance nor `max_instances` until claimed.
     #[cfg(target_os = "windows")]
     prepared: BTreeMap<u64, StagedWebView>,
     /// Superseded staged WebViews are moved here instead of dropped while a
-    /// WebView2 navigation callback may still be on the Win32 stack. The next
-    /// host update retires them, followed by one creation-free update so COM
-    /// teardown and the next controller creation cannot share a callback turn.
+    /// WebView2 navigation callback may still be on the Win32 stack. Physical
+    /// controller creation also observes one creation-free update after COM
+    /// teardown or command-response script evaluation, so those operations
+    /// cannot share an active WebView2 callback turn.
     #[cfg(target_os = "windows")]
     superseded_staged: BTreeMap<u64, StagedWebView>,
     #[cfg(target_os = "windows")]
@@ -1925,9 +1949,10 @@ struct PendingCommand {
 fn claim_webview_creation_turn(
     active_transactions: usize,
     retiring_transactions: usize,
+    commands_pending: bool,
     cooldown: &mut bool,
 ) -> bool {
-    if active_transactions != 0 || retiring_transactions != 0 {
+    if active_transactions != 0 || retiring_transactions != 0 || commands_pending {
         return false;
     }
     if std::mem::take(cooldown) {
@@ -2021,8 +2046,15 @@ fn stage_pending_webview(world: &mut bevy::prelude::World) {
         let mut executor = world.non_send_mut::<UiNavigationExecutor>();
         let active = executor.staged.len();
         let retiring = executor.superseded_staged.len();
+        let commands_pending = executor.committed.values().any(|overlay| {
+            !overlay
+                .pending
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .is_empty()
+        });
         let cooldown = &mut executor.webview_creation_cooldown;
-        claim_webview_creation_turn(active, retiring, cooldown)
+        claim_webview_creation_turn(active, retiring, commands_pending, cooldown)
     };
     if !may_create {
         return;
@@ -2372,8 +2404,9 @@ fn advance_staged_webviews(world: &mut bevy::prelude::World) {
     {
         let mut executor = world.non_send_mut::<UiNavigationExecutor>();
         for id in claimed {
-            if let Some(prepared) = executor.prepared.remove(&id) {
+            if let Some(mut prepared) = executor.prepared.remove(&id) {
                 resume_prepared_webview(&prepared.webview);
+                prepared.created_at = Instant::now();
                 executor.staged.insert(id, prepared);
             }
         }
@@ -2383,10 +2416,17 @@ fn advance_staged_webviews(world: &mut bevy::prelude::World) {
     }
 
     // Wry starts an asynchronous initial about:blank navigation while building
-    // a WebView. Starting the real URL before that finishes lets the initial
-    // navigation cancel it. Wait for about:blank, then navigate with native
-    // status handlers already installed.
+    // a WebView. A speculative candidate stops there: its Mod document must not
+    // load or execute until a real open claims it. Cold and claimed opens wait
+    // for about:blank, then navigate with native status handlers installed.
     {
+        let prefetched = world
+            .resource::<UiLifecycleManager>()
+            .pending_descriptors()
+            .into_iter()
+            .filter(|descriptor| descriptor.prefetched)
+            .map(|descriptor| descriptor.id)
+            .collect::<BTreeSet<_>>();
         let mut executor = world.non_send_mut::<UiNavigationExecutor>();
         for (id, staged) in &mut executor.staged {
             let initial_finished = staged
@@ -2396,7 +2436,7 @@ fn advance_staged_webviews(world: &mut bevy::prelude::World) {
                 .finished_url
                 .as_deref()
                 == Some("about:blank");
-            if !initial_finished {
+            if !should_start_document_load(prefetched.contains(id), initial_finished) {
                 continue;
             }
             let Some(url) = staged.target_url.take() else {
@@ -2433,13 +2473,26 @@ fn advance_staged_webviews(world: &mut bevy::prelude::World) {
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner());
                 let descriptor = state.pending_descriptor(*id);
-                match staged_readiness(
-                    descriptor.is_some(),
-                    load.navigation_result.as_ref(),
-                    load.bridge_ready,
-                    staged.created_at.elapsed(),
-                    executor.load_timeout,
-                ) {
+                let readiness = if descriptor
+                    .as_ref()
+                    .is_some_and(|descriptor| descriptor.prefetched)
+                {
+                    prepared_webview_readiness(
+                        true,
+                        load.finished_url.as_deref() == Some("about:blank"),
+                        staged.created_at.elapsed(),
+                        executor.load_timeout,
+                    )
+                } else {
+                    staged_readiness(
+                        descriptor.is_some(),
+                        load.navigation_result.as_ref(),
+                        load.bridge_ready,
+                        staged.created_at.elapsed(),
+                        executor.load_timeout,
+                    )
+                };
+                match readiness {
                     StagedReadiness::Pending => None,
                     StagedReadiness::Commit if descriptor.is_some_and(|value| value.prefetched) => {
                         Some(Resolution::Prepared(*id))
@@ -2505,6 +2558,7 @@ fn advance_staged_webviews(world: &mut bevy::prelude::World) {
                                 &body,
                             );
                         }
+                        activate_webui_bridge(&staged.webview);
                         let still_pending = world
                             .resource::<UiLifecycleManager>()
                             .pending_descriptors()
@@ -2841,6 +2895,16 @@ fn sync_committed_navigation(
                 );
             }
         }
+        if let Some(overlay) = executor.committed.get(&id) {
+            activate_webui_bridge(&overlay.webview);
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn activate_webui_bridge(webview: &wry::WebView) {
+    if let Err(error) = webview.evaluate_script("window.__roundoActivate();") {
+        log::error!("cannot activate committed Web UI bridge: {error}");
     }
 }
 
@@ -3207,6 +3271,7 @@ fn resolve_webui_commands(
     let Some(executor) = executor.as_deref_mut() else {
         return;
     };
+    let mut resolved_any = false;
     for overlay in executor.committed.values_mut() {
         let mut pending = overlay
             .pending
@@ -3246,7 +3311,11 @@ fn resolve_webui_commands(
                 log::error!("cannot resolve Web UI command: {error}");
             }
             pending.swap_remove(index);
+            resolved_any = true;
         }
+    }
+    if resolved_any {
+        executor.webview_creation_cooldown = true;
     }
 }
 
@@ -3273,7 +3342,7 @@ fn response_script(request_id: u64, result: &Value) -> String {
 }
 
 #[cfg(target_os = "windows")]
-const WEBUI_BRIDGE_SCRIPT: &str = r#"(() => { let next = 1; const pending = new Map(); window.__roundoResolve = (id, value) => { const resolve = pending.get(id); if (resolve) { pending.delete(id); resolve(value); } }; window.roundo = { execute(command) { return new Promise(resolve => { const id = next++; pending.set(id, resolve); window.ipc.postMessage(JSON.stringify({ request_id: id, command })); }); } }; window.addEventListener('pointerdown',()=>window.ipc.postMessage(JSON.stringify({roundo_focus_request:true})),true); window.ipc.postMessage(JSON.stringify({roundo_bridge_ready:true})); })();"#;
+const WEBUI_BRIDGE_SCRIPT: &str = r#"(() => { let next = 1; let active = false; const pending = new Map(); const queued = []; const post = body => active ? window.ipc.postMessage(body) : queued.push(body); window.__roundoActivate = () => { if (active) return; active = true; for (const body of queued.splice(0)) window.ipc.postMessage(body); }; window.__roundoResolve = (id, value) => { const resolve = pending.get(id); if (resolve) { pending.delete(id); resolve(value); } }; window.roundo = { execute(command) { return new Promise(resolve => { const id = next++; pending.set(id, resolve); post(JSON.stringify({ request_id: id, command })); }); } }; window.addEventListener('pointerdown',()=>{ if (active) window.ipc.postMessage(JSON.stringify({roundo_focus_request:true})); },true); window.ipc.postMessage(JSON.stringify({roundo_bridge_ready:true})); })();"#;
 
 fn webui_initialization_script(definition: &str) -> String {
     let prefix = serde_json::to_string(&format!("/{definition}/"))
@@ -3716,6 +3785,29 @@ mod tests {
 
     #[cfg(target_os = "windows")]
     #[test]
+    fn prefetch_prepares_only_the_initial_blank_webview() {
+        assert!(!should_start_document_load(true, false));
+        assert!(!should_start_document_load(true, true));
+        assert!(!should_start_document_load(false, false));
+        assert!(should_start_document_load(false, true));
+
+        let timeout = Duration::from_secs(15);
+        assert_eq!(
+            prepared_webview_readiness(true, false, Duration::ZERO, timeout),
+            StagedReadiness::Pending
+        );
+        assert_eq!(
+            prepared_webview_readiness(true, true, Duration::from_secs(1), timeout),
+            StagedReadiness::Commit
+        );
+        assert_eq!(
+            prepared_webview_readiness(false, true, Duration::ZERO, timeout),
+            StagedReadiness::Stale
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
     fn staged_commit_requires_native_success_and_bridge_and_surfaces_failure_first() {
         let timeout = Duration::from_secs(15);
         assert_eq!(
@@ -4055,14 +4147,17 @@ mod tests {
 
     #[cfg(target_os = "windows")]
     #[test]
-    fn webview_resource_transactions_are_serial_and_retirement_gets_a_safe_tick() {
+    fn webview_creation_waits_for_transactions_commands_and_a_safe_tick() {
         let mut cooldown = false;
 
-        assert!(!claim_webview_creation_turn(1, 0, &mut cooldown));
-        assert!(!claim_webview_creation_turn(0, 1, &mut cooldown));
+        assert!(!claim_webview_creation_turn(1, 0, false, &mut cooldown));
+        assert!(!claim_webview_creation_turn(0, 1, false, &mut cooldown));
+        assert!(!claim_webview_creation_turn(0, 0, true, &mut cooldown));
         cooldown = true;
-        assert!(!claim_webview_creation_turn(0, 0, &mut cooldown));
-        assert!(claim_webview_creation_turn(0, 0, &mut cooldown));
+        assert!(!claim_webview_creation_turn(0, 0, true, &mut cooldown));
+        assert!(cooldown, "pending commands must not consume the safe tick");
+        assert!(!claim_webview_creation_turn(0, 0, false, &mut cooldown));
+        assert!(claim_webview_creation_turn(0, 0, false, &mut cooldown));
     }
 
     #[test]
@@ -4081,15 +4176,26 @@ mod tests {
     }
 
     #[test]
-    fn server_selection_polling_is_serial_and_renders_only_changed_results() {
+    fn server_selection_initializes_once_without_passive_polling() {
         let selection =
             include_str!("../../../mods/vanilla_ui/assets/webui/server-selection/index.html");
 
         assert!(selection.contains("if (loading) return"));
         assert!(selection.contains("finally { loading = false; }"));
         assert!(selection.contains("if (renderedServers === nextServers) return"));
-        assert!(selection.contains("setInterval(load, 1000)"));
         assert!(selection.contains("address: addressInput.value"));
+        assert!(selection.ends_with("load();\n</script>\n</body>\n</html>\n"));
+        assert!(!selection.contains("refresh();\nload();"));
+        assert!(!selection.contains("setInterval(load"));
+        let select_handler = selection
+            .split("function select(index)")
+            .nth(1)
+            .unwrap()
+            .split("async function refresh")
+            .next()
+            .unwrap();
+        assert!(select_handler.contains("render();"));
+        assert!(!select_handler.contains("load();"));
         assert!(!selection.contains("quic_addr"));
         assert!(!selection.contains("https"));
         assert!(!selection.contains("setInterval(load,250)"));
