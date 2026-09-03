@@ -79,9 +79,13 @@ fn apply_recovery_action(
                     log::error!("cannot retry Root UI recovery: {error}");
                 }
             }
-            // Disconnect only changes the authoritative connection fact. The
-            // following authoritative-root system performs any Root Replacement.
-            RecoveryAction::Disconnect => network.disconnect(),
+            // Disconnect clears the failed visual transaction, then changes only
+            // the authoritative connection fact. The following authority system
+            // remains the sole implementation that performs Root Replacement.
+            RecoveryAction::Disconnect => {
+                manager.dismiss_recovery_surface();
+                network.disconnect();
+            }
             RecoveryAction::Quit => {
                 app_exit.write(AppExit::Success);
             }

@@ -6,8 +6,7 @@
 use crate::registry::{MAX_PREPARED_COMMANDS, MAX_PREPARED_UI_CANDIDATES};
 use crate::*;
 use roundo_toolbox::request_response_pipe::{
-    CommandTransportContext, ContextualJsonRequestResponseIo, JsonSubmitError, RequestCall,
-    ResponseSender,
+    ContextualJsonRequestResponseIo, JsonSubmitError, RequestCall, ResponseSender,
 };
 use serde_json::{Value, json};
 use std::{
@@ -147,7 +146,7 @@ struct StagedWebView {
     target_url: Option<String>,
     pending_commands: Arc<Mutex<Vec<PendingCommand>>>,
     command_gate: Arc<Mutex<StagedCommandGate>>,
-    command_io: Option<ContextualJsonRequestResponseIo<CommandTransportContext, Value>>,
+    command_io: Option<ContextualJsonRequestResponseIo<UiCommandSource, Value>>,
     command_source: UiInstanceId,
     load_state: Arc<Mutex<StagedLoadState>>,
     created_at: Instant,
@@ -530,7 +529,7 @@ impl UiNavigationExecutor {
 
 #[cfg(target_os = "windows")]
 pub(crate) struct WebUiCommandEndpoint {
-    pub(crate) io: Option<ContextualJsonRequestResponseIo<CommandTransportContext, Value>>,
+    pub(crate) io: Option<ContextualJsonRequestResponseIo<UiCommandSource, Value>>,
 }
 
 pub(crate) struct PendingCommand {
@@ -1729,7 +1728,7 @@ fn apply_windows_webview_mode(overlay: &WebViewOverlay, mode: ClientInteractionM
 }
 
 pub(crate) fn enqueue_webui_command(
-    io: &Option<ContextualJsonRequestResponseIo<CommandTransportContext, Value>>,
+    io: &Option<ContextualJsonRequestResponseIo<UiCommandSource, Value>>,
     pending: &Arc<Mutex<Vec<PendingCommand>>>,
     source: Option<UiInstanceId>,
     body: &str,
@@ -1784,11 +1783,7 @@ pub(crate) fn enqueue_webui_command(
     let item = match io {
         Some(io) => match io.submit(
             command,
-            source.map_or(CommandTransportContext::Host, |source| {
-                CommandTransportContext::WebView {
-                    instance_id: source.get(),
-                }
-            }),
+            source.map_or(UiCommandSource::Host, UiCommandSource::WebView),
         ) {
             Ok(call) => PendingCommand {
                 request_id,

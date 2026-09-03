@@ -582,6 +582,11 @@ impl UiLifecycleManager {
     pub fn recovery_surface(&self) -> Option<&RecoverySurface> {
         self.recovery.as_ref()
     }
+    /// Dismisses the host-owned Recovery Surface without selecting or replacing a Root.
+    /// The authoritative connection adapter remains solely responsible for Root selection.
+    pub fn dismiss_recovery_surface(&mut self) -> bool {
+        self.recovery.take().is_some()
+    }
     pub fn retry_recovery(&mut self) -> Result<u64, UiLifecycleError> {
         let recovery = self
             .recovery

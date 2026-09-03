@@ -10,9 +10,7 @@ use bevy::{
     },
 };
 use roundo_marionette::ClientPlayerController;
-use roundo_toolbox::request_response_pipe::{
-    CommandTransportContext, JsonSubmitError, RequestCall,
-};
+use roundo_toolbox::request_response_pipe::{JsonSubmitError, RequestCall};
 use roundo_user_config::{
     ClientConfig, ClientKeyBindingConfig, ClientKeyCode, ClientMovementAction, ServerEntry,
 };
@@ -1251,13 +1249,11 @@ fn process_json_commands(
 /// only place where a WebView identity becomes a UI command source; the typed
 /// JSON command remains unchanged and source-neutral.
 fn command_transport_source(
-    context: CommandTransportContext,
+    source: roundo_webui::UiCommandSource,
 ) -> Option<roundo_webui::UiInstanceId> {
-    match context {
-        CommandTransportContext::Host => None,
-        CommandTransportContext::WebView { instance_id } => {
-            Some(roundo_webui::UiInstanceId::from_host_id(instance_id))
-        }
+    match source {
+        roundo_webui::UiCommandSource::Host => None,
+        roundo_webui::UiCommandSource::WebView(instance) => Some(instance),
     }
 }
 
@@ -1818,7 +1814,10 @@ fn submit_terminal_request(
     responses: &mut TerminalResponses,
     request: serde_json::Value,
 ) -> Option<serde_json::Value> {
-    match pipe.io().submit(request, CommandTransportContext::Host) {
+    match pipe
+        .io()
+        .submit(request, roundo_webui::UiCommandSource::Host)
+    {
         Ok(call) => {
             responses.0.push(call);
             None
@@ -1870,7 +1869,6 @@ fn print_terminal_response(response: serde_json::Value) {
 #[cfg(test)]
 mod tests {
     use super::{CLIENT_COMMANDS, command_dev_level, validate_external_url, visible_commands};
-    use roundo_toolbox::request_response_pipe::CommandTransportContext;
     #[test]
     fn catalog_has_unique_names_and_a_schema_for_every_typed_command() {
         let mut names = std::collections::BTreeSet::new();
@@ -2131,7 +2129,7 @@ mod tests {
         let pipe = crate::ClientCommandPipe::bounded(1);
         let _occupied = pipe
             .io()
-            .submit(serde_json::json!({}), CommandTransportContext::Host)
+            .submit(serde_json::json!({}), roundo_webui::UiCommandSource::Host)
             .unwrap();
         let mut responses = super::TerminalResponses::default();
         let response =
@@ -2164,12 +2162,14 @@ mod tests {
     #[test]
     fn command_transport_context_keeps_host_and_webview_authority_out_of_json() {
         assert_eq!(
-            super::command_transport_source(CommandTransportContext::Host),
+            super::command_transport_source(roundo_webui::UiCommandSource::Host),
             None
         );
         assert_eq!(
-            super::command_transport_source(CommandTransportContext::WebView { instance_id: 42 })
-                .map(roundo_webui::UiInstanceId::get),
+            super::command_transport_source(roundo_webui::UiCommandSource::WebView(
+                roundo_webui::UiInstanceId::from_host_id(42),
+            ))
+            .map(roundo_webui::UiInstanceId::get),
             Some(42)
         );
     }

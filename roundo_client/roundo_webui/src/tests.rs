@@ -4,9 +4,7 @@ use super::*;
 use crate::platform::{claim_webview_creation_turn, enqueue_webui_command};
 use crate::registry::{LayoutRegistration, RegistryFile};
 use roundo_mod_loader::{LoadedMods, ModId, parse_mod_id};
-use roundo_toolbox::request_response_pipe::{
-    CommandTransport, CommandTransportContext, ContextualJsonRequestResponseIo,
-};
+use roundo_toolbox::request_response_pipe::{CommandTransport, ContextualJsonRequestResponseIo};
 use serde_json::{Value, json};
 use std::{
     fs,
@@ -318,7 +316,7 @@ fn response_transport_serializes_json_without_script_interpolation() {
 #[test]
 fn ipc_submits_the_inner_command_without_transport_fields() {
     let pipe = roundo_toolbox::request_response_pipe::RequestResponsePipe::<
-        CommandTransport<CommandTransportContext>,
+        CommandTransport<UiCommandSource>,
         Value,
     >::bounded(1);
     let io = ContextualJsonRequestResponseIo::new(pipe.io());
@@ -330,7 +328,7 @@ fn ipc_submits_the_inner_command_without_transport_fields() {
         r#"{"request_id":7,"command":{"version":1,"command":"app.quit","arguments":{}}}"#,
     );
     let (transport, _reply) = pipe.try_receive().expect("inner command was queued");
-    assert_eq!(transport.context, CommandTransportContext::Host);
+    assert_eq!(transport.context, UiCommandSource::Host);
     assert_eq!(
         transport.command,
         json!({"version":1,"command":"app.quit","arguments":{}})
@@ -344,7 +342,7 @@ fn ipc_submits_the_inner_command_without_transport_fields() {
 #[test]
 fn ipc_source_context_is_transport_owned_and_command_payload_is_unchanged() {
     let pipe = roundo_toolbox::request_response_pipe::RequestResponsePipe::<
-        CommandTransport<CommandTransportContext>,
+        CommandTransport<UiCommandSource>,
         Value,
     >::bounded(1);
     let io = ContextualJsonRequestResponseIo::new(pipe.io());
@@ -363,7 +361,7 @@ fn ipc_source_context_is_transport_owned_and_command_payload_is_unchanged() {
     let (transport, _) = pipe.try_receive().unwrap();
     assert_eq!(
         transport.context,
-        CommandTransportContext::WebView { instance_id: 9 }
+        UiCommandSource::WebView(UiInstanceId::from_host_id(9))
     );
     assert_eq!(
         transport.command,
@@ -396,12 +394,12 @@ fn ipc_missing_transport_command_becomes_a_typed_immediate_result() {
 #[test]
 fn ipc_queue_full_becomes_a_typed_immediate_result() {
     let pipe = roundo_toolbox::request_response_pipe::RequestResponsePipe::<
-        CommandTransport<CommandTransportContext>,
+        CommandTransport<UiCommandSource>,
         Value,
     >::bounded(1);
     let io = ContextualJsonRequestResponseIo::new(pipe.io());
     let _held_call = io
-        .submit(json!({"occupied": true}), CommandTransportContext::Host)
+        .submit(json!({"occupied": true}), UiCommandSource::Host)
         .unwrap();
     let pending = Arc::new(Mutex::new(Vec::new()));
     enqueue_webui_command(
@@ -427,7 +425,7 @@ fn ipc_queue_full_becomes_a_typed_immediate_result() {
 #[test]
 fn ipc_rejects_oversized_commands_before_queueing() {
     let pipe = roundo_toolbox::request_response_pipe::RequestResponsePipe::<
-        CommandTransport<CommandTransportContext>,
+        CommandTransport<UiCommandSource>,
         Value,
     >::bounded(1);
     let io = ContextualJsonRequestResponseIo::new(pipe.io());
@@ -461,7 +459,7 @@ fn ipc_unavailable_and_disconnected_errors_keep_the_inner_command_name() {
     );
 
     let pipe = roundo_toolbox::request_response_pipe::RequestResponsePipe::<
-        CommandTransport<CommandTransportContext>,
+        CommandTransport<UiCommandSource>,
         Value,
     >::bounded(1);
     let io = ContextualJsonRequestResponseIo::new(pipe.io());
@@ -1009,6 +1007,12 @@ fn root_load_failure_activates_recovery_without_committing_or_counting() {
     assert_eq!(recovery.failed_resource, "vanilla.vanilla_ui.main");
     assert_eq!(manager.live_count("vanilla.vanilla_ui.main"), 0);
     assert_eq!(manager.instances().count(), 0);
+    assert!(manager.dismiss_recovery_surface());
+    assert!(manager.recovery_surface().is_none());
+    assert!(!manager.dismiss_recovery_surface());
+
+    let pending = manager.begin_configured_root().unwrap().unwrap();
+    manager.fail_open(pending, "bridge failed again").unwrap();
     let retry = manager.retry_recovery().unwrap();
     assert!(manager.pending_descriptor(retry).is_some());
     assert!(manager.recovery_surface().is_none());

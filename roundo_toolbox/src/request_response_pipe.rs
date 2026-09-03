@@ -3,19 +3,6 @@ use serde_json::Value;
 
 pub const MAX_JSON_REQUEST_BYTES: usize = 64 * 1024;
 
-/// Adapter-owned metadata that accompanies a typed JSON command without
-/// becoming part of its command payload. The command dispatcher receives the
-/// same JSON envelope from every adapter; a host may use this context for
-/// source authority before dispatching it.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub enum CommandTransportContext {
-    #[default]
-    Host,
-    WebView {
-        instance_id: u64,
-    },
-}
-
 /// A typed JSON command plus adapter-owned transport context. `command` is
 /// deliberately left untouched so strict command-envelope validation remains
 /// the shared execution seam.
@@ -205,7 +192,7 @@ mod tests {
 
     #[test]
     fn contextual_json_request_keeps_context_outside_command_payload() {
-        let pipe = RequestResponsePipe::<CommandTransport<CommandTransportContext>, ()>::bounded(1);
+        let pipe = RequestResponsePipe::<CommandTransport<u64>, ()>::bounded(1);
         let io = ContextualJsonRequestResponseIo::new(pipe.io());
         let command = serde_json::json!({
             "version": 1,
@@ -213,14 +200,10 @@ mod tests {
             "arguments": {},
         });
         let expected = command.clone();
-        io.submit(command, CommandTransportContext::WebView { instance_id: 9 })
-            .unwrap();
+        io.submit(command, 9).unwrap();
         let (transport, _) = pipe.try_receive().unwrap();
         assert_eq!(transport.command, expected);
-        assert_eq!(
-            transport.context,
-            CommandTransportContext::WebView { instance_id: 9 }
-        );
+        assert_eq!(transport.context, 9);
     }
 
     #[test]

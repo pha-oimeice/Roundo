@@ -2,19 +2,19 @@
 //!
 //! Composition 只装配 Registry、Lifecycle core 与平台 adapter。
 
-use crate::{RecoveryActionRequest, UiLifecycleManager, UiNavigationExecutor, UiRegistry};
+use crate::{
+    RecoveryActionRequest, UiCommandSource, UiLifecycleManager, UiNavigationExecutor, UiRegistry,
+};
 use bevy::prelude::{App, IntoScheduleConfigs, Plugin};
 use roundo_mod_loader::LoadedMods;
-use roundo_toolbox::request_response_pipe::{
-    CommandTransportContext, ContextualJsonRequestResponseIo,
-};
+use roundo_toolbox::request_response_pipe::ContextualJsonRequestResponseIo;
 use serde_json::Value;
 use std::{path::PathBuf, time::Duration};
 
 /// Web UI 的 Bevy composition 门面。
 pub struct RoundoWebUiPlugin {
     mods_root: PathBuf,
-    command_io: Option<ContextualJsonRequestResponseIo<CommandTransportContext, Value>>,
+    command_io: Option<ContextualJsonRequestResponseIo<UiCommandSource, Value>>,
 }
 impl RoundoWebUiPlugin {
     pub fn from_current_dir() -> Self {
@@ -26,7 +26,7 @@ impl RoundoWebUiPlugin {
         }
     }
     pub fn from_current_dir_with_command_io(
-        command_io: ContextualJsonRequestResponseIo<CommandTransportContext, Value>,
+        command_io: ContextualJsonRequestResponseIo<UiCommandSource, Value>,
     ) -> Self {
         Self {
             mods_root: std::env::current_dir()
@@ -43,7 +43,7 @@ impl RoundoWebUiPlugin {
     }
     pub fn with_mods_root_and_command_io(
         path: impl Into<PathBuf>,
-        command_io: ContextualJsonRequestResponseIo<CommandTransportContext, Value>,
+        command_io: ContextualJsonRequestResponseIo<UiCommandSource, Value>,
     ) -> Self {
         Self {
             mods_root: path.into(),
