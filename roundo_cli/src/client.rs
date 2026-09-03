@@ -1,6 +1,6 @@
 use crate::{
-    ClientCommandDefinition, ClientCommandPipe, MAX_JSON_COMMANDS_PER_UPDATE, TerminalInput,
-    UnixCommand, UnixCommandParseError, UnixCommandRegistry,
+    ClientCommandDefinition, ClientCommandPipe, TerminalInput, UnixCommand, UnixCommandParseError,
+    UnixCommandRegistry, MAX_JSON_COMMANDS_PER_UPDATE,
 };
 use bevy::{
     app::AppExit,
@@ -19,46 +19,6 @@ use serde::{Deserialize, Serialize};
 use std::{cell::RefCell, collections::VecDeque, process::Command};
 
 const CLIENT_CONFIG_FILE: &str = "roundo-client-config.toml";
-/// Single discovery catalog for `command.help`; command execution is never
-/// gated by this dev level.
-const CLIENT_COMMANDS: &[(&str, u8)] = &[
-    ("app.quit", 0),
-    ("app.open-external-url", 0),
-    ("command.help", 0),
-    ("ui.open", 0),
-    ("ui.back", 0),
-    ("server.list", 0),
-    ("server.refresh", 0),
-    ("server.add", 0),
-    ("server.edit", 0),
-    ("server.delete", 0),
-    ("server.connect", 0),
-    ("server.retry", 0),
-    ("server.disconnect", 0),
-    ("server.status", 0),
-    ("settings.show", 0),
-    ("settings.set", 0),
-    ("bindings.list", 0),
-    ("bindings.bind", 0),
-    ("bindings.unbind", 0),
-    ("bindings.replace", 0),
-    ("dev", 0),
-    ("diagnostics.position", 1),
-    ("hud.show", 1),
-    ("command.schema", 1),
-];
-fn visible_commands(level: u8) -> Vec<&'static str> {
-    CLIENT_COMMANDS
-        .iter()
-        .filter_map(|(name, required_level)| (*required_level <= level).then_some(*name))
-        .collect()
-}
-fn command_dev_level(name: &str) -> Option<u8> {
-    CLIENT_COMMANDS
-        .iter()
-        .find_map(|(known, level)| (*known == name).then_some(*level))
-}
-
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct EmptyArguments {}
@@ -693,6 +653,95 @@ definition!(
     1
 );
 
+/// 命令目录统一发现、schema 与 dispatch 注册，Unix adapter 只能投影这些 typed JSON 命令。
+struct ClientCommandCatalogEntry {
+    name: &'static str,
+    dev_level: u8,
+    schema: fn() -> serde_json::Value,
+}
+
+impl ClientCommandCatalogEntry {
+    const fn of<D: ClientCommandDefinition>() -> Self {
+        Self {
+            name: D::NAME,
+            dev_level: D::DEV_LEVEL,
+            schema: crate::json_command::command_schema::<D>,
+        }
+    }
+}
+
+const CLIENT_COMMANDS: &[ClientCommandCatalogEntry] = &[
+    ClientCommandCatalogEntry::of::<AppQuitDefinition>(),
+    ClientCommandCatalogEntry::of::<OpenExternalUrlDefinition>(),
+    ClientCommandCatalogEntry::of::<UiOpenDefinition>(),
+    ClientCommandCatalogEntry::of::<UiBackDefinition>(),
+    ClientCommandCatalogEntry::of::<ServerListDefinition>(),
+    ClientCommandCatalogEntry::of::<ServerRefreshDefinition>(),
+    ClientCommandCatalogEntry::of::<ServerAddDefinition>(),
+    ClientCommandCatalogEntry::of::<ServerEditDefinition>(),
+    ClientCommandCatalogEntry::of::<ServerDeleteDefinition>(),
+    ClientCommandCatalogEntry::of::<ServerConnectDefinition>(),
+    ClientCommandCatalogEntry::of::<ServerRetryDefinition>(),
+    ClientCommandCatalogEntry::of::<ServerDisconnectDefinition>(),
+    ClientCommandCatalogEntry::of::<ServerStatusDefinition>(),
+    ClientCommandCatalogEntry::of::<SettingsShowDefinition>(),
+    ClientCommandCatalogEntry::of::<SettingsSetDefinition>(),
+    ClientCommandCatalogEntry::of::<BindingsListDefinition>(),
+    ClientCommandCatalogEntry::of::<BindingsBindDefinition>(),
+    ClientCommandCatalogEntry::of::<BindingsUnbindDefinition>(),
+    ClientCommandCatalogEntry::of::<BindingsReplaceDefinition>(),
+    ClientCommandCatalogEntry::of::<DiagnosticsPositionDefinition>(),
+    ClientCommandCatalogEntry::of::<HudShowDefinition>(),
+    ClientCommandCatalogEntry::of::<CommandHelpDefinition>(),
+    ClientCommandCatalogEntry::of::<CommandSchemaDefinition>(),
+    ClientCommandCatalogEntry::of::<DevDefinition>(),
+];
+
+fn visible_commands(level: u8) -> Vec<&'static str> {
+    CLIENT_COMMANDS
+        .iter()
+        .filter_map(|command| (command.dev_level <= level).then_some(command.name))
+        .collect()
+}
+
+fn command_dev_level(name: &str) -> Option<u8> {
+    CLIENT_COMMANDS
+        .iter()
+        .find_map(|command| (command.name == name).then_some(command.dev_level))
+}
+
+fn client_command_schema(
+    command: &str,
+) -> Result<serde_json::Value, crate::json_command::CommandError> {
+    CLIENT_COMMANDS
+        .iter()
+        .find(|entry| entry.name == command)
+        .map(|entry| (entry.schema)())
+        .ok_or_else(|| match command.is_empty() {
+            true => crate::json_command::CommandError::new(
+                "invalid_arguments",
+                "command must be a non-empty string",
+            ),
+            false => {
+                crate::json_command::CommandError::new("unknown_command", "schema is unavailable")
+            }
+        })
+}
+
+/// composition 遗漏目录命令时拒绝 dispatch，防止 catalog、schema 与 handler 漂移。
+fn assert_catalog_matches_registry(registry: &crate::json_command::CommandRegistry<'_, ()>) {
+    let mut catalog_names = CLIENT_COMMANDS
+        .iter()
+        .map(|entry| entry.name)
+        .collect::<Vec<_>>();
+    catalog_names.sort_unstable();
+    assert_eq!(
+        registry.registered_names(),
+        catalog_names,
+        "client command catalog and dispatch registrations diverged"
+    );
+}
+
 macro_rules! unix_empty_command {
     ($name:ident, $command:literal, $path:literal, $output:ty) => {
         #[derive(Deserialize, Serialize, JsonSchema, roundo_proc_macros::UnixCommand)]
@@ -1199,50 +1248,6 @@ fn process_json_commands(
     }
 }
 
-fn client_command_schema(
-    command: &str,
-) -> Result<serde_json::Value, crate::json_command::CommandError> {
-    macro_rules! schema {
-        ($definition:ty) => {
-            Ok(crate::json_command::command_schema::<$definition>())
-        };
-    }
-    match command {
-        "app.quit" => schema!(AppQuitDefinition),
-        "app.open-external-url" => schema!(OpenExternalUrlDefinition),
-        "ui.open" => schema!(UiOpenDefinition),
-        "ui.back" => schema!(UiBackDefinition),
-        "server.list" => schema!(ServerListDefinition),
-        "server.refresh" => schema!(ServerRefreshDefinition),
-        "server.add" => schema!(ServerAddDefinition),
-        "server.edit" => schema!(ServerEditDefinition),
-        "server.delete" => schema!(ServerDeleteDefinition),
-        "server.connect" => schema!(ServerConnectDefinition),
-        "server.retry" => schema!(ServerRetryDefinition),
-        "server.disconnect" => schema!(ServerDisconnectDefinition),
-        "server.status" => schema!(ServerStatusDefinition),
-        "settings.show" => schema!(SettingsShowDefinition),
-        "settings.set" => schema!(SettingsSetDefinition),
-        "bindings.list" => schema!(BindingsListDefinition),
-        "bindings.bind" => schema!(BindingsBindDefinition),
-        "bindings.unbind" => schema!(BindingsUnbindDefinition),
-        "bindings.replace" => schema!(BindingsReplaceDefinition),
-        "diagnostics.position" => schema!(DiagnosticsPositionDefinition),
-        "hud.show" => schema!(HudShowDefinition),
-        "command.help" => schema!(CommandHelpDefinition),
-        "command.schema" => schema!(CommandSchemaDefinition),
-        "dev" => schema!(DevDefinition),
-        "" => Err(crate::json_command::CommandError::new(
-            "invalid_arguments",
-            "command must be a non-empty string",
-        )),
-        _ => Err(crate::json_command::CommandError::new(
-            "unknown_command",
-            "schema is unavailable",
-        )),
-    }
-}
-
 /// Registers the typed definitions at the Bevy main-world seam. The registry
 /// owns envelope/input/output mechanics; this adapter only supplies the state
 /// that existing client capabilities require.
@@ -1719,6 +1724,7 @@ fn dispatch_typed_command(
         log::info!("Web UI navigated to `{resource}`");
         Ok(UiOpenOutput { resource })
     });
+    assert_catalog_matches_registry(&registry);
     registry.dispatch_value(request, &mut ())
 }
 
@@ -1846,7 +1852,22 @@ fn print_terminal_response(response: serde_json::Value) {
 
 #[cfg(test)]
 mod tests {
-    use super::{command_dev_level, validate_external_url, visible_commands};
+    use super::{command_dev_level, validate_external_url, visible_commands, CLIENT_COMMANDS};
+    #[test]
+    fn catalog_has_unique_names_and_a_schema_for_every_typed_command() {
+        let mut names = std::collections::BTreeSet::new();
+        for entry in CLIENT_COMMANDS {
+            assert!(
+                names.insert(entry.name),
+                "duplicate command: {}",
+                entry.name
+            );
+            let schema = (entry.schema)();
+            assert_eq!(schema["command"], entry.name);
+        }
+        assert_eq!(names.len(), CLIENT_COMMANDS.len());
+    }
+
     #[test]
     fn dev_level_filters_discovery_but_not_the_catalog() {
         assert!(!visible_commands(0).contains(&"hud.show"));
@@ -1889,11 +1910,9 @@ mod tests {
     #[test]
     fn success_schemas_describe_client_display_status_settings_bindings_and_meta_outputs() {
         let status = super::client_command_schema("server.status").unwrap();
-        assert!(
-            status["success"]["properties"]["data"]["properties"]
-                .get("status")
-                .is_some()
-        );
+        assert!(status["success"]["properties"]["data"]["properties"]
+            .get("status")
+            .is_some());
         assert!(
             status["success"]["properties"]["data"]["properties"]["status"]
                 .get("$ref")
@@ -1905,23 +1924,17 @@ mod tests {
             assert_eq!(schema["success"]["properties"]["data"]["type"], "object");
         }
         let list = super::client_command_schema("server.list").unwrap();
-        assert!(
-            list["success"]["properties"]["data"]["properties"]
-                .get("servers")
-                .is_some()
-        );
+        assert!(list["success"]["properties"]["data"]["properties"]
+            .get("servers")
+            .is_some());
         let settings = super::client_command_schema("settings.show").unwrap();
-        assert!(
-            settings["success"]["properties"]["data"]["properties"]
-                .get("settings")
-                .is_some()
-        );
+        assert!(settings["success"]["properties"]["data"]["properties"]
+            .get("settings")
+            .is_some());
         let bindings = super::client_command_schema("bindings.list").unwrap();
-        assert!(
-            bindings["success"]["properties"]["data"]["properties"]
-                .get("supported_keys")
-                .is_some()
-        );
+        assert!(bindings["success"]["properties"]["data"]["properties"]
+            .get("supported_keys")
+            .is_some());
         let meta = super::client_command_schema("command.help").unwrap();
         assert!(meta["success"]["properties"]["data"].get("anyOf").is_some());
         let schema_meta = super::client_command_schema("command.schema").unwrap();
@@ -2123,14 +2136,12 @@ mod tests {
     fn terminal_collects_the_unmodified_typed_json_response() {
         let pipe = crate::ClientCommandPipe::bounded(1);
         let mut responses = super::TerminalResponses::default();
-        assert!(
-            super::submit_terminal_request(
-                &pipe,
-                &mut responses,
-                serde_json::json!({"version": 1, "command": "app.quit", "arguments": {}}),
-            )
-            .is_none()
-        );
+        assert!(super::submit_terminal_request(
+            &pipe,
+            &mut responses,
+            serde_json::json!({"version": 1, "command": "app.quit", "arguments": {}}),
+        )
+        .is_none());
         let (_, reply) = pipe.try_receive().unwrap();
         let expected = serde_json::json!({
             "version": 1,

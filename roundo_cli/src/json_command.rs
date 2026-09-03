@@ -1,9 +1,9 @@
 //! Versioned JSON command envelope and source-neutral dispatcher.
-use schemars::{JsonSchema, schema_for};
-use serde::{Deserialize, Serialize, de::DeserializeOwned};
-use serde_json::Value;
+use schemars::{schema_for, JsonSchema};
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
 #[cfg(test)]
 use serde_json::json;
+use serde_json::Value;
 use std::collections::BTreeMap;
 
 pub const COMMAND_VERSION: u32 = 1;
@@ -277,6 +277,10 @@ impl<'a, Context> CommandRegistry<'a, Context> {
     pub fn is_registered(&self, name: &str) -> bool {
         self.handlers.contains_key(name)
     }
+    /// Returns registered commands in stable order for catalog verification.
+    pub fn registered_names(&self) -> Vec<&str> {
+        self.handlers.keys().map(String::as_str).collect()
+    }
     pub fn dispatch_value(&self, input: Value, context: &mut Context) -> Value {
         let command = input
             .get("command")
@@ -503,16 +507,12 @@ mod tests {
         let schema = command_schema::<EchoDefinition>();
         assert_eq!(schema["command"], "echo");
         assert_eq!(schema["input"]["properties"]["command"]["const"], "echo");
-        assert!(
-            schema["input"]["properties"]["arguments"]["properties"]
-                .get("value")
-                .is_some()
-        );
-        assert!(
-            schema["success"]["properties"]["data"]["properties"]
-                .get("echoed")
-                .is_some()
-        );
+        assert!(schema["input"]["properties"]["arguments"]["properties"]
+            .get("value")
+            .is_some());
+        assert!(schema["success"]["properties"]["data"]["properties"]
+            .get("echoed")
+            .is_some());
     }
 
     #[test]
