@@ -9,30 +9,47 @@ use super::{
 /// Sentinel used by compact nodes that have no children.
 pub const NO_CHILDREN: u32 = u32::MAX;
 
-/// One node in a lossless, breadth-first sparse voxel octree view.
+/// One node in a lossless SVO stored in breadth-first order.
+///
+/// `data` is the value inherited by every missing child region. A node with no
+/// children therefore represents one uniform region at its current depth.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct LosslessSvoNode<T> {
+pub struct BreadthFirstLosslessSvoNode<T> {
     pub first_child: u32,
     pub child_mask: u8,
     pub data: T,
 }
 
-/// Immutable compact SVO storage that preserves every source node and value.
+/// Immutable, breadth-first SVO preserving the value at every finest-level coordinate.
+///
+/// Source topology is intentionally not preserved: uniform regions are collapsed and
+/// children equal to their parent's inherited value are omitted.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct LosslessSvo<T> {
-    nodes: Box<[LosslessSvoNode<T>]>,
+pub struct BreadthFirstLosslessSvo<T> {
+    nodes: Box<[BreadthFirstLosslessSvoNode<T>]>,
     root_index: u32,
+    maximum_depth: u8,
 }
 
-impl<T> LosslessSvo<T> {
+impl<T: Clone + Eq> BreadthFirstLosslessSvo<T> {
+    /// Builds a canonical voxel-field view from a sparse editable octree.
+    ///
+    /// Missing source children inherit their parent's value. Explicit uniform
+    /// children are collapsed when all finest-level coordinate queries remain equal.
     pub fn from_unoptimized_mapped<Source, Map>(
         source: &UnoptimizedOctree<Source>,
+        maximum_depth: u8,
         map_data: Map,
     ) -> Result<Self, OptimizedOctreeError>
     where
         Map: Fn(&Source) -> T,
     {
-        let mut pending_nodes = VecDeque::from([&source.root]);
+        if maximum_depth > u32::BITS as u8 {
+            return Err(OptimizedOctreeError::MaximumDepthExceedsCoordinateBits);
+        }
+
+        let root = LosslessRegion::from_source(&source.root, 0, maximum_depth, &map_data)?;
+        let mut pending_nodes = VecDeque::from([&root]);
         let mut nodes = Vec::new();
 
         while let Some(source_node) = pending_nodes.pop_front() {
@@ -52,10 +69,10 @@ impl<T> LosslessSvo<T> {
                     .ok_or(OptimizedOctreeError::NodeCountExceedsIndexRange)?;
                 compact_index(index)?
             };
-            nodes.push(LosslessSvoNode {
+            nodes.push(BreadthFirstLosslessSvoNode {
                 first_child,
                 child_mask,
-                data: map_data(&source_node.data),
+                data: source_node.data.clone(),
             });
             pending_nodes.extend(source_node.children.iter().flatten().map(Box::as_ref));
         }
@@ -63,15 +80,22 @@ impl<T> LosslessSvo<T> {
         Ok(Self {
             nodes: nodes.into_boxed_slice(),
             root_index: 0,
+            maximum_depth,
         })
     }
+}
 
-    pub fn nodes(&self) -> &[LosslessSvoNode<T>] {
+impl<T> BreadthFirstLosslessSvo<T> {
+    pub fn nodes(&self) -> &[BreadthFirstLosslessSvoNode<T>] {
         &self.nodes
     }
 
     pub const fn root_index(&self) -> u32 {
         self.root_index
+    }
+
+    pub const fn maximum_depth(&self) -> u8 {
+        self.maximum_depth
     }
 
     pub fn child_index(&self, node_index: u32, octant: u8) -> Option<u32> {
@@ -90,12 +114,133 @@ impl<T> LosslessSvo<T> {
             .map(|_| child_index)
     }
 
-    pub fn node_at_path(&self, path: &[u8]) -> Option<&LosslessSvoNode<T>> {
+    /// Returns an explicitly stored node. Missing inherited regions return `None`.
+    pub fn node_at_path(&self, path: &[u8]) -> Option<&BreadthFirstLosslessSvoNode<T>> {
+        if path.len() > usize::from(self.maximum_depth) {
+            return None;
+        }
         let mut node_index = self.root_index;
         for &octant in path {
             node_index = self.child_index(node_index, octant)?;
         }
         self.nodes.get(usize::try_from(node_index).ok()?)
+    }
+
+    /// Returns the value of a spatial path, including values inherited from a
+    /// uniform ancestor or a missing child region.
+    pub fn value_at_path(&self, path: &[u8]) -> Option<&T> {
+        if path.len() > usize::from(self.maximum_depth) {
+            return None;
+        }
+        let mut node_index = self.root_index;
+        for &octant in path {
+            if octant >= 8 {
+                return None;
+            }
+            let Some(child_index) = self.child_index(node_index, octant) else {
+                return self
+                    .nodes
+                    .get(usize::try_from(node_index).ok()?)
+                    .map(|node| &node.data);
+            };
+            node_index = child_index;
+        }
+        self.nodes
+            .get(usize::try_from(node_index).ok()?)
+            .map(|node| &node.data)
+    }
+
+    /// Queries a finest-level coordinate without allocating an octant path.
+    pub fn value_at_coordinates(&self, coordinates: [u32; 3]) -> Option<&T> {
+        if self.maximum_depth < u32::BITS as u8 {
+            let edge = 1_u32 << self.maximum_depth;
+            if coordinates.iter().any(|coordinate| *coordinate >= edge) {
+                return None;
+            }
+        }
+
+        let mut node_index = self.root_index;
+        for depth in 0..self.maximum_depth {
+            let bit = self.maximum_depth - depth - 1;
+            let octant = ((coordinates[0] >> bit) & 1)
+                | (((coordinates[1] >> bit) & 1) << 1)
+                | (((coordinates[2] >> bit) & 1) << 2);
+            let Some(child_index) = self.child_index(node_index, octant as u8) else {
+                return self
+                    .nodes
+                    .get(usize::try_from(node_index).ok()?)
+                    .map(|node| &node.data);
+            };
+            node_index = child_index;
+        }
+        self.nodes
+            .get(usize::try_from(node_index).ok()?)
+            .map(|node| &node.data)
+    }
+}
+
+struct LosslessRegion<T> {
+    data: T,
+    children: [Option<Box<LosslessRegion<T>>>; 8],
+}
+
+impl<T: Clone + Eq> LosslessRegion<T> {
+    fn from_source<Source, Map>(
+        source: &Node<Source, 8>,
+        depth: u8,
+        maximum_depth: u8,
+        map_data: &Map,
+    ) -> Result<Self, OptimizedOctreeError>
+    where
+        Map: Fn(&Source) -> T,
+    {
+        let inherited_data = map_data(&source.data);
+        if depth == maximum_depth {
+            if source.children.iter().any(Option::is_some) {
+                return Err(OptimizedOctreeError::SourceExceedsMaximumDepth);
+            }
+            return Ok(Self::uniform(inherited_data));
+        }
+
+        let mut child_regions = Vec::with_capacity(8);
+        for child in &source.children {
+            child_regions.push(match child.as_deref() {
+                Some(child) => Self::from_source(child, depth + 1, maximum_depth, map_data)?,
+                None => Self::uniform(inherited_data.clone()),
+            });
+        }
+
+        if child_regions
+            .iter()
+            .all(|child| child.is_uniform_with(&child_regions[0].data))
+        {
+            return Ok(Self::uniform(child_regions[0].data.clone()));
+        }
+
+        let children = match child_regions
+            .into_iter()
+            .map(|child| (!child.is_uniform_with(&inherited_data)).then(|| Box::new(child)))
+            .collect::<Vec<_>>()
+            .try_into()
+        {
+            Ok(children) => children,
+            Err(_) => unreachable!("one octree node always has eight child regions"),
+        };
+        Ok(Self {
+            data: inherited_data,
+            children,
+        })
+    }
+
+    fn uniform(data: T) -> Self {
+        Self {
+            data,
+            children: std::array::from_fn(|_| None),
+        }
+    }
+
+    fn is_uniform_with(&self, data: &T) -> bool {
+        self.children.iter().all(Option::is_none) && self.data == *data
     }
 }
 

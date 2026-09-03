@@ -4,7 +4,7 @@ use crate::local_coordinate::data::{
 };
 use crate::local_coordinate::derived_svo::SvoSource;
 use bevy::prelude::{IVec3, Vec3};
-use roundo_algorithm::tree::LosslessSvo;
+use roundo_algorithm::tree::BreadthFirstLosslessSvo;
 use roundo_algorithm::tree::Node;
 use std::sync::Arc;
 
@@ -42,11 +42,10 @@ impl Chunk {
         }
 
         if let Some(view) = &self.read_only_svo {
-            let path: [u8; CHUNK_OCTREE_DEPTH] =
-                std::array::from_fn(|depth| octant_at(local_position, depth) as u8);
             return view
-                .node_at_path(&path)
-                .and_then(|node| (node.data != EMPTY_VOXEL_ID).then_some(node.data));
+                .value_at_coordinates(local_position.as_uvec3().to_array())
+                .copied()
+                .and_then(|voxel| (voxel != EMPTY_VOXEL_ID).then_some(voxel));
         }
 
         let mut node = &self.octree.unoptimized_octree.root;
@@ -69,18 +68,23 @@ impl Chunk {
         self.solid_count == 0
     }
 
-    pub(crate) fn from_read_only_svo(view: Arc<LosslessSvo<AtomicVoxel>>) -> Self {
-        let solid_count = view
-            .nodes()
-            .iter()
-            .filter(|node| node.child_mask == 0 && node.data != EMPTY_VOXEL_ID)
-            .count();
-        let local_atomic_voxel_data = view
-            .nodes()
-            .iter()
-            .filter(|node| node.child_mask == 0 && node.data != EMPTY_VOXEL_ID)
-            .map(|node| (node.data, LocalAtomicVoxelData))
-            .collect();
+    pub(crate) fn from_read_only_svo(view: Arc<BreadthFirstLosslessSvo<AtomicVoxel>>) -> Self {
+        let mut solid_count = 0;
+        let mut local_atomic_voxel_data = std::collections::HashMap::new();
+        for z in 0..CHUNK_EDGE_LENGTH {
+            for y in 0..CHUNK_EDGE_LENGTH {
+                for x in 0..CHUNK_EDGE_LENGTH {
+                    let position = [x as u32, y as u32, z as u32];
+                    let voxel = *view
+                        .value_at_coordinates(position)
+                        .expect("chunk coordinates fit the SVO depth");
+                    if voxel != EMPTY_VOXEL_ID {
+                        solid_count += 1;
+                        local_atomic_voxel_data.insert(voxel, LocalAtomicVoxelData);
+                    }
+                }
+            }
+        }
         Self {
             primitive_voxels: None,
             read_only_svo: Some(view),
@@ -91,13 +95,17 @@ impl Chunk {
         }
     }
 
-    pub(crate) fn read_only_svo(&mut self) -> Arc<LosslessSvo<AtomicVoxel>> {
+    pub(crate) fn read_only_svo(&mut self) -> Arc<BreadthFirstLosslessSvo<AtomicVoxel>> {
         if let Some(view) = &self.read_only_svo {
             return Arc::clone(view);
         }
         let view = Arc::new(
-            LosslessSvo::from_unoptimized_mapped(&self.octree.unoptimized_octree, |voxel| *voxel)
-                .expect("a fixed-size chunk SVO fits in compact indices"),
+            BreadthFirstLosslessSvo::from_unoptimized_mapped(
+                &self.octree.unoptimized_octree,
+                CHUNK_OCTREE_DEPTH as u8,
+                |voxel| *voxel,
+            )
+            .expect("a fixed-size chunk SVO fits in compact indices"),
         );
         self.read_only_svo = Some(Arc::clone(&view));
         self.read_only_svo_is_authoritative = false;
@@ -204,12 +212,11 @@ impl Chunk {
             for y in 0..CHUNK_EDGE_LENGTH {
                 for x in 0..CHUNK_EDGE_LENGTH {
                     let position = IVec3::new(x, y, z);
-                    let path: [u8; CHUNK_OCTREE_DEPTH] =
-                        std::array::from_fn(|depth| octant_at(position, depth) as u8);
-                    if let Some(node) = view.node_at_path(&path)
-                        && node.data != EMPTY_VOXEL_ID
-                    {
-                        solids.push((position, node.data));
+                    let voxel = *view
+                        .value_at_coordinates(position.as_uvec3().to_array())
+                        .expect("chunk coordinates fit the SVO depth");
+                    if voxel != EMPTY_VOXEL_ID {
+                        solids.push((position, voxel));
                     }
                 }
             }

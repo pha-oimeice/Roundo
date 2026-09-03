@@ -5,7 +5,7 @@ use roundo_toolbox::{UpdateVersion, macros::identifier};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 pub const GAME_PROTOCOL_VERSION: u16 = 14;
-pub const RESOURCE_PROTOCOL_VERSION: u16 = 1;
+pub const RESOURCE_PROTOCOL_VERSION: u16 = 2;
 
 /// The logical QUIC stream used by an application message.
 ///

@@ -18,6 +18,6 @@ pub use roundo_algorithm::pcg::{
     superflat::{SuperflatGenerator, generate_chunk},
 };
 pub use roundo_networking::{ChunkId, ChunkVersion, LocalCoordinateId};
-pub type VoxelChunkSvo = roundo_algorithm::tree::LosslessSvo<AtomicVoxel>;
+pub type VoxelChunkSvo = roundo_algorithm::tree::BreadthFirstLosslessSvo<AtomicVoxel>;
 
 pub type ChunkCoordinate = [i64; 3];

@@ -1,6 +1,6 @@
 use crate::local_coordinate::transform::LocalCoordinateTransform;
 use bevy::prelude::{Component, Entity, IVec3, Message, Vec3};
-use roundo_algorithm::tree::{LosslessSvo, Octree};
+use roundo_algorithm::tree::{BreadthFirstLosslessSvo, Octree};
 use roundo_toolbox::{CRUDRequest, macros::identifier};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -56,7 +56,7 @@ pub struct VoxelTriangle {
 pub struct Chunk {
     pub octree: Octree<AtomicVoxel>,
     pub(crate) primitive_voxels: Option<Arc<[AtomicVoxel]>>,
-    pub(crate) read_only_svo: Option<Arc<LosslessSvo<AtomicVoxel>>>,
+    pub(crate) read_only_svo: Option<Arc<BreadthFirstLosslessSvo<AtomicVoxel>>>,
     pub(crate) read_only_svo_is_authoritative: bool,
     pub local_atomic_voxel_data: HashMap<AtomicVoxelId, LocalAtomicVoxelData>,
     pub triangles: Vec<VoxelTriangle>,

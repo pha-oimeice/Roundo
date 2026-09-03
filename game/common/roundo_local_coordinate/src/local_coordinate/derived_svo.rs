@@ -1,6 +1,6 @@
 use crate::{AtomicVoxel, CHUNK_EDGE_LENGTH, EMPTY_VOXEL_ID};
 use crate::{ChunkVersion, VoxelChunkSvo};
-use roundo_algorithm::tree::{LosslessSvo, Node, UnoptimizedOctree};
+use roundo_algorithm::tree::{BreadthFirstLosslessSvo, Node, UnoptimizedOctree};
 use roundo_networking::{ConnectionId, SerializedPayload};
 use roundo_toolbox::{
     CrossbeamThreadPipe, CrossbeamThreadPipeEndpointA, CrossbeamThreadPipeEndpointB,
@@ -129,7 +129,11 @@ fn svo_from_primitive_voxels(
         let position = [index % edge, index / edge % edge, index / edge.pow(2)];
         insert_voxel(&mut source.root, position, voxel);
     }
-    LosslessSvo::from_unoptimized_mapped(&source, |data| *data)
+    BreadthFirstLosslessSvo::from_unoptimized_mapped(
+        &source,
+        CHUNK_EDGE_LENGTH.ilog2() as u8,
+        |data| *data,
+    )
 }
 
 fn insert_voxel(root: &mut Node<AtomicVoxel, 8>, position: [usize; 3], voxel: AtomicVoxel) {

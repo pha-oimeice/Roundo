@@ -150,18 +150,119 @@ fn average_density_can_use_a_constant_threshold() {
 }
 
 #[test]
-fn lossless_svo_preserves_paths_and_mapped_values() {
+fn breadth_first_lossless_svo_preserves_coordinate_values() {
     let mut tree = Octree::new(0, None);
     tree.insert(0, 3, 1, Some(7_u16)).unwrap();
     tree.insert(1, 6, 2, Some(11_u16)).unwrap();
 
-    let view = super::LosslessSvo::from_unoptimized_mapped(&tree.unoptimized_octree, |data| {
-        data.unwrap_or_default()
-    })
+    let view = super::BreadthFirstLosslessSvo::from_unoptimized_mapped(
+        &tree.unoptimized_octree,
+        2,
+        |data| data.unwrap_or_default(),
+    )
     .unwrap();
 
     assert_eq!(view.nodes().len(), 3);
     assert_eq!(view.node_at_path(&[3]).map(|node| node.data), Some(7));
     assert_eq!(view.node_at_path(&[3, 6]).map(|node| node.data), Some(11));
     assert!(view.node_at_path(&[0]).is_none());
+    assert_eq!(view.value_at_path(&[0]), Some(&0));
+    assert_eq!(view.value_at_path(&[3, 0]), Some(&7));
+    assert_eq!(view.value_at_path(&[3, 6]), Some(&11));
+}
+
+#[test]
+fn breadth_first_lossless_svo_matches_every_source_coordinate() {
+    let mut tree = Octree::new(0, 0_u16);
+    tree.insert(0, 0, 1, 4).unwrap();
+    tree.insert(1, 7, 2, 9).unwrap();
+    tree.insert(0, 5, 3, 0).unwrap();
+    tree.insert(3, 2, 4, 6).unwrap();
+    tree.insert(4, 1, 5, 3).unwrap();
+    let maximum_depth = 3;
+
+    let view = super::BreadthFirstLosslessSvo::from_unoptimized_mapped(
+        &tree.unoptimized_octree,
+        maximum_depth,
+        |data| *data,
+    )
+    .unwrap();
+
+    for z in 0..8 {
+        for y in 0..8 {
+            for x in 0..8 {
+                let coordinates = [x, y, z];
+                assert_eq!(
+                    view.value_at_coordinates(coordinates),
+                    Some(&source_value_at_coordinates(
+                        &tree.unoptimized_octree,
+                        maximum_depth,
+                        coordinates,
+                    )),
+                    "coordinate {coordinates:?} changed during compression"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn breadth_first_lossless_svo_collapses_uniform_regions() {
+    let mut tree = Octree::new(0, 0_u16);
+    for octant in 0..8 {
+        tree.insert(0, octant, u32::from(octant) + 1, 7).unwrap();
+    }
+
+    let view = super::BreadthFirstLosslessSvo::from_unoptimized_mapped(
+        &tree.unoptimized_octree,
+        1,
+        |data| *data,
+    )
+    .unwrap();
+
+    assert_eq!(view.nodes().len(), 1);
+    assert_eq!(view.maximum_depth(), 1);
+    for z in 0..2 {
+        for y in 0..2 {
+            for x in 0..2 {
+                assert_eq!(view.value_at_coordinates([x, y, z]), Some(&7));
+            }
+        }
+    }
+}
+
+#[test]
+fn breadth_first_lossless_svo_rejects_coordinates_outside_its_depth() {
+    let tree = Octree::new(0, 5_u16);
+    let view = super::BreadthFirstLosslessSvo::from_unoptimized_mapped(
+        &tree.unoptimized_octree,
+        2,
+        |data| *data,
+    )
+    .unwrap();
+
+    assert_eq!(view.value_at_coordinates([3, 3, 3]), Some(&5));
+    assert_eq!(view.value_at_coordinates([4, 0, 0]), None);
+    assert_eq!(view.value_at_path(&[0, 0, 0]), None);
+}
+
+fn source_value_at_coordinates(
+    source: &super::UnoptimizedOctree<u16>,
+    maximum_depth: u8,
+    coordinates: [u32; 3],
+) -> u16 {
+    let mut node = &source.root;
+    let mut value = node.data;
+    for depth in 0..maximum_depth {
+        let bit = maximum_depth - depth - 1;
+        let octant = (((coordinates[0] >> bit) & 1)
+            | (((coordinates[1] >> bit) & 1) << 1)
+            | (((coordinates[2] >> bit) & 1) << 2)) as usize;
+        let Some(child) = node.children[octant].as_deref() else {
+            break;
+        };
+        node = child;
+        value = node.data;
+    }
+    value
 }

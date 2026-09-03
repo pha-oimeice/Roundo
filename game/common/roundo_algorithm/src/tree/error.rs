@@ -3,6 +3,8 @@ use std::fmt;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OptimizedOctreeError {
     NodeCountExceedsIndexRange,
+    MaximumDepthExceedsCoordinateBits,
+    SourceExceedsMaximumDepth,
 }
 
 impl fmt::Display for OptimizedOctreeError {
@@ -10,6 +12,15 @@ impl fmt::Display for OptimizedOctreeError {
         match self {
             Self::NodeCountExceedsIndexRange => {
                 write!(formatter, "optimized octree exceeds the u32 index range")
+            }
+            Self::MaximumDepthExceedsCoordinateBits => {
+                write!(formatter, "SVO depth exceeds the u32 coordinate range")
+            }
+            Self::SourceExceedsMaximumDepth => {
+                write!(
+                    formatter,
+                    "source octree contains nodes below the requested SVO depth"
+                )
             }
         }
     }

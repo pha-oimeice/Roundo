@@ -1,5 +1,5 @@
 use super::*;
-use roundo_algorithm::tree::{LosslessSvo, UnoptimizedOctree};
+use roundo_algorithm::tree::{BreadthFirstLosslessSvo, UnoptimizedOctree};
 
 fn add_ingest_systems(app: &mut App) {
     app.add_systems(
@@ -48,7 +48,7 @@ fn matching_cached_versions_do_not_request_chunk_data_again() {
     ));
 
     let source = UnoptimizedOctree::new(0, crate::EMPTY_VOXEL_ID);
-    let svo = LosslessSvo::from_unoptimized_mapped(&source, |data| *data).unwrap();
+    let svo = BreadthFirstLosslessSvo::from_unoptimized_mapped(&source, 4, |data| *data).unwrap();
     let payload = SerializedPayload::encode(&svo).unwrap();
     client
         .try_send(LocalCoordinateClientCommand::LoadChunk { chunk, payload })
@@ -125,7 +125,7 @@ fn unloading_a_chunk_keeps_its_transferred_data_cached() {
     app.update();
     let _ = client.try_receive();
     let source = UnoptimizedOctree::new(0, crate::EMPTY_VOXEL_ID);
-    let svo = LosslessSvo::from_unoptimized_mapped(&source, |data| *data).unwrap();
+    let svo = BreadthFirstLosslessSvo::from_unoptimized_mapped(&source, 4, |data| *data).unwrap();
     let payload = SerializedPayload::encode(&svo).unwrap();
     client
         .try_send(LocalCoordinateClientCommand::LoadChunk { chunk, payload })
@@ -159,7 +159,9 @@ fn a_new_session_clears_old_active_and_cached_chunks() {
         version: UpdateVersion::new(3),
     };
     let source = UnoptimizedOctree::new(0, crate::EMPTY_VOXEL_ID);
-    let svo = Arc::new(LosslessSvo::from_unoptimized_mapped(&source, |data| *data).unwrap());
+    let svo = Arc::new(
+        BreadthFirstLosslessSvo::from_unoptimized_mapped(&source, 4, |data| *data).unwrap(),
+    );
     {
         let mut world = app.world_mut().resource_mut::<LocalCoordinateClientWorld>();
         world.cached_chunks.insert(
