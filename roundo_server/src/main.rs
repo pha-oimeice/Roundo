@@ -2,7 +2,7 @@ mod config;
 mod my_db;
 mod network;
 
-use crate::network::start_server;
+use crate::network::ServerNetworkRuntime;
 use log::{debug, info};
 use roundo_cli::RoundoCliPlugin;
 use roundo_ecs_entry::{
@@ -16,7 +16,7 @@ fn main() {
     std::sync::LazyLock::force(&config::COMMON_CONFIG);
     configure_server_tick_rate(config::SERVER_CONFIG.gameplay.tick_rate);
     configure_server_presence_radius(config::SERVER_CONFIG.gameplay.presence_radius);
-    start_server(
+    let _network_runtime = ServerNetworkRuntime::start(
         server_marionette_ipc(),
         server_presence_ipc(),
         server_local_coordinate_ipc(),

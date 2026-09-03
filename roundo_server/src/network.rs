@@ -10,38 +10,87 @@ use roundo_networking::{
 };
 use roundo_presence::{PresenceServerCommand, PresenceServerEvent, PresenceServerIpc};
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
+use std::thread::JoinHandle;
 use std::time::Duration;
 
-pub fn start_server(
-    marionette_ipc: ServerMarionetteIpc,
-    presence_ipc: PresenceServerIpc,
-    local_coordinate_ipc: LocalCoordinateServerIpc,
-) {
-    let config = network_config();
-    debug!(
-        "Starting network server: quic={}, certificate_directory={}",
-        config.quic_address,
-        config.certificate_directory.display()
-    );
-    let hooks = Arc::new(ServerHooksAdapter {
-        marionette_ipc,
-        presence_ipc: presence_ipc.clone(),
-        local_coordinate_ipc: local_coordinate_ipc.clone(),
-    });
-    let network = Arc::new(
-        ServerNetwork::start(config, hooks)
-            .unwrap_or_else(|error| panic!("failed to start network server: {error}")),
-    );
-    let addresses = network.addresses();
-    info!("Network server is ready: quic={}", addresses.quic_address);
+/// Owns the server network and both ECS bridge adapters for the complete Bevy
+/// application lifetime. The bridges borrow their sending capability through
+/// `Arc`, but this Facade is the explicit runtime owner: shutdown first stops
+/// and joins the bridges, then joins the network worker.
+pub struct ServerNetworkRuntime {
+    network: Arc<ServerNetwork>,
+    stop: Arc<AtomicBool>,
+    bridges: Vec<JoinHandle<()>>,
+}
 
-    let game_network = Arc::clone(&network);
-    let game_local_coordinate_ipc = local_coordinate_ipc.clone();
-    std::thread::spawn(move || {
-        bridge_game_ecs_events(presence_ipc, game_local_coordinate_ipc, game_network)
-    });
-    std::thread::spawn(move || bridge_resource_ecs_events(local_coordinate_ipc, network));
+impl ServerNetworkRuntime {
+    pub fn start(
+        marionette_ipc: ServerMarionetteIpc,
+        presence_ipc: PresenceServerIpc,
+        local_coordinate_ipc: LocalCoordinateServerIpc,
+    ) -> Self {
+        let config = network_config();
+        debug!(
+            "Starting network server: quic={}, certificate_directory={}",
+            config.quic_address,
+            config.certificate_directory.display()
+        );
+        let hooks = Arc::new(ServerHooksAdapter {
+            marionette_ipc,
+            presence_ipc: presence_ipc.clone(),
+            local_coordinate_ipc: local_coordinate_ipc.clone(),
+        });
+        let network = Arc::new(
+            ServerNetwork::start(config, hooks)
+                .unwrap_or_else(|error| panic!("failed to start network server: {error}")),
+        );
+        let addresses = network.addresses();
+        info!("Network server is ready: quic={}", addresses.quic_address);
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let game_bridge = {
+            let stop = Arc::clone(&stop);
+            let network = Arc::clone(&network);
+            let local_coordinate_ipc = local_coordinate_ipc.clone();
+            std::thread::spawn(move || {
+                bridge_game_ecs_events(presence_ipc, local_coordinate_ipc, network, stop)
+            })
+        };
+        let resource_bridge = {
+            let stop = Arc::clone(&stop);
+            let network = Arc::clone(&network);
+            std::thread::spawn(move || {
+                bridge_resource_ecs_events(local_coordinate_ipc, network, stop)
+            })
+        };
+        Self {
+            network,
+            stop,
+            bridges: vec![game_bridge, resource_bridge],
+        }
+    }
+
+    /// Deterministically stops bridge adapters before releasing the network.
+    /// Calling it more than once is harmless.
+    pub fn shutdown(&mut self) {
+        self.stop.store(true, Ordering::Release);
+        for bridge in self.bridges.drain(..) {
+            if let Err(error) = bridge.join() {
+                log::error!("server ECS bridge panicked during shutdown: {error:?}");
+            }
+        }
+        self.network.shutdown();
+    }
+}
+
+impl Drop for ServerNetworkRuntime {
+    fn drop(&mut self) {
+        self.shutdown();
+    }
 }
 
 fn network_config() -> ServerNetworkConfig {
@@ -199,12 +248,12 @@ fn bridge_game_ecs_events(
     presence_ipc: PresenceServerIpc,
     local_coordinate_ipc: LocalCoordinateServerIpc,
     network: Arc<ServerNetwork>,
+    stop: Arc<AtomicBool>,
 ) {
     debug!("Started server game IPC bridge");
-    loop {
+    run_bridge_loop(&stop, || {
         let Some(event) = presence_ipc.try_receive() else {
-            std::thread::sleep(Duration::from_millis(1));
-            continue;
+            return false;
         };
         match event {
             PresenceServerEvent::Snapshot {
@@ -245,18 +294,19 @@ fn bridge_game_ecs_events(
                 );
             }
         }
-    }
+        true
+    });
 }
 
 fn bridge_resource_ecs_events(
     local_coordinate_ipc: LocalCoordinateServerIpc,
     network: Arc<ServerNetwork>,
+    stop: Arc<AtomicBool>,
 ) {
     debug!("Started server resource IPC bridge");
-    loop {
+    run_bridge_loop(&stop, || {
         let Some(event) = local_coordinate_ipc.try_receive() else {
-            std::thread::sleep(Duration::from_millis(1));
-            continue;
+            return false;
         };
         match event {
             LocalCoordinateServerEvent::Spawned {
@@ -323,5 +373,45 @@ fn bridge_resource_ecs_events(
                 );
             }
         }
+        true
+    });
+}
+
+/// Runs a non-blocking bridge adapter until its runtime owner requests stop.
+/// Idle polling retains the existing one-millisecond cadence while making
+/// thread lifetime independently testable without a real network.
+fn run_bridge_loop(stop: &AtomicBool, mut forward_one: impl FnMut() -> bool) {
+    while !stop.load(Ordering::Acquire) {
+        if !forward_one() {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::mpsc;
+
+    #[test]
+    fn bridge_loop_stops_and_joins_without_network() {
+        let stop = Arc::new(AtomicBool::new(false));
+        let (entered_sender, entered_receiver) = mpsc::sync_channel(1);
+        let worker_stop = Arc::clone(&stop);
+        let bridge = std::thread::spawn(move || {
+            let mut entered_sender = Some(entered_sender);
+            run_bridge_loop(&worker_stop, || {
+                if let Some(sender) = entered_sender.take() {
+                    let _ = sender.send(());
+                }
+                false
+            });
+        });
+
+        entered_receiver
+            .recv_timeout(Duration::from_secs(1))
+            .expect("bridge should enter its polling loop");
+        stop.store(true, Ordering::Release);
+        bridge.join().expect("bridge should stop after the signal");
     }
 }

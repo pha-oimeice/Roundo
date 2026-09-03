@@ -9,6 +9,7 @@ pub struct ServerNetwork {
     registry: ConnectionRegistry,
     shutdown: watch::Sender<bool>,
     addresses: ServerAddresses,
+    worker: std::sync::Mutex<Option<thread::JoinHandle<()>>>,
 }
 
 impl ServerNetwork {
@@ -62,6 +63,7 @@ impl ServerNetwork {
             registry,
             shutdown,
             addresses,
+            worker: std::sync::Mutex::new(Some(join_handle)),
         })
     }
 
@@ -150,15 +152,33 @@ impl ServerNetwork {
         );
     }
 
+    /// Stops the network worker and waits for its listener and connection tasks.
+    ///
+    /// This is idempotent. Runtime owners should call it before releasing the
+    /// last network handle so the worker cannot outlive composition.
     pub fn shutdown(&self) {
         log::info!("network server shutdown requested");
         let _ = self.shutdown.send(true);
+        let worker = self
+            .worker
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take();
+        if let Some(worker) = worker {
+            if worker.thread().id() == thread::current().id() {
+                log::error!("network server worker attempted to join itself during shutdown");
+                return;
+            }
+            if let Err(error) = worker.join() {
+                log::error!("network server worker panicked during shutdown: {error:?}");
+            }
+        }
     }
 }
 
 impl Drop for ServerNetwork {
     fn drop(&mut self) {
-        let _ = self.shutdown.send(true);
+        self.shutdown();
     }
 }
 
