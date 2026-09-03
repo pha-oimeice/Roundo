@@ -300,6 +300,17 @@ mod tests {
     }
 
     #[test]
+    fn override_priority_has_a_legacy_deserialization_alias() {
+        let current: ModManifest =
+            toml::from_str("[general]\nmod_name='ui'\nauthor='test'\noverride_priority=7\n")
+                .unwrap();
+        let legacy: ModManifest =
+            toml::from_str("[general]\nmod_name='ui'\nauthor='test'\nload_priority=6\n").unwrap();
+        assert_eq!(current.general.override_priority, 7);
+        assert_eq!(legacy.general.override_priority, 6);
+    }
+
+    #[test]
     fn reports_the_mod_and_validation_stage_for_an_invalid_dependency() {
         let root = std::env::temp_dir().join(format!(
             "roundo-mod-loader-test-{}",
