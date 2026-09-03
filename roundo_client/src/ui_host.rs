@@ -68,20 +68,20 @@ fn apply_recovery_action(
     mut actions: MessageReader<RecoveryActionRequest>,
     mut network: ResMut<ClientNetworkManager>,
     mut manager: ResMut<UiLifecycleManager>,
-    mut navigation: bevy::ecs::system::NonSendMut<UiNavigationExecutor>,
     mut app_exit: MessageWriter<AppExit>,
 ) {
     for request in actions.read() {
         match request.0 {
-            RecoveryAction::Retry => {}
-            RecoveryAction::Disconnect => {
-                network.disconnect();
-                if let Err(error) =
-                    navigation.replace_root(&mut manager, UiLifecycleState::Disconnected)
-                {
-                    log::error!("cannot recover to the Disconnected Root: {error}");
+            // Retry preserves its existing meaning: retry the failed configured
+            // Root UI transaction. It does not alter connection authority.
+            RecoveryAction::Retry => {
+                if let Err(error) = manager.retry_recovery() {
+                    log::error!("cannot retry Root UI recovery: {error}");
                 }
             }
+            // Disconnect only changes the authoritative connection fact. The
+            // following authoritative-root system performs any Root Replacement.
+            RecoveryAction::Disconnect => network.disconnect(),
             RecoveryAction::Quit => {
                 app_exit.write(AppExit::Success);
             }
@@ -109,6 +109,17 @@ fn authoritative_lifecycle_state(
     }
 }
 
+/// Returns the Root lifecycle selected solely by the authoritative connection
+/// fact. A Recovery Surface pauses automatic replacement until its intent is
+/// handled; it never selects a Root itself.
+fn authoritative_root_target(
+    recovery_active: bool,
+    current: UiLifecycleState,
+    status: &ClientConnectionStatus,
+) -> Option<UiLifecycleState> {
+    (!recovery_active).then(|| authoritative_lifecycle_state(current, status))
+}
+
 fn sync_authoritative_root(
     network: Res<ClientNetworkManager>,
     mut manager: ResMut<UiLifecycleManager>,
@@ -116,13 +127,15 @@ fn sync_authoritative_root(
 ) {
     let connection = network.status();
     let previous = manager.lifecycle_state();
-    if manager.recovery_surface().is_some() {
+    let Some(expected) = authoritative_root_target(
+        manager.recovery_surface().is_some(),
+        previous,
+        &connection.status,
+    ) else {
         // A failed transactional replacement leaves the old Root authoritative
-        // until the user chooses Retry, Disconnect, or Quit. Do not silently
-        // start another replacement behind the Recovery Surface.
+        // until the host handles Retry, Disconnect, or Quit.
         return;
-    }
-    let expected = authoritative_lifecycle_state(previous, &connection.status);
+    };
     if let Some(pending) = manager.pending_root_replacement_lifecycle() {
         if pending == expected {
             return;
@@ -277,19 +290,25 @@ fn escape_opens_pause(
 
 #[cfg(test)]
 mod tests {
-    use super::authoritative_lifecycle_state;
+    use super::{authoritative_lifecycle_state, authoritative_root_target};
     use roundo_cli::client_network::ClientConnectionStatus;
     use roundo_webui::UiLifecycleState;
 
     #[test]
-    fn connecting_stays_under_disconnected_root_until_connected() {
-        assert_eq!(
-            authoritative_lifecycle_state(
-                UiLifecycleState::Disconnected,
-                &ClientConnectionStatus::Connecting,
-            ),
-            UiLifecycleState::Disconnected
-        );
+    fn disconnected_root_waits_for_an_authoritative_connection() {
+        for status in [
+            ClientConnectionStatus::Disconnected,
+            ClientConnectionStatus::Connecting,
+            ClientConnectionStatus::Reconnecting,
+            ClientConnectionStatus::Error {
+                message: "pre-authentication failure".into(),
+            },
+        ] {
+            assert_eq!(
+                authoritative_lifecycle_state(UiLifecycleState::Disconnected, &status),
+                UiLifecycleState::Disconnected
+            );
+        }
         assert_eq!(
             authoritative_lifecycle_state(
                 UiLifecycleState::Disconnected,
@@ -319,6 +338,26 @@ mod tests {
                 &ClientConnectionStatus::Disconnected,
             ),
             UiLifecycleState::Disconnected
+        );
+    }
+
+    #[test]
+    fn recovery_surface_pauses_root_selection_until_the_host_handles_its_intent() {
+        assert_eq!(
+            authoritative_root_target(
+                true,
+                UiLifecycleState::Connected,
+                &ClientConnectionStatus::Disconnected,
+            ),
+            None
+        );
+        assert_eq!(
+            authoritative_root_target(
+                false,
+                UiLifecycleState::Connected,
+                &ClientConnectionStatus::Disconnected,
+            ),
+            Some(UiLifecycleState::Disconnected)
         );
     }
 }

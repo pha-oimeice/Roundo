@@ -1331,17 +1331,9 @@ pub(crate) fn sync_recovery_surface(world: &mut bevy::prelude::World) {
         })
         .unwrap_or_default();
     for action in actions {
-        match action {
-            RecoveryAction::Retry => {
-                match world.resource_mut::<UiLifecycleManager>().retry_recovery() {
-                    Ok(_) => world.non_send_mut::<UiNavigationExecutor>().recovery = None,
-                    Err(error) => log::error!("cannot retry Root UI recovery: {error}"),
-                }
-            }
-            RecoveryAction::Disconnect | RecoveryAction::Quit => {
-                let _ = world.write_message(RecoveryActionRequest(action));
-            }
-        }
+        // The Recovery Surface is a platform adapter: it reports intent but
+        // never changes the Lifecycle Tree or connection authority itself.
+        let _ = world.write_message(RecoveryActionRequest(action));
     }
 
     if world
