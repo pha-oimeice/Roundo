@@ -1,7 +1,9 @@
 extern crate self as roundo_cli;
 
 use bevy::prelude::{App, Plugin, Resource};
-use roundo_toolbox::request_response_pipe::{JsonRequestResponseIo, RequestResponsePipe};
+use roundo_toolbox::request_response_pipe::{
+    CommandTransport, CommandTransportContext, ContextualJsonRequestResponseIo, RequestResponsePipe,
+};
 use serde_json::Value;
 use std::{
     collections::VecDeque,
@@ -27,26 +29,27 @@ const MAX_COMMANDS_PER_UPDATE: usize = 32;
 pub const MAX_JSON_COMMANDS_PER_UPDATE: usize = 64;
 
 #[derive(Resource)]
-pub struct ClientCommandPipe(RequestResponsePipe<Value, Value>);
+pub struct ClientCommandPipe(RequestResponsePipe<CommandTransport<CommandTransportContext>, Value>);
 impl ClientCommandPipe {
     pub fn bounded(capacity: usize) -> Self {
         Self(RequestResponsePipe::bounded(capacity))
     }
     pub fn io(&self) -> ClientCommandIo {
-        JsonRequestResponseIo::new(self.0.io())
+        ContextualJsonRequestResponseIo::new(self.0.io())
     }
     pub fn try_receive(
         &self,
     ) -> Option<(
-        Value,
+        CommandTransport<CommandTransportContext>,
         roundo_toolbox::request_response_pipe::ResponseSender<Value>,
     )> {
         self.0.try_receive()
     }
 }
 /// The only client-command submission adapter. It rejects serialized JSON
-/// inputs larger than 64 KiB before they can enter the command queue.
-pub type ClientCommandIo = JsonRequestResponseIo<Value>;
+/// inputs larger than 64 KiB before they can enter the command queue while
+/// preserving adapter authority as transport context, not command JSON.
+pub type ClientCommandIo = ContextualJsonRequestResponseIo<CommandTransportContext, Value>;
 
 pub struct RoundoCliPlugin {
     configure: fn(&mut App),

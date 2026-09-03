@@ -4,7 +4,9 @@ use super::*;
 use crate::platform::{claim_webview_creation_turn, enqueue_webui_command};
 use crate::registry::{LayoutRegistration, RegistryFile};
 use roundo_mod_loader::{LoadedMods, ModId, parse_mod_id};
-use roundo_toolbox::request_response_pipe::JsonRequestResponseIo;
+use roundo_toolbox::request_response_pipe::{
+    CommandTransport, CommandTransportContext, ContextualJsonRequestResponseIo,
+};
 use serde_json::{Value, json};
 use std::{
     fs,
@@ -315,9 +317,11 @@ fn response_transport_serializes_json_without_script_interpolation() {
 
 #[test]
 fn ipc_submits_the_inner_command_without_transport_fields() {
-    let pipe =
-        roundo_toolbox::request_response_pipe::RequestResponsePipe::<Value, Value>::bounded(1);
-    let io = JsonRequestResponseIo::new(pipe.io());
+    let pipe = roundo_toolbox::request_response_pipe::RequestResponsePipe::<
+        CommandTransport<CommandTransportContext>,
+        Value,
+    >::bounded(1);
+    let io = ContextualJsonRequestResponseIo::new(pipe.io());
     let pending = Arc::new(Mutex::new(Vec::new()));
     enqueue_webui_command(
         &Some(io),
@@ -325,9 +329,10 @@ fn ipc_submits_the_inner_command_without_transport_fields() {
         None,
         r#"{"request_id":7,"command":{"version":1,"command":"app.quit","arguments":{}}}"#,
     );
-    let (command, _reply) = pipe.try_receive().expect("inner command was queued");
+    let (transport, _reply) = pipe.try_receive().expect("inner command was queued");
+    assert_eq!(transport.context, CommandTransportContext::Host);
     assert_eq!(
-        command,
+        transport.command,
         json!({"version":1,"command":"app.quit","arguments":{}})
     );
     let pending = pending.lock().unwrap();
@@ -337,20 +342,37 @@ fn ipc_submits_the_inner_command_without_transport_fields() {
 }
 
 #[test]
-fn ipc_source_context_is_host_bound_and_overwrites_page_data() {
-    let pipe =
-        roundo_toolbox::request_response_pipe::RequestResponsePipe::<Value, Value>::bounded(1);
-    let io = JsonRequestResponseIo::new(pipe.io());
+fn ipc_source_context_is_transport_owned_and_command_payload_is_unchanged() {
+    let pipe = roundo_toolbox::request_response_pipe::RequestResponsePipe::<
+        CommandTransport<CommandTransportContext>,
+        Value,
+    >::bounded(1);
+    let io = ContextualJsonRequestResponseIo::new(pipe.io());
     let pending = Arc::new(Mutex::new(Vec::new()));
+    let page_command = json!({
+        "version": 1,
+        "command": "ui.back",
+        "arguments": {},
+    });
     enqueue_webui_command(
         &Some(io),
         &pending,
         Some(UiInstanceId::from_host_id(9)),
-        r#"{"request_id":7,"command":{"version":1,"command":"ui.back","arguments":{},"_roundo_source_instance":666}}"#,
+        &json!({"request_id": 7, "command": page_command}).to_string(),
     );
-    let (command, _) = pipe.try_receive().unwrap();
-    assert_eq!(command["_roundo_source_instance"], 9);
-    assert!(command["arguments"].get("instance_id").is_none());
+    let (transport, _) = pipe.try_receive().unwrap();
+    assert_eq!(
+        transport.context,
+        CommandTransportContext::WebView { instance_id: 9 }
+    );
+    assert_eq!(
+        transport.command,
+        json!({
+            "version": 1,
+            "command": "ui.back",
+            "arguments": {},
+        })
+    );
 }
 
 #[test]
@@ -373,10 +395,14 @@ fn ipc_missing_transport_command_becomes_a_typed_immediate_result() {
 
 #[test]
 fn ipc_queue_full_becomes_a_typed_immediate_result() {
-    let pipe =
-        roundo_toolbox::request_response_pipe::RequestResponsePipe::<Value, Value>::bounded(1);
-    let io = JsonRequestResponseIo::new(pipe.io());
-    let _held_call = io.submit(json!({"occupied": true})).unwrap();
+    let pipe = roundo_toolbox::request_response_pipe::RequestResponsePipe::<
+        CommandTransport<CommandTransportContext>,
+        Value,
+    >::bounded(1);
+    let io = ContextualJsonRequestResponseIo::new(pipe.io());
+    let _held_call = io
+        .submit(json!({"occupied": true}), CommandTransportContext::Host)
+        .unwrap();
     let pending = Arc::new(Mutex::new(Vec::new()));
     enqueue_webui_command(
         &Some(io),
@@ -400,9 +426,11 @@ fn ipc_queue_full_becomes_a_typed_immediate_result() {
 
 #[test]
 fn ipc_rejects_oversized_commands_before_queueing() {
-    let pipe =
-        roundo_toolbox::request_response_pipe::RequestResponsePipe::<Value, Value>::bounded(1);
-    let io = JsonRequestResponseIo::new(pipe.io());
+    let pipe = roundo_toolbox::request_response_pipe::RequestResponsePipe::<
+        CommandTransport<CommandTransportContext>,
+        Value,
+    >::bounded(1);
+    let io = ContextualJsonRequestResponseIo::new(pipe.io());
     let pending = Arc::new(Mutex::new(Vec::new()));
     let body = serde_json::to_string(&json!({
         "request_id": 7,
@@ -432,9 +460,11 @@ fn ipc_unavailable_and_disconnected_errors_keep_the_inner_command_name() {
         "server.list"
     );
 
-    let pipe =
-        roundo_toolbox::request_response_pipe::RequestResponsePipe::<Value, Value>::bounded(1);
-    let io = JsonRequestResponseIo::new(pipe.io());
+    let pipe = roundo_toolbox::request_response_pipe::RequestResponsePipe::<
+        CommandTransport<CommandTransportContext>,
+        Value,
+    >::bounded(1);
+    let io = ContextualJsonRequestResponseIo::new(pipe.io());
     drop(pipe);
     let pending = Arc::new(Mutex::new(Vec::new()));
     enqueue_webui_command(&Some(io), &pending, None, body);

@@ -3,6 +3,28 @@ use serde_json::Value;
 
 pub const MAX_JSON_REQUEST_BYTES: usize = 64 * 1024;
 
+/// Adapter-owned metadata that accompanies a typed JSON command without
+/// becoming part of its command payload. The command dispatcher receives the
+/// same JSON envelope from every adapter; a host may use this context for
+/// source authority before dispatching it.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum CommandTransportContext {
+    #[default]
+    Host,
+    WebView {
+        instance_id: u64,
+    },
+}
+
+/// A typed JSON command plus adapter-owned transport context. `command` is
+/// deliberately left untouched so strict command-envelope validation remains
+/// the shared execution seam.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CommandTransport<Context> {
+    pub command: Value,
+    pub context: Context,
+}
+
 /// A bounded multi-producer request queue with a private one-shot response
 /// channel per request. Responses therefore cannot be consumed by another
 /// caller, unlike a shared duplex queue.
@@ -23,6 +45,15 @@ pub struct RequestCall<Response>(Receiver<Response>);
 #[derive(Clone)]
 pub struct JsonRequestResponseIo<Response> {
     inner: RequestResponseIo<Value, Response>,
+}
+
+/// JSON submission adapter that carries non-JSON command context separately.
+/// This is intentionally a concrete transport shape rather than a trait: the
+/// host has two real adapters (terminal and WebView), while their command
+/// payload remains source-neutral.
+#[derive(Clone)]
+pub struct ContextualJsonRequestResponseIo<Context, Response> {
+    inner: RequestResponseIo<CommandTransport<Context>, Response>,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -101,6 +132,39 @@ impl<Response> JsonRequestResponseIo<Response> {
     }
 }
 
+impl<Context, Response> ContextualJsonRequestResponseIo<Context, Response> {
+    pub fn new(inner: RequestResponseIo<CommandTransport<Context>, Response>) -> Self {
+        Self { inner }
+    }
+
+    pub fn submit(
+        &self,
+        command: Value,
+        context: Context,
+    ) -> Result<RequestCall<Response>, JsonSubmitError> {
+        let command_name = command
+            .get("command")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned();
+        if serde_json::to_vec(&command)
+            .expect("serde_json::Value is serializable")
+            .len()
+            > MAX_JSON_REQUEST_BYTES
+        {
+            return Err(JsonSubmitError::InputTooLarge {
+                command: command_name,
+            });
+        }
+        self.inner
+            .submit(CommandTransport { command, context })
+            .map_err(|error| match error {
+                SubmitError::Full => JsonSubmitError::Full,
+                SubmitError::Disconnected => JsonSubmitError::Disconnected,
+            })
+    }
+}
+
 impl<Response> RequestCall<Response> {
     pub fn try_result(&self) -> Option<Response> {
         match self.0.try_recv() {
@@ -137,6 +201,26 @@ mod tests {
         let io = pipe.io();
         let _ = io.submit(()).unwrap();
         assert!(matches!(io.submit(()), Err(SubmitError::Full)));
+    }
+
+    #[test]
+    fn contextual_json_request_keeps_context_outside_command_payload() {
+        let pipe = RequestResponsePipe::<CommandTransport<CommandTransportContext>, ()>::bounded(1);
+        let io = ContextualJsonRequestResponseIo::new(pipe.io());
+        let command = serde_json::json!({
+            "version": 1,
+            "command": "ui.back",
+            "arguments": {},
+        });
+        let expected = command.clone();
+        io.submit(command, CommandTransportContext::WebView { instance_id: 9 })
+            .unwrap();
+        let (transport, _) = pipe.try_receive().unwrap();
+        assert_eq!(transport.command, expected);
+        assert_eq!(
+            transport.context,
+            CommandTransportContext::WebView { instance_id: 9 }
+        );
     }
 
     #[test]

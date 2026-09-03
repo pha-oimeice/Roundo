@@ -10,7 +10,9 @@ use bevy::{
     },
 };
 use roundo_marionette::ClientPlayerController;
-use roundo_toolbox::request_response_pipe::{JsonSubmitError, RequestCall};
+use roundo_toolbox::request_response_pipe::{
+    CommandTransportContext, JsonSubmitError, RequestCall,
+};
 use roundo_user_config::{
     ClientConfig, ClientKeyBindingConfig, ClientKeyCode, ClientMovementAction, ServerEntry,
 };
@@ -1178,14 +1180,11 @@ fn process_json_commands(
     hud: Res<HudCache>,
 ) {
     for _ in 0..MAX_JSON_COMMANDS_PER_UPDATE {
-        let Some((mut request, reply)) = pipe.try_receive() else {
+        let Some((transport, reply)) = pipe.try_receive() else {
             break;
         };
-        let ui_source = request
-            .as_object_mut()
-            .and_then(|object| object.remove("_roundo_source_instance"))
-            .and_then(|value| value.as_u64())
-            .map(roundo_webui::UiInstanceId::from_host_id);
+        let request = transport.command;
+        let ui_source = command_transport_source(transport.context);
         let command_name = request
             .get("command")
             .and_then(serde_json::Value::as_str)
@@ -1248,6 +1247,39 @@ fn process_json_commands(
     }
 }
 
+/// Converts adapter-owned transport metadata into host authority. This is the
+/// only place where a WebView identity becomes a UI command source; the typed
+/// JSON command remains unchanged and source-neutral.
+fn command_transport_source(
+    context: CommandTransportContext,
+) -> Option<roundo_webui::UiInstanceId> {
+    match context {
+        CommandTransportContext::Host => None,
+        CommandTransportContext::WebView { instance_id } => {
+            Some(roundo_webui::UiInstanceId::from_host_id(instance_id))
+        }
+    }
+}
+
+fn stale_ui_source_response(request: &serde_json::Value) -> serde_json::Value {
+    let command = request
+        .get("command")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    serde_json::to_value(crate::json_command::CommandResult {
+        version: crate::json_command::COMMAND_VERSION,
+        command,
+        ok: false,
+        data: None,
+        error: Some(crate::json_command::CommandError::new(
+            "stale_ui_instance",
+            "WebView command source is no longer live and loaded",
+        )),
+    })
+    .expect("serializable stale UI command result")
+}
+
 /// Registers the typed definitions at the Bevy main-world seam. The registry
 /// owns envelope/input/output mechanics; this adapter only supplies the state
 /// that existing client capabilities require.
@@ -1289,22 +1321,7 @@ fn dispatch_typed_command(
             .as_deref()
             .is_some_and(|manager| manager.command_source_is_live(source));
         if !admitted {
-            let command = request
-                .get("command")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or_default()
-                .to_owned();
-            return serde_json::to_value(crate::json_command::CommandResult {
-                version: crate::json_command::COMMAND_VERSION,
-                command,
-                ok: false,
-                data: None,
-                error: Some(crate::json_command::CommandError::new(
-                    "stale_ui_instance",
-                    "WebView command source is no longer live and loaded",
-                )),
-            })
-            .expect("serializable stale UI command result");
+            return stale_ui_source_response(&request);
         }
     }
 
@@ -1801,7 +1818,7 @@ fn submit_terminal_request(
     responses: &mut TerminalResponses,
     request: serde_json::Value,
 ) -> Option<serde_json::Value> {
-    match pipe.io().submit(request) {
+    match pipe.io().submit(request, CommandTransportContext::Host) {
         Ok(call) => {
             responses.0.push(call);
             None
@@ -1853,6 +1870,7 @@ fn print_terminal_response(response: serde_json::Value) {
 #[cfg(test)]
 mod tests {
     use super::{CLIENT_COMMANDS, command_dev_level, validate_external_url, visible_commands};
+    use roundo_toolbox::request_response_pipe::CommandTransportContext;
     #[test]
     fn catalog_has_unique_names_and_a_schema_for_every_typed_command() {
         let mut names = std::collections::BTreeSet::new();
@@ -2111,7 +2129,10 @@ mod tests {
         assert_eq!(unknown["error"]["code"], "unknown_command");
 
         let pipe = crate::ClientCommandPipe::bounded(1);
-        let _occupied = pipe.io().submit(serde_json::json!({})).unwrap();
+        let _occupied = pipe
+            .io()
+            .submit(serde_json::json!({}), CommandTransportContext::Host)
+            .unwrap();
         let mut responses = super::TerminalResponses::default();
         let response =
             super::submit_terminal_request(&pipe, &mut responses, serde_json::json!({})).unwrap();
@@ -2138,6 +2159,34 @@ mod tests {
         assert_eq!(response["ok"], false);
         assert_eq!(response["error"]["code"], "command_input_too_large");
         assert!(pipe.try_receive().is_none());
+    }
+
+    #[test]
+    fn command_transport_context_keeps_host_and_webview_authority_out_of_json() {
+        assert_eq!(
+            super::command_transport_source(CommandTransportContext::Host),
+            None
+        );
+        assert_eq!(
+            super::command_transport_source(CommandTransportContext::WebView { instance_id: 42 })
+                .map(roundo_webui::UiInstanceId::get),
+            Some(42)
+        );
+    }
+
+    #[test]
+    fn stale_webview_source_returns_a_typed_result_without_mutating_the_command() {
+        let command = serde_json::json!({
+            "version": 1,
+            "command": "ui.back",
+            "arguments": {},
+        });
+        let response = super::stale_ui_source_response(&command);
+        assert_eq!(response["command"], "ui.back");
+        assert_eq!(response["ok"], false);
+        assert_eq!(response["error"]["code"], "stale_ui_instance");
+        assert_eq!(command["arguments"], serde_json::json!({}));
+        assert!(command.get("_roundo_source_instance").is_none());
     }
 
     #[test]

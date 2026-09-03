@@ -6,7 +6,8 @@
 use crate::registry::{MAX_PREPARED_COMMANDS, MAX_PREPARED_UI_CANDIDATES};
 use crate::*;
 use roundo_toolbox::request_response_pipe::{
-    JsonRequestResponseIo, JsonSubmitError, RequestCall, ResponseSender,
+    CommandTransportContext, ContextualJsonRequestResponseIo, JsonSubmitError, RequestCall,
+    ResponseSender,
 };
 use serde_json::{Value, json};
 use std::{
@@ -146,7 +147,7 @@ struct StagedWebView {
     target_url: Option<String>,
     pending_commands: Arc<Mutex<Vec<PendingCommand>>>,
     command_gate: Arc<Mutex<StagedCommandGate>>,
-    command_io: Option<JsonRequestResponseIo<Value>>,
+    command_io: Option<ContextualJsonRequestResponseIo<CommandTransportContext, Value>>,
     command_source: UiInstanceId,
     load_state: Arc<Mutex<StagedLoadState>>,
     created_at: Instant,
@@ -529,7 +530,7 @@ impl UiNavigationExecutor {
 
 #[cfg(target_os = "windows")]
 pub(crate) struct WebUiCommandEndpoint {
-    pub(crate) io: Option<JsonRequestResponseIo<Value>>,
+    pub(crate) io: Option<ContextualJsonRequestResponseIo<CommandTransportContext, Value>>,
 }
 
 pub(crate) struct PendingCommand {
@@ -1736,7 +1737,7 @@ fn apply_windows_webview_mode(overlay: &WebViewOverlay, mode: ClientInteractionM
 }
 
 pub(crate) fn enqueue_webui_command(
-    io: &Option<JsonRequestResponseIo<Value>>,
+    io: &Option<ContextualJsonRequestResponseIo<CommandTransportContext, Value>>,
     pending: &Arc<Mutex<Vec<PendingCommand>>>,
     source: Option<UiInstanceId>,
     body: &str,
@@ -1752,7 +1753,7 @@ pub(crate) fn enqueue_webui_command(
         log::warn!("Web UI IPC was rejected: request_id is missing or not an unsigned integer");
         return;
     };
-    let Some(mut command) = transport.get("command").cloned() else {
+    let Some(command) = transport.get("command").cloned() else {
         log::warn!("Web UI IPC request {request_id} was rejected: command is missing");
         pending
             .lock()
@@ -1775,9 +1776,6 @@ pub(crate) fn enqueue_webui_command(
             });
         return;
     };
-    if let (Some(source), Some(object)) = (source, command.as_object_mut()) {
-        object.insert("_roundo_source_instance".into(), json!(source.get()));
-    }
     let command_name = command
         .get("command")
         .and_then(Value::as_str)
@@ -1792,7 +1790,14 @@ pub(crate) fn enqueue_webui_command(
     let immediate_error = |code: &str, message: &str| json!({"version":1,"command":command_name,"ok":false,"error":{"code":code,"message":message}});
     let submitted_at = Instant::now();
     let item = match io {
-        Some(io) => match io.submit(command) {
+        Some(io) => match io.submit(
+            command,
+            source.map_or(CommandTransportContext::Host, |source| {
+                CommandTransportContext::WebView {
+                    instance_id: source.get(),
+                }
+            }),
+        ) {
             Ok(call) => PendingCommand {
                 request_id,
                 command_name: command_name.clone(),

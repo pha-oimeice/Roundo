@@ -5,14 +5,16 @@
 use crate::{RecoveryActionRequest, UiLifecycleManager, UiNavigationExecutor, UiRegistry};
 use bevy::prelude::{App, IntoScheduleConfigs, Plugin};
 use roundo_mod_loader::LoadedMods;
-use roundo_toolbox::request_response_pipe::JsonRequestResponseIo;
+use roundo_toolbox::request_response_pipe::{
+    CommandTransportContext, ContextualJsonRequestResponseIo,
+};
 use serde_json::Value;
 use std::{path::PathBuf, time::Duration};
 
 /// Web UI 的 Bevy composition 门面。
 pub struct RoundoWebUiPlugin {
     mods_root: PathBuf,
-    command_io: Option<JsonRequestResponseIo<Value>>,
+    command_io: Option<ContextualJsonRequestResponseIo<CommandTransportContext, Value>>,
 }
 impl RoundoWebUiPlugin {
     pub fn from_current_dir() -> Self {
@@ -23,7 +25,9 @@ impl RoundoWebUiPlugin {
             command_io: None,
         }
     }
-    pub fn from_current_dir_with_command_io(command_io: JsonRequestResponseIo<Value>) -> Self {
+    pub fn from_current_dir_with_command_io(
+        command_io: ContextualJsonRequestResponseIo<CommandTransportContext, Value>,
+    ) -> Self {
         Self {
             mods_root: std::env::current_dir()
                 .expect("current directory is unavailable")
@@ -39,7 +43,7 @@ impl RoundoWebUiPlugin {
     }
     pub fn with_mods_root_and_command_io(
         path: impl Into<PathBuf>,
-        command_io: JsonRequestResponseIo<Value>,
+        command_io: ContextualJsonRequestResponseIo<CommandTransportContext, Value>,
     ) -> Self {
         Self {
             mods_root: path.into(),
