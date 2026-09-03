@@ -30,7 +30,7 @@ fn fixture_root() -> PathBuf {
     .unwrap();
     fs::write(mod_root.join("assets/webui/main/index.html"), "ok").unwrap();
     fs::write(mod_root.join("assets/webui/main/about.html"), "about").unwrap();
-    fs::write(mod_root.join("assets/webui/registry.toml"), "[[ui]]\nname='main'\nproject='main'\nentry='index.html'\ninteraction_mode='web-ui'\nworld_visibility='hidden'\nmax_instances=2\nprefetch=['main']\n[slots]\n'roundo.disconnected-root'='main'
+    fs::write(mod_root.join("assets/webui/registry.toml"), "[[resource]]\nname='main'\nproject='main'\nentry='index.html'\ninteraction_mode='web-ui'\nworld_visibility='hidden'\nmax_instances=2\nprefetch=['roundo.main-menu']\n[slots]\n'roundo.disconnected-root'='main'
 'roundo.main-menu'='main'\n").unwrap();
     root
 }
@@ -80,16 +80,51 @@ fn root_replacement_keeps_the_old_root_live_until_the_new_root_commits() {
 }
 
 #[test]
-fn registry_resolves_definition_prefetch_edges() {
+fn registry_resolves_prefetch_through_the_selected_slot() {
     let root = fixture_root();
+    let replacement_root = root.join("replacement_ui");
+    fs::create_dir_all(replacement_root.join("assets/webui/replacement")).unwrap();
+    fs::write(
+        replacement_root.join("manifest.toml"),
+        "[general]\nmod_name='replacement_ui'\nauthor='example'\noverride_priority=10\n",
+    )
+    .unwrap();
+    fs::write(
+        replacement_root.join("assets/webui/replacement/index.html"),
+        "replacement",
+    )
+    .unwrap();
+    fs::write(
+        replacement_root.join("assets/webui/registry.toml"),
+        "[[resource]]\nname='replacement'\nproject='replacement'\nentry='index.html'\ninteraction_mode='web-ui'\nworld_visibility='hidden'\nmax_instances=1\n[slots]\n'roundo.main-menu'='replacement'\n",
+    )
+    .unwrap();
+
     let registry = UiRegistry::load(&LoadedMods::discover(&root).unwrap()).unwrap();
     assert_eq!(
         registry
             .resource("vanilla.vanilla_ui.main")
             .unwrap()
             .prefetch,
-        vec!["vanilla.vanilla_ui.main"]
+        vec!["example.replacement_ui.replacement"]
     );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn registry_rejects_unknown_prefetch_slots_atomically() {
+    let root = fixture_root();
+    let path = root.join("vanilla_ui/assets/webui/registry.toml");
+    let invalid = fs::read_to_string(&path).unwrap().replace(
+        "prefetch=['roundo.main-menu']",
+        "prefetch=['roundo.missing']",
+    );
+    fs::write(path, invalid).unwrap();
+
+    assert!(matches!(
+        UiRegistry::load(&LoadedMods::discover(&root).unwrap()),
+        Err(UiRegistryError::UnknownSlot(slot)) if slot == "roundo.missing"
+    ));
     fs::remove_dir_all(root).unwrap();
 }
 
@@ -475,7 +510,7 @@ fn custom_protocol_rejects_cross_definition_frames_and_assets() {
 
 #[test]
 fn registry_requires_positive_max_instances_and_applies_definition_defaults() {
-    assert!(toml::from_str::<RegistryFile>("[[ui]]\nname='x'\nproject='x'\nentry='index.html'\ninteraction_mode='web-ui'\nworld_visibility='hidden'").is_err());
+    assert!(toml::from_str::<RegistryFile>("[[resource]]\nname='x'\nproject='x'\nentry='index.html'\ninteraction_mode='web-ui'\nworld_visibility='hidden'").is_err());
     let root = fixture_root();
     let registry = UiRegistry::load(&LoadedMods::discover(&root).unwrap()).unwrap();
     let definition = registry.resource("vanilla.vanilla_ui.main").unwrap();

@@ -2,7 +2,7 @@
 
 本文描述 Web UI 如何接入共享 Mod Resource 加载架构。通用加载规则见 [`roundo_mod_loader/ARCHITECTURE.markdown`](../../game/common/roundo_mod_loader/ARCHITECTURE.markdown)，UI 生命周期术语见仓库根目录 [`CONTEXT.md`](../../CONTEXT.md)。
 
-本文是目标技术文档。当前 `UiRegistry::load` 已实现 Mod 注册 UI、完整资源名、dependency closure、slot 裁决和路径验证，但尚未接入统一 Resource Type Loading Phase。
+本文是目标技术文档。当前 `UiRegistry::load` 已实现 Mod 注册 UI、完整资源名、dependency closure、slot 裁决、以 slot 表达的 prefetch 和路径验证，并已与 lifecycle、Wry platform adapter、Bevy composition 分离；但尚未接入统一 Resource Type Loading Phase。
 
 ## 1. Adapter 职责
 
@@ -155,15 +155,15 @@ Resource Type adapter 不创建 UI Instance。Lifecycle Tree 也不反向修改 
 
 ## 8. 当前实现差距
 
-当前 `roundo_client/roundo_webui/src/lib.rs` 需要迁移的内容：
+当前实现仍需迁移的内容：
 
 - `RoundoWebUiPlugin::build` 当前自行调用 `LoadedMods::discover`；目标由共享加载 module 提供已加载 UI Registry。
-- `UiRegistry::load` 混合通用 Mod 规则和 Web UI 类型规则；目标只保留后者。
-- `RegistryFile` 使用 `ui: Vec<RegistryUi>` / `[[ui]]`；目标是 `resource` / `[[resource]]`。
+- `UiRegistry::load` 仍处理部分通用 Mod 引用规则；目标只保留 Web UI 类型规则。
+- 当前已经使用共同 `[[resource]]` 外壳，旧 `[[ui]]` 仅作为反序列化迁移别名。
 - `resolve_reference` 中通用 Mod 可见性应迁入共享加载 module。
-- `RegistryUi.prefetch` 当前解析为具体 UI Resource Name；目标保存并校验 UI Registry Slot。
-- manifest 当前使用 `load_priority`；目标字段为 `override_priority`。
-- 当前插件同时拥有 registry 加载与 Wry runtime；目标是 Resource Type adapter 与平台 adapter 两个 seam。
+- `RegistryUi.prefetch` 已保存并校验 UI Registry Slot，并在 slot 最终裁决后解析到选中的 UI Definition。
+- manifest 已使用 `override_priority`；`load_priority` 仅作为迁移别名。
+- registry、lifecycle、Wry platform adapter 与 Bevy composition 已形成独立 module；统一 Resource Type Loading Phase 仍未接入。
 
 迁移不得改变 ADR-0002 已确定的原则：UI Definition 的可追踪身份与 UI Registry Slot 必须分离，高优先级 Mod 只能改变 slot 的选择结果，不能冒充另一 Mod 的 UI Definition。
 

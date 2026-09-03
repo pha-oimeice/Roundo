@@ -1,6 +1,6 @@
 use crate::{
-    ClientCommandDefinition, ClientCommandPipe, TerminalInput, UnixCommand, UnixCommandParseError,
-    UnixCommandRegistry, MAX_JSON_COMMANDS_PER_UPDATE,
+    ClientCommandDefinition, ClientCommandPipe, MAX_JSON_COMMANDS_PER_UPDATE, TerminalInput,
+    UnixCommand, UnixCommandParseError, UnixCommandRegistry,
 };
 use bevy::{
     app::AppExit,
@@ -1852,7 +1852,7 @@ fn print_terminal_response(response: serde_json::Value) {
 
 #[cfg(test)]
 mod tests {
-    use super::{command_dev_level, validate_external_url, visible_commands, CLIENT_COMMANDS};
+    use super::{CLIENT_COMMANDS, command_dev_level, validate_external_url, visible_commands};
     #[test]
     fn catalog_has_unique_names_and_a_schema_for_every_typed_command() {
         let mut names = std::collections::BTreeSet::new();
@@ -1910,9 +1910,11 @@ mod tests {
     #[test]
     fn success_schemas_describe_client_display_status_settings_bindings_and_meta_outputs() {
         let status = super::client_command_schema("server.status").unwrap();
-        assert!(status["success"]["properties"]["data"]["properties"]
-            .get("status")
-            .is_some());
+        assert!(
+            status["success"]["properties"]["data"]["properties"]
+                .get("status")
+                .is_some()
+        );
         assert!(
             status["success"]["properties"]["data"]["properties"]["status"]
                 .get("$ref")
@@ -1924,17 +1926,23 @@ mod tests {
             assert_eq!(schema["success"]["properties"]["data"]["type"], "object");
         }
         let list = super::client_command_schema("server.list").unwrap();
-        assert!(list["success"]["properties"]["data"]["properties"]
-            .get("servers")
-            .is_some());
+        assert!(
+            list["success"]["properties"]["data"]["properties"]
+                .get("servers")
+                .is_some()
+        );
         let settings = super::client_command_schema("settings.show").unwrap();
-        assert!(settings["success"]["properties"]["data"]["properties"]
-            .get("settings")
-            .is_some());
+        assert!(
+            settings["success"]["properties"]["data"]["properties"]
+                .get("settings")
+                .is_some()
+        );
         let bindings = super::client_command_schema("bindings.list").unwrap();
-        assert!(bindings["success"]["properties"]["data"]["properties"]
-            .get("supported_keys")
-            .is_some());
+        assert!(
+            bindings["success"]["properties"]["data"]["properties"]
+                .get("supported_keys")
+                .is_some()
+        );
         let meta = super::client_command_schema("command.help").unwrap();
         assert!(meta["success"]["properties"]["data"].get("anyOf").is_some());
         let schema_meta = super::client_command_schema("command.schema").unwrap();
@@ -2136,12 +2144,14 @@ mod tests {
     fn terminal_collects_the_unmodified_typed_json_response() {
         let pipe = crate::ClientCommandPipe::bounded(1);
         let mut responses = super::TerminalResponses::default();
-        assert!(super::submit_terminal_request(
-            &pipe,
-            &mut responses,
-            serde_json::json!({"version": 1, "command": "app.quit", "arguments": {}}),
-        )
-        .is_none());
+        assert!(
+            super::submit_terminal_request(
+                &pipe,
+                &mut responses,
+                serde_json::json!({"version": 1, "command": "app.quit", "arguments": {}}),
+            )
+            .is_none()
+        );
         let (_, reply) = pipe.try_receive().unwrap();
         let expected = serde_json::json!({
             "version": 1,

@@ -22,8 +22,9 @@ pub struct ManifestGeneral {
     pub author: String,
     #[serde(default)]
     pub dependencies: Vec<String>,
-    #[serde(default)]
-    pub load_priority: i32,
+    /// Resource Type adapter 用于候选裁决的优先级，不参与 Mod 加载顺序。
+    #[serde(default, alias = "load_priority")]
+    pub override_priority: i32,
 }
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -55,7 +56,7 @@ pub struct LoadedMod {
     pub id: ModId,
     pub root: PathBuf,
     pub dependencies: BTreeSet<ModId>,
-    pub load_priority: i32,
+    pub override_priority: i32,
 }
 
 /// All installed Mods, indexed by canonical Mod ID.
@@ -126,7 +127,7 @@ impl LoadedMods {
                     id: id.clone(),
                     root: root.clone(),
                     dependencies,
-                    load_priority: manifest.general.load_priority,
+                    override_priority: manifest.general.override_priority,
                 },
             );
         }

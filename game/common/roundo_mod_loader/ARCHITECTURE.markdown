@@ -116,7 +116,7 @@ Mod Dependency 在 manifest 中显式声明，必须存在且无环。它表示�
 
 ### 4.3 Override Priority
 
-manifest 的 `load_priority` 应迁移为 `override_priority`。它不参与加载。具体 Resource Type 可按自身规则使用这个值裁决候选，例如 Web UI adapter 裁决 UI Registry Slot。
+manifest 使用 `override_priority`。它不参与加载。具体 Resource Type 可按自身规则使用这个值裁决候选，例如 Web UI adapter 裁决 UI Registry Slot。旧 `load_priority` 只保留为反序列化迁移别名。
 
 共享加载 module 不建立“排他资源”或“资源被占用”的通用模型。
 
@@ -244,9 +244,9 @@ canonical Mod ID → local resource name → error kind
 
 - `LoadedMods` 已实现 manifest、Mod ID、依赖闭包和依赖环校验，但没有 Resource Type Catalog 或阶段推导。
 - `roundo_webui::UiRegistry::load` 自行扫描 registry、解析引用和发布结果，尚未作为 Resource Type adapter 接入共享阶段。
-- Web UI registry 使用 `[[ui]]`，目标共同外壳是 `[[resource]]`。
-- 当前 Web UI `prefetch` 直接引用 UI Definition；目标语义是引用 UI Registry Slot。
-- manifest 字段仍名为 `load_priority`，但实际只能表达候选裁决 precedence。
+- Web UI registry 已使用共同 `[[resource]]` 外壳；旧 `[[ui]]` 只作为迁移别名。
+- Web UI `prefetch` 已引用 UI Registry Slot，并在 slot 最终裁决后解析。
+- manifest 已使用 `override_priority`，旧 `load_priority` 只作为迁移别名。
 - `mod_assets` 将整个 `mods/` 暴露给 Bevy，尚未阻止裸路径绕过 registry。
 - 示例 USD、Attribute、Property、Form、Material、Recipe 与 Action 文件尚无接入共享加载模型的 adapter。
 

@@ -40,9 +40,8 @@ pub struct UiResource {
     pub lifecycle_independent: bool,
     pub presentation: PresentationMode,
     pub layout: UiLayout,
-    /// Definition names that are likely to be opened after this one. The
-    /// platform adapter may prepare them physically, but they do not become
-    /// lifecycle instances until a real `ui.open` claims them.
+    /// UI Registry Slot 最终选中的 Definition。platform adapter 可以准备其物理视图，
+    /// 但真实 `ui.open` claim 之前不会创建 UI Instance。
     pub prefetch: Vec<String>,
 }
 
@@ -130,6 +129,7 @@ impl UiRegistry {
     pub fn load(mods: &LoadedMods) -> Result<Self, UiRegistryError> {
         let mut resources = BTreeMap::new();
         let mut candidates = Vec::new();
+        let mut prefetch_slots = Vec::new();
         for loaded in mods.iter() {
             // Web UI is an optional resource type. Mods without its registry
             // do not contribute Web UI resources.
@@ -147,8 +147,7 @@ impl UiRegistry {
                 .dependency_closure(&loaded.id)
                 .map_err(UiRegistryError::ModLoader)?;
             let mut local = BTreeSet::new();
-            let mut local_prefetch = Vec::new();
-            for definition in manifest.ui {
+            for definition in manifest.resources {
                 if !valid_local_name(&definition.name) || !local.insert(definition.name.clone()) {
                     return Err(UiRegistryError::InvalidLocalName {
                         owner: loaded.id.clone(),
@@ -163,7 +162,7 @@ impl UiRegistry {
                     });
                 }
                 let name = format!("{}.{}", loaded.id, definition.name);
-                local_prefetch.push((name.clone(), definition.prefetch.clone()));
+                prefetch_slots.push((name.clone(), definition.prefetch.clone()));
                 let project_root = checked_directory(&web_root, &definition.project)?;
                 let entry = checked_file(&project_root, &definition.entry)?;
                 let resource = UiResource {
@@ -193,16 +192,6 @@ impl UiRegistry {
             }
             let resolve =
                 |reference: &str| resolve_reference(reference, &loaded.id, &closure, &local);
-            for (source, targets) in local_prefetch {
-                let resolved = targets
-                    .iter()
-                    .map(|target| resolve(target))
-                    .collect::<Result<Vec<_>, _>>()?;
-                resources
-                    .get_mut(&source)
-                    .expect("prefetch source was just registered")
-                    .prefetch = resolved;
-            }
             for (slot, reference) in manifest.slots {
                 if slot.is_empty() {
                     return Err(UiRegistryError::InvalidSlot(slot));
@@ -211,17 +200,10 @@ impl UiRegistry {
                     slot,
                     ResourceCandidate {
                         owner: loaded.id.clone(),
-                        priority: loaded.load_priority,
+                        priority: loaded.override_priority,
                         value: resolve(&reference)?,
                     },
                 ));
-            }
-        }
-        for resource in resources.values() {
-            for target in &resource.prefetch {
-                if !resources.contains_key(target) {
-                    return Err(UiRegistryError::UnknownResource(target.clone()));
-                }
             }
         }
         let mut grouped: BTreeMap<String, Vec<ResourceCandidate<String>>> = BTreeMap::new();
@@ -235,6 +217,21 @@ impl UiRegistry {
                 return Err(UiRegistryError::UnknownResource(selected.value));
             }
             slots.insert(slot, selected.value);
+        }
+        for (source, requested_slots) in prefetch_slots {
+            let selected = requested_slots
+                .into_iter()
+                .map(|slot| {
+                    slots
+                        .get(&slot)
+                        .cloned()
+                        .ok_or(UiRegistryError::UnknownSlot(slot))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            resources
+                .get_mut(&source)
+                .expect("prefetch source was registered in this phase")
+                .prefetch = selected;
         }
         Ok(Self { resources, slots })
     }
@@ -291,8 +288,8 @@ pub(crate) fn resolve_reference(
 
 #[derive(Deserialize)]
 pub(crate) struct RegistryFile {
-    #[serde(default)]
-    ui: Vec<RegistryUi>,
+    #[serde(default, rename = "resource", alias = "ui")]
+    resources: Vec<RegistryUi>,
     #[serde(default)]
     slots: BTreeMap<String, String>,
 }
