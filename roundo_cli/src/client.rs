@@ -16,9 +16,27 @@ use roundo_user_config::{
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use std::{cell::RefCell, collections::VecDeque, process::Command};
+use std::{
+    cell::RefCell,
+    collections::{BTreeMap, VecDeque},
+    process::Command,
+};
 
 const CLIENT_CONFIG_FILE: &str = "roundo-client-config.toml";
+const SERVER_LIST_DATA: &str = "client.servers";
+const SERVER_STATUS_DATA: &str = "client.connection";
+const SETTINGS_DATA: &str = "client.settings";
+const BINDINGS_DATA: &str = "client.bindings";
+const HUD_DATA: &str = "client.hud";
+const HUD_SYNC_INTERVAL_SECS: f32 = 0.05;
+
+#[derive(Resource, Default)]
+struct ClientDataSyncState {
+    subscription_generation: u64,
+    server_list_revision: u64,
+    last_snapshots: BTreeMap<&'static str, serde_json::Value>,
+    hud_elapsed_secs: f32,
+}
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct EmptyArguments {}
@@ -483,6 +501,96 @@ fn probe_output(probe: crate::client_network::ProbeResult) -> ProbeOutput {
         status: probe.status.into(),
         message: probe.message,
     }
+}
+
+fn server_list_output(
+    config: &ClientConfigStore,
+    probes: &crate::client_network::ServerProbeManager,
+) -> ServerListOutput {
+    let servers = config
+        .0
+        .servers
+        .iter()
+        .enumerate()
+        .map(|(index, server)| ServerListEntryOutput {
+            index,
+            name: server.name.clone(),
+            address: server.address.clone(),
+            probe: probe_output(probes.result(index, server)),
+        })
+        .collect();
+    ServerListOutput { servers }
+}
+
+fn settings_show_output(config: &ClientConfigStore) -> SettingsShowOutput {
+    let settings = &config.0.settings;
+    SettingsShowOutput {
+        settings: vec![
+            SettingDisplay {
+                key: "controls.mouse_sensitivity".into(),
+                value: settings.controls.mouse_sensitivity,
+                min: roundo_user_config::MIN_MOUSE_SENSITIVITY,
+                max: roundo_user_config::MAX_MOUSE_SENSITIVITY,
+                step: 0.0005,
+                default: roundo_user_config::DEFAULT_MOUSE_SENSITIVITY,
+            },
+            SettingDisplay {
+                key: "camera.move_speed".into(),
+                value: settings.camera.move_speed,
+                min: roundo_user_config::MIN_CAMERA_MOVE_SPEED,
+                max: roundo_user_config::MAX_CAMERA_MOVE_SPEED,
+                step: 1.0,
+                default: roundo_user_config::DEFAULT_CAMERA_MOVE_SPEED,
+            },
+            SettingDisplay {
+                key: "camera.voxel_raycast_distance".into(),
+                value: settings.camera.voxel_raycast_distance,
+                min: roundo_user_config::MIN_VOXEL_RAYCAST_DISTANCE,
+                max: roundo_user_config::MAX_VOXEL_RAYCAST_DISTANCE,
+                step: 1.0,
+                default: roundo_user_config::DEFAULT_VOXEL_RAYCAST_DISTANCE,
+            },
+            SettingDisplay {
+                key: "world.joinable_world_radius".into(),
+                value: settings.world.joinable_world_radius,
+                min: roundo_user_config::MIN_JOINABLE_WORLD_RADIUS,
+                max: roundo_user_config::MAX_JOINABLE_WORLD_RADIUS,
+                step: 0.5,
+                default: roundo_user_config::DEFAULT_JOINABLE_WORLD_RADIUS,
+            },
+        ],
+    }
+}
+
+fn bindings_list_output(config: &ClientConfigStore) -> BindingsListOutput {
+    BindingsListOutput {
+        bindings: config
+            .0
+            .settings
+            .key_bindings
+            .iter()
+            .map(binding_display)
+            .collect(),
+        supported_keys: supported_keys(),
+        supported_actions: supported_actions(),
+    }
+}
+
+fn hud_show_output(hud: &HudCache) -> Result<HudShowOutput, serde_json::Error> {
+    let target = hud.target.clone().map(serde_json::from_value).transpose()?;
+    Ok(HudShowOutput {
+        fps: HudFpsOutput {
+            current: hud.fps.current,
+            average: hud.fps.average,
+            min: hud.fps.min,
+            max: hud.fps.max,
+        },
+        position: hud.position.as_ref().map(|position| HudPositionOutput {
+            absolute: position.absolute,
+            chunk_relative: position.chunk_relative,
+        }),
+        target,
+    })
 }
 
 macro_rules! definition {
@@ -1153,12 +1261,19 @@ pub(super) fn configure(app: &mut App) {
     }
     app.init_resource::<DevLevel>();
     app.init_resource::<HudCache>();
+    app.init_resource::<ClientDataSyncState>();
     app.init_resource::<ClientUnixAdapter>();
     app.init_resource::<TerminalResponses>();
     app.init_resource::<crate::client_network::ServerProbeManager>();
     app.add_systems(
         Update,
-        (process_commands, process_json_commands, update_hud_cache).chain(),
+        (
+            process_commands,
+            process_json_commands,
+            update_hud_cache,
+            sync_subscribed_client_data,
+        )
+            .chain(),
     );
 }
 
@@ -1364,20 +1479,7 @@ fn dispatch_typed_command(
         })
     });
     registry.register_typed::<ServerListDefinition>(|_, _| {
-        let config = config.borrow();
-        let servers = config
-            .0
-            .servers
-            .iter()
-            .enumerate()
-            .map(|(index, server)| ServerListEntryOutput {
-                index,
-                name: server.name.clone(),
-                address: server.address.clone(),
-                probe: probe_output(probes.result(index)),
-            })
-            .collect();
-        Ok(ServerListOutput { servers })
+        Ok(server_list_output(&config.borrow(), probes))
     });
     registry.register_typed::<ServerAddDefinition>(|input, _| {
         let server = ServerEntry::from(input);
@@ -1392,6 +1494,7 @@ fn dispatch_typed_command(
         config
             .save()
             .map_err(|error| crate::json_command::CommandError::new("config_save_failed", error))?;
+        probes.invalidate();
         Ok(ServerIndexOutput {
             index: config.0.servers.len() - 1,
         })
@@ -1415,6 +1518,7 @@ fn dispatch_typed_command(
         config
             .save()
             .map_err(|error| crate::json_command::CommandError::new("config_save_failed", error))?;
+        probes.invalidate();
         Ok(ServerIndexOutput { index: input.index })
     });
     registry.register_typed::<ServerDeleteDefinition>(|input, _| {
@@ -1429,46 +1533,11 @@ fn dispatch_typed_command(
         config
             .save()
             .map_err(|error| crate::json_command::CommandError::new("config_save_failed", error))?;
+        probes.invalidate();
         Ok(EmptyOutput {})
     });
     registry.register_typed::<SettingsShowDefinition>(|_, _| {
-        let settings = &config.borrow().0.settings;
-        Ok(SettingsShowOutput {
-            settings: vec![
-                SettingDisplay {
-                    key: "controls.mouse_sensitivity".into(),
-                    value: settings.controls.mouse_sensitivity,
-                    min: roundo_user_config::MIN_MOUSE_SENSITIVITY,
-                    max: roundo_user_config::MAX_MOUSE_SENSITIVITY,
-                    step: 0.0005,
-                    default: roundo_user_config::DEFAULT_MOUSE_SENSITIVITY,
-                },
-                SettingDisplay {
-                    key: "camera.move_speed".into(),
-                    value: settings.camera.move_speed,
-                    min: roundo_user_config::MIN_CAMERA_MOVE_SPEED,
-                    max: roundo_user_config::MAX_CAMERA_MOVE_SPEED,
-                    step: 1.0,
-                    default: roundo_user_config::DEFAULT_CAMERA_MOVE_SPEED,
-                },
-                SettingDisplay {
-                    key: "camera.voxel_raycast_distance".into(),
-                    value: settings.camera.voxel_raycast_distance,
-                    min: roundo_user_config::MIN_VOXEL_RAYCAST_DISTANCE,
-                    max: roundo_user_config::MAX_VOXEL_RAYCAST_DISTANCE,
-                    step: 1.0,
-                    default: roundo_user_config::DEFAULT_VOXEL_RAYCAST_DISTANCE,
-                },
-                SettingDisplay {
-                    key: "world.joinable_world_radius".into(),
-                    value: settings.world.joinable_world_radius,
-                    min: roundo_user_config::MIN_JOINABLE_WORLD_RADIUS,
-                    max: roundo_user_config::MAX_JOINABLE_WORLD_RADIUS,
-                    step: 0.5,
-                    default: roundo_user_config::DEFAULT_JOINABLE_WORLD_RADIUS,
-                },
-            ],
-        })
+        Ok(settings_show_output(&config.borrow()))
     });
     registry.register_typed::<SettingsSetDefinition>(|input, _| {
         let mut config = config.borrow_mut();
@@ -1497,18 +1566,7 @@ fn dispatch_typed_command(
         Ok(EmptyOutput {})
     });
     registry.register_typed::<BindingsListDefinition>(|_, _| {
-        Ok(BindingsListOutput {
-            bindings: config
-                .borrow()
-                .0
-                .settings
-                .key_bindings
-                .iter()
-                .map(binding_display)
-                .collect(),
-            supported_keys: supported_keys(),
-            supported_actions: supported_actions(),
-        })
+        Ok(bindings_list_output(&config.borrow()))
     });
     registry.register_typed::<BindingsBindDefinition>(|input, _| {
         let binding = ClientKeyBindingConfig::try_from(input)?;
@@ -1628,26 +1686,8 @@ fn dispatch_typed_command(
         Ok(DevOutput { level: dev_level.0 })
     });
     registry.register_typed::<HudShowDefinition>(|_, _| {
-        let target = hud
-            .target
-            .clone()
-            .map(serde_json::from_value)
-            .transpose()
-            .map_err(|error| {
-                crate::json_command::CommandError::new("internal_command_error", error.to_string())
-            })?;
-        Ok(HudShowOutput {
-            fps: HudFpsOutput {
-                current: hud.fps.current,
-                average: hud.fps.average,
-                min: hud.fps.min,
-                max: hud.fps.max,
-            },
-            position: hud.position.as_ref().map(|position| HudPositionOutput {
-                absolute: position.absolute,
-                chunk_relative: position.chunk_relative,
-            }),
-            target,
+        hud_show_output(hud).map_err(|error| {
+            crate::json_command::CommandError::new("internal_command_error", error.to_string())
         })
     });
     registry.register_typed::<DiagnosticsPositionDefinition>(|_, _| {
@@ -1762,6 +1802,105 @@ fn update_hud_cache(
                 ],
             }
         });
+}
+
+fn publish_client_data_if_changed(
+    navigation: &mut roundo_webui::UiNavigationExecutor,
+    sync: &mut ClientDataSyncState,
+    resource: &'static str,
+    snapshot: serde_json::Value,
+    force: bool,
+) {
+    let changed = sync.last_snapshots.get(resource) != Some(&snapshot);
+    if (force || changed) && navigation.publish_data(resource, &snapshot) != 0 {
+        sync.last_snapshots.insert(resource, snapshot);
+    }
+}
+
+/// Client Data is produced only on the client side. WebViews merely maintain
+/// subscriptions; this system chooses event-driven or periodic synchronization
+/// independently for each resource and never receives read requests over IPC.
+fn sync_subscribed_client_data(
+    time: Res<Time>,
+    config: Res<ClientConfigStore>,
+    network: Res<crate::client_network::ClientNetworkManager>,
+    probes: Res<crate::client_network::ServerProbeManager>,
+    hud: Res<HudCache>,
+    mut sync: ResMut<ClientDataSyncState>,
+    mut navigation: Option<bevy::ecs::system::NonSendMut<roundo_webui::UiNavigationExecutor>>,
+) {
+    let Some(navigation) = navigation.as_deref_mut() else {
+        return;
+    };
+    let subscription_generation = navigation.data_subscription_generation();
+    let subscriptions_changed = subscription_generation != sync.subscription_generation;
+    sync.subscription_generation = subscription_generation;
+
+    let server_list_revision = probes.change_revision();
+    if navigation.has_data_subscribers(SERVER_LIST_DATA)
+        && (subscriptions_changed || server_list_revision != sync.server_list_revision)
+    {
+        let snapshot = serde_json::to_value(server_list_output(&config, &probes))
+            .expect("server list snapshot serializes");
+        publish_client_data_if_changed(
+            navigation,
+            &mut sync,
+            SERVER_LIST_DATA,
+            snapshot,
+            subscriptions_changed,
+        );
+        sync.server_list_revision = server_list_revision;
+    }
+    if navigation.has_data_subscribers(SERVER_STATUS_DATA) {
+        let snapshot = serde_json::to_value(server_status_output(network.status()))
+            .expect("server status snapshot serializes");
+        publish_client_data_if_changed(
+            navigation,
+            &mut sync,
+            SERVER_STATUS_DATA,
+            snapshot,
+            subscriptions_changed,
+        );
+    }
+    if navigation.has_data_subscribers(SETTINGS_DATA) {
+        let snapshot = serde_json::to_value(settings_show_output(&config))
+            .expect("settings snapshot serializes");
+        publish_client_data_if_changed(
+            navigation,
+            &mut sync,
+            SETTINGS_DATA,
+            snapshot,
+            subscriptions_changed,
+        );
+    }
+    if navigation.has_data_subscribers(BINDINGS_DATA) {
+        let snapshot = serde_json::to_value(bindings_list_output(&config))
+            .expect("bindings snapshot serializes");
+        publish_client_data_if_changed(
+            navigation,
+            &mut sync,
+            BINDINGS_DATA,
+            snapshot,
+            subscriptions_changed,
+        );
+    }
+
+    sync.hud_elapsed_secs += time.delta_secs();
+    if navigation.has_data_subscribers(HUD_DATA)
+        && (subscriptions_changed || sync.hud_elapsed_secs >= HUD_SYNC_INTERVAL_SECS)
+    {
+        sync.hud_elapsed_secs = 0.0;
+        match hud_show_output(&hud).and_then(serde_json::to_value) {
+            Ok(snapshot) => publish_client_data_if_changed(
+                navigation,
+                &mut sync,
+                HUD_DATA,
+                snapshot,
+                subscriptions_changed,
+            ),
+            Err(error) => log::error!("cannot serialize HUD Client Data: {error}"),
+        }
+    }
 }
 
 fn process_commands(

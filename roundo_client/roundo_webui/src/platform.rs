@@ -33,6 +33,7 @@ pub(crate) fn top_level_navigation_allowed(source_resource: &str, url: &str) -> 
 struct WebViewOverlay {
     webview: wry::WebView,
     pending: Arc<Mutex<Vec<PendingCommand>>>,
+    subscriptions: Arc<Mutex<BTreeSet<String>>>,
     load_state: Arc<Mutex<StagedLoadState>>,
     last_visible: bool,
     last_focused: bool,
@@ -145,6 +146,7 @@ struct StagedWebView {
     webview: wry::WebView,
     target_url: Option<String>,
     pending_commands: Arc<Mutex<Vec<PendingCommand>>>,
+    subscriptions: Arc<Mutex<BTreeSet<String>>>,
     command_gate: Arc<Mutex<StagedCommandGate>>,
     command_io: Option<ContextualJsonRequestResponseIo<UiCommandSource, Value>>,
     command_source: UiInstanceId,
@@ -192,6 +194,11 @@ pub struct UiNavigationExecutor {
     deferred_open_responses: BTreeMap<u64, DeferredOpenResponse>,
     #[cfg(target_os = "windows")]
     recovery: Option<RecoveryOverlay>,
+    /// Advances whenever a live WebView changes its Client Data subscription
+    /// set. Client-owned publishers use it to send an initial snapshot without
+    /// turning subscription control into a source-dependent Client Command.
+    #[cfg(target_os = "windows")]
+    data_subscription_generation: Arc<std::sync::atomic::AtomicU64>,
 }
 impl Default for UiNavigationExecutor {
     fn default() -> Self {
@@ -216,10 +223,77 @@ impl Default for UiNavigationExecutor {
             deferred_open_responses: BTreeMap::new(),
             #[cfg(target_os = "windows")]
             recovery: None,
+            #[cfg(target_os = "windows")]
+            data_subscription_generation: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         }
     }
 }
 impl UiNavigationExecutor {
+    /// Monotonic signal for Client Data subscription changes. It contains no
+    /// data itself; the authoritative client decides what and when to publish.
+    pub fn data_subscription_generation(&self) -> u64 {
+        #[cfg(target_os = "windows")]
+        {
+            return self
+                .data_subscription_generation
+                .load(std::sync::atomic::Ordering::Acquire);
+        }
+        #[cfg(not(target_os = "windows"))]
+        0
+    }
+
+    pub fn has_data_subscribers(&self, resource: &str) -> bool {
+        #[cfg(target_os = "windows")]
+        {
+            return self.committed.values().any(|overlay| {
+                overlay
+                    .subscriptions
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .contains(resource)
+            });
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            let _ = resource;
+            false
+        }
+    }
+
+    /// Pushes one client-owned snapshot only to WebViews subscribed to the
+    /// named Client Data resource.
+    pub fn publish_data(&mut self, resource: &str, data: &Value) -> usize {
+        #[cfg(target_os = "windows")]
+        {
+            let script = data_sync_script(resource, data);
+            let mut delivered = 0;
+            for overlay in self.committed.values() {
+                let subscribed = overlay
+                    .subscriptions
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .contains(resource);
+                if subscribed {
+                    match overlay.webview.evaluate_script(&script) {
+                        Ok(()) => delivered += 1,
+                        Err(error) => log::error!(
+                            "cannot synchronize Client Data resource `{resource}`: {error}"
+                        ),
+                    }
+                }
+            }
+            if delivered != 0 {
+                self.webview_creation_cooldown = true;
+            }
+            return delivered;
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            let _ = (resource, data);
+            0
+        }
+    }
+
     #[cfg(target_os = "windows")]
     fn supersede_staged_webview(&mut self, id: u64) {
         if let Some(staged) = self
@@ -697,6 +771,13 @@ pub(crate) fn stage_pending_webview(world: &mut bevy::prelude::World) {
     let native_event_loop_proxy = event_loop_proxy;
     let pending_commands = Arc::new(Mutex::new(Vec::new()));
     let ipc_pending_commands = Arc::clone(&pending_commands);
+    let subscriptions = Arc::new(Mutex::new(BTreeSet::new()));
+    let ipc_subscriptions = Arc::clone(&subscriptions);
+    let subscription_generation = Arc::clone(
+        &world
+            .non_send::<UiNavigationExecutor>()
+            .data_subscription_generation,
+    );
     let command_gate = Arc::new(Mutex::new(StagedCommandGate::default()));
     let ipc_command_gate = Arc::clone(&command_gate);
     let parent_hwnd = Arc::new(std::sync::atomic::AtomicIsize::new(0));
@@ -800,10 +881,12 @@ pub(crate) fn stage_pending_webview(world: &mut bevy::prelude::World) {
                     gate.queue_until_commit(message.body())
                 };
                 if !queue_until_commit {
-                    enqueue_webui_command(
+                    dispatch_webui_message(
                         &command_io,
                         &ipc_pending_commands,
-                        Some(command_source),
+                        &ipc_subscriptions,
+                        &subscription_generation,
+                        command_source,
                         message.body(),
                     );
                 }
@@ -952,6 +1035,7 @@ pub(crate) fn stage_pending_webview(world: &mut bevy::prelude::World) {
                     webview,
                     target_url: Some(url),
                     pending_commands,
+                    subscriptions,
                     command_gate,
                     command_io: staged_command_io,
                     command_source,
@@ -1147,10 +1231,14 @@ pub(crate) fn advance_staged_webviews(world: &mut bevy::prelude::World) {
                             gate.commit()
                         };
                         for body in queued {
-                            enqueue_webui_command(
+                            dispatch_webui_message(
                                 &staged.command_io,
                                 &staged.pending_commands,
-                                Some(staged.command_source),
+                                &staged.subscriptions,
+                                &world
+                                    .non_send::<UiNavigationExecutor>()
+                                    .data_subscription_generation,
+                                staged.command_source,
                                 &body,
                             );
                         }
@@ -1207,6 +1295,7 @@ pub(crate) fn advance_staged_webviews(world: &mut bevy::prelude::World) {
                             WebViewOverlay {
                                 webview: staged.webview,
                                 pending: staged.pending_commands,
+                                subscriptions: staged.subscriptions,
                                 load_state: staged.load_state,
                                 last_visible: false,
                                 last_focused: false,
@@ -1727,6 +1816,65 @@ fn apply_windows_webview_mode(overlay: &WebViewOverlay, mode: ClientInteractionM
     // E_INVALIDARG and causes a focus/repaint loop, so never force focus here.
 }
 
+#[cfg(target_os = "windows")]
+fn dispatch_webui_message(
+    io: &Option<ContextualJsonRequestResponseIo<UiCommandSource, Value>>,
+    pending: &Arc<Mutex<Vec<PendingCommand>>>,
+    subscriptions: &Arc<Mutex<BTreeSet<String>>>,
+    subscription_generation: &Arc<std::sync::atomic::AtomicU64>,
+    source: UiInstanceId,
+    body: &str,
+) {
+    let subscription = serde_json::from_str::<Value>(body)
+        .ok()
+        .and_then(|value| value.get("roundo_subscription").cloned());
+    if let Some(subscription) = subscription {
+        let version = subscription.get("version").and_then(Value::as_u64);
+        let resource = subscription.get("resource").and_then(Value::as_str);
+        let subscribed = subscription.get("subscribed").and_then(Value::as_bool);
+        let Some((resource, subscribed)) = resource.zip(subscribed) else {
+            log::warn!("Web UI Client Data subscription was rejected: invalid envelope");
+            return;
+        };
+        if version != Some(1)
+            || resource.is_empty()
+            || resource.len() > 128
+            || !resource
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+        {
+            log::warn!(
+                "Web UI Client Data subscription was rejected: invalid version or resource `{resource}`"
+            );
+            return;
+        }
+        let changed = {
+            let mut subscriptions = subscriptions
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if subscribed {
+                subscriptions.insert(resource.to_owned())
+            } else {
+                subscriptions.remove(resource)
+            }
+        };
+        if changed {
+            subscription_generation.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+            log::debug!(
+                "Web UI instance {} {} Client Data resource `{resource}`",
+                source.get(),
+                if subscribed {
+                    "subscribed to"
+                } else {
+                    "unsubscribed from"
+                }
+            );
+        }
+        return;
+    }
+    enqueue_webui_command(io, pending, Some(source), body);
+}
+
 pub(crate) fn enqueue_webui_command(
     io: &Option<ContextualJsonRequestResponseIo<UiCommandSource, Value>>,
     pending: &Arc<Mutex<Vec<PendingCommand>>>,
@@ -1929,8 +2077,16 @@ pub(crate) fn response_script(request_id: u64, result: &Value) -> String {
     )
 }
 
+pub(crate) fn data_sync_script(resource: &str, data: &Value) -> String {
+    format!(
+        "window.__roundoSync({}, {});",
+        serde_json::to_string(resource).expect("Client Data resource name serializes"),
+        serde_json::to_string(data).expect("Client Data snapshot serializes")
+    )
+}
+
 #[cfg(target_os = "windows")]
-const WEBUI_BRIDGE_SCRIPT: &str = r#"(() => { let next = 1; let active = false; const pending = new Map(); const queued = []; const post = body => active ? window.ipc.postMessage(body) : queued.push(body); window.__roundoActivate = () => { if (active) return; active = true; for (const body of queued.splice(0)) window.ipc.postMessage(body); }; window.__roundoResolve = (id, value) => { const resolve = pending.get(id); if (resolve) { pending.delete(id); resolve(value); } }; window.roundo = { execute(command) { return new Promise(resolve => { const id = next++; pending.set(id, resolve); post(JSON.stringify({ request_id: id, command })); }); } }; window.addEventListener('pointerdown',()=>{ if (active) window.ipc.postMessage(JSON.stringify({roundo_focus_request:true})); },true); window.ipc.postMessage(JSON.stringify({roundo_bridge_ready:true})); })();"#;
+const WEBUI_BRIDGE_SCRIPT: &str = r#"(() => { let next = 1; let active = false; const pending = new Map(); const queued = []; const subscriptions = new Map(); const snapshots = new Map(); const post = body => active ? window.ipc.postMessage(body) : queued.push(body); window.__roundoActivate = () => { if (active) return; active = true; for (const body of queued.splice(0)) window.ipc.postMessage(body); }; window.__roundoResolve = (id, value) => { const resolve = pending.get(id); if (resolve) { pending.delete(id); resolve(value); } }; window.__roundoSync = (resource, data) => { snapshots.set(resource, data); const listeners = subscriptions.get(resource); if (!listeners) return; for (const listener of [...listeners]) { try { listener(data); } catch (error) { console.error('Roundo Client Data subscriber failed', resource, error); } } }; window.roundo = { execute(command) { return new Promise(resolve => { const id = next++; pending.set(id, resolve); post(JSON.stringify({ request_id: id, command })); }); }, subscribe(resource, listener) { if (typeof resource !== 'string' || typeof listener !== 'function') throw new TypeError('roundo.subscribe requires a resource name and listener'); let listeners = subscriptions.get(resource); if (!listeners) { listeners = new Set(); subscriptions.set(resource, listeners); } const first = listeners.size === 0; listeners.add(listener); if (first) post(JSON.stringify({roundo_subscription:{version:1,resource,subscribed:true}})); else if (snapshots.has(resource)) listener(snapshots.get(resource)); let live = true; return () => { if (!live) return; live = false; listeners.delete(listener); if (!listeners.size) { subscriptions.delete(resource); snapshots.delete(resource); post(JSON.stringify({roundo_subscription:{version:1,resource,subscribed:false}})); } }; } }; window.addEventListener('pointerdown',()=>{ if (active) window.ipc.postMessage(JSON.stringify({roundo_focus_request:true})); },true); window.ipc.postMessage(JSON.stringify({roundo_bridge_ready:true})); })();"#;
 
 pub(crate) fn webui_initialization_script(definition: &str) -> String {
     let prefix = serde_json::to_string(&format!("/{definition}/"))

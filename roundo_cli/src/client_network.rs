@@ -36,8 +36,8 @@ pub struct ClientConnectionSnapshot {
     pub server: Option<ServerEntry>,
 }
 
-/// Cache and asynchronous TCP reachability probes behind one small command
-/// seam. A refresh only schedules work; readers never wait for the network.
+/// Cache and asynchronous QUIC endpoint probes behind one small command seam.
+/// A refresh only schedules work; readers never wait for the network.
 #[derive(bevy::prelude::Resource, Clone, Default)]
 pub struct ServerProbeManager {
     cache: Arc<Mutex<ProbeCache>>,
@@ -45,8 +45,17 @@ pub struct ServerProbeManager {
 
 #[derive(Clone, Debug, Default)]
 struct ProbeCache {
+    /// Identifies the server-list snapshot owned by the current probe batch.
     revision: u64,
-    entries: BTreeMap<usize, ProbeResult>,
+    /// Advances for every externally visible cache change.
+    change_revision: u64,
+    entries: BTreeMap<usize, ProbeCacheEntry>,
+}
+
+#[derive(Clone, Debug)]
+struct ProbeCacheEntry {
+    server: ServerEntry,
+    result: ProbeResult,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -63,16 +72,21 @@ impl ServerProbeManager {
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             cache.revision += 1;
+            cache.change_revision += 1;
             let revision = cache.revision;
             cache.entries = servers
                 .iter()
+                .cloned()
                 .enumerate()
-                .map(|(index, _)| {
+                .map(|(index, server)| {
                     (
                         index,
-                        ProbeResult {
-                            status: "probing",
-                            message: None,
+                        ProbeCacheEntry {
+                            server,
+                            result: ProbeResult {
+                                status: "probing",
+                                message: None,
+                            },
                         },
                     )
                 })
@@ -86,26 +100,56 @@ impl ServerProbeManager {
                 let mut cache = cache
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner());
-                // A newer refresh owns the cache, so stale workers cannot overwrite it.
-                if cache.revision == revision {
-                    cache.entries.insert(index, result);
+                // A newer refresh or any server-list mutation owns the cache,
+                // so stale workers cannot attach a result to another endpoint.
+                let owns_entry = cache.revision == revision
+                    && cache
+                        .entries
+                        .get(&index)
+                        .is_some_and(|entry| entry.server == server);
+                if owns_entry {
+                    if let Some(entry) = cache.entries.get_mut(&index) {
+                        entry.result = result;
+                    }
+                    cache.change_revision += 1;
                 }
             });
         }
         revision
     }
 
-    pub fn result(&self, index: usize) -> ProbeResult {
+    pub fn result(&self, index: usize, server: &ServerEntry) -> ProbeResult {
         self.cache
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .entries
             .get(&index)
-            .cloned()
+            .filter(|entry| &entry.server == server)
+            .map(|entry| entry.result.clone())
             .unwrap_or(ProbeResult {
                 status: "unknown",
                 message: None,
             })
+    }
+
+    /// Invalidates the complete batch when the indexed server list changes.
+    /// This also prevents in-flight workers from publishing against shifted
+    /// indices.
+    pub fn invalidate(&self) {
+        let mut cache = self
+            .cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        cache.revision += 1;
+        cache.change_revision += 1;
+        cache.entries.clear();
+    }
+
+    pub fn change_revision(&self) -> u64 {
+        self.cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .change_revision
     }
 }
 
@@ -705,7 +749,13 @@ mod tests {
     #[test]
     fn an_unprobed_server_has_a_stable_unknown_cache_entry() {
         let probes = ServerProbeManager::default();
-        let result = probes.result(42);
+        let result = probes.result(
+            42,
+            &ServerEntry {
+                name: "missing".into(),
+                address: "127.0.0.1:1".into(),
+            },
+        );
         assert_eq!(result.status, "unknown");
         assert_eq!(result.message, None);
     }

@@ -1,7 +1,7 @@
 //! UI Registry、Lifecycle core 与平台 adapter 的公开 interface 回归测试。
 
 use super::*;
-use crate::platform::{claim_webview_creation_turn, enqueue_webui_command};
+use crate::platform::{claim_webview_creation_turn, data_sync_script, enqueue_webui_command};
 use crate::registry::{LayoutRegistration, RegistryFile};
 use roundo_mod_loader::{LoadedMods, ModId, parse_mod_id};
 use roundo_toolbox::request_response_pipe::{CommandTransport, ContextualJsonRequestResponseIo};
@@ -310,6 +310,15 @@ fn response_transport_serializes_json_without_script_interpolation() {
     assert_eq!(
         script,
         "window.__roundoResolve(7, {\"message\":\"done\",\"ok\":true});"
+    );
+}
+
+#[test]
+fn client_data_transport_serializes_resource_and_snapshot() {
+    let script = data_sync_script("client.servers", &json!({"servers": []}));
+    assert_eq!(
+        script,
+        "window.__roundoSync(\"client.servers\", {\"servers\":[]});"
     );
 }
 
@@ -635,41 +644,37 @@ fn connecting_page_closes_itself_when_the_connection_has_already_completed() {
         return;
     };
 
-    assert!(connecting.contains("const connectionStatus=s.status?.status"));
-    assert!(connecting.contains("connectionStatus==='connected'"));
-    assert!(connecting.contains("command:'ui.back'"));
+    assert!(connecting.contains("const connectionStatus = snapshot?.status?.status"));
+    assert!(connecting.contains("connectionStatus === 'connected'"));
+    assert!(connecting.contains("command: 'ui.back'"));
+    assert!(connecting.contains("snapshot.server.address"));
     assert!(connecting.contains("<main hidden>"));
-    assert!(connecting.contains("setInterval(status,1000)"));
-    assert!(!connecting.contains("setInterval(status,250)"));
+    assert!(connecting.contains("roundo.subscribe('client.connection', receiveStatus)"));
+    assert!(!connecting.contains("setInterval"));
+    assert!(!connecting.contains("command: 'server.status'"));
     assert!(!connecting.contains("roundo.hud"));
-    assert!(!connecting.contains("command:'ui.open'"));
+    assert!(!connecting.contains("command: 'ui.open'"));
 }
 
 #[test]
-fn server_selection_initializes_once_without_passive_polling() {
+fn server_selection_subscribes_to_client_owned_data_without_read_polling() {
     let Some(selection) = vanilla_asset("server-selection/index.html") else {
         return;
     };
 
-    assert!(selection.contains("if (loading) return"));
-    assert!(selection.contains("finally { loading = false; }"));
-    assert!(selection.contains("if (renderedServers === nextServers) return"));
+    assert!(selection.contains("roundo.subscribe('client.servers', receiveServers)"));
     assert!(selection.contains("address: addressInput.value"));
-    assert!(selection.ends_with("load();\n</script>\n</body>\n</html>\n"));
-    assert!(!selection.contains("refresh();\nload();"));
-    assert!(!selection.contains("setInterval(load"));
-    let select_handler = selection
-        .split("function select(index)")
-        .nth(1)
-        .unwrap()
-        .split("async function refresh")
-        .next()
-        .unwrap();
-    assert!(select_handler.contains("render();"));
-    assert!(!select_handler.contains("load();"));
+    assert!(selection.contains("document.createElement('li')"));
+    assert!(
+        selection.contains(
+            "clearSelection();\n  render();\n  const result = await mutate('server.delete'"
+        )
+    );
+    assert!(!selection.contains("command: 'server.list'"));
+    assert!(!selection.contains("setInterval"));
+    assert!(!selection.contains("innerHTML"));
     assert!(!selection.contains("quic_addr"));
     assert!(!selection.contains("https"));
-    assert!(!selection.contains("setInterval(load,250)"));
 }
 
 #[test]
@@ -688,7 +693,10 @@ fn vanilla_settings_asset_consumes_command_metadata_and_keeps_edits_atomic() {
         return;
     };
 
-    assert!(settings.contains("command('bindings.list',{})"));
+    assert!(settings.contains("roundo.subscribe('client.bindings',receiveBindings)"));
+    assert!(settings.contains("roundo.subscribe('client.settings',receiveSettings)"));
+    assert!(!settings.contains("command('bindings.list',{})"));
+    assert!(!settings.contains("command('settings.show',{})"));
     assert!(settings.contains("bindingModel.supported_keys"));
     assert!(settings.contains("bindingModel.supported_actions"));
     assert!(!settings.contains("const actions=['"));
