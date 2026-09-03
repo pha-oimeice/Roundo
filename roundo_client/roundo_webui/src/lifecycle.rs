@@ -140,7 +140,7 @@ pub struct UiLifecycleManager {
     pub registry: UiRegistry,
     lifecycle_state: UiLifecycleState,
     root_generation: u64,
-    tree: roundo_lifecycle::lifecycle_tree::AnchorTree<u64, Option<String>>,
+    tree: roundo_lifecycle::AnchorTree<u64, Option<String>>,
     instances: BTreeMap<UiInstanceId, UiInstance>,
     live_counts: BTreeMap<String, u32>,
     pending: BTreeMap<u64, PendingUiOpen>,
@@ -186,7 +186,7 @@ impl UiLifecycleManager {
             registry,
             lifecycle_state: UiLifecycleState::Disconnected,
             root_generation: 1,
-            tree: roundo_lifecycle::lifecycle_tree::AnchorTree::new(0, None),
+            tree: roundo_lifecycle::AnchorTree::new(0, None),
             instances: BTreeMap::new(),
             live_counts: BTreeMap::new(),
             pending: BTreeMap::new(),
@@ -822,7 +822,7 @@ impl UiLifecycleManager {
             pending.source = UiCommandSource::Host;
             pending.parent = 0;
         }
-        self.tree = roundo_lifecycle::lifecycle_tree::AnchorTree::new(0, None);
+        self.tree = roundo_lifecycle::AnchorTree::new(0, None);
         self.lifecycle_state = state;
         Ok(destroyed)
     }

@@ -1,8 +1,0 @@
-[package]
-name = "roundo_primitive"
-version.workspace = true
-edition.workspace = true
-
-[dependencies]
-bevy.workspace = true
-roundo_toolbox.workspace = true

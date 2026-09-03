@@ -14,9 +14,7 @@ members = [
     "game/client/roundo_rendering",
     "game/common/roundo_presence",
     "game/common/roundo_portal",
-    "game/common/roundo_primitive",
     "roundo_client/roundo_webui",
-    "game/common/roundo_action",
     "game/common/roundo_mod_loader",
     "roundo_proc_macros",
 ]
