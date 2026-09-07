@@ -26,6 +26,9 @@ fn main() {
         .insert_resource(config::runtime_input_settings(&settings))
         .insert_resource(config::runtime_key_bindings(&settings))
         .insert_resource(config::runtime_presence_settings(&settings))
+        .insert_resource(roundo_local_coordinate::ClientChunkViewDistance::new(
+            settings.world.chunk_view_distance as u16,
+        ))
         .insert_resource(targeting::ClientVoxelRaycastSettings::new(
             settings.camera.voxel_raycast_distance,
         ))

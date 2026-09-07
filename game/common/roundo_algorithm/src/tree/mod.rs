@@ -9,7 +9,7 @@ pub use optimized::{
     BreadthFirstLosslessSvo, BreadthFirstLosslessSvoNode, CompressionSettings,
     CompressionThresholdContext, CompressionThresholdSchedule, DensityAggregation,
     DensityAggregationContext, NO_CHILDREN, OctreeDensity, OptimizedNode, OptimizedOctree,
-    ReadOnlyBuffer,
+    PackedSvo, PackedSvoNode, ReadOnlyBuffer,
 };
 pub use unoptimized::{Node, UnoptimizedOctree};
 

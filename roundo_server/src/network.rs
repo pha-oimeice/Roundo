@@ -240,6 +240,14 @@ impl ServerHooks for ServerHooksAdapter {
                     );
                 }
             }
+            ClientResourceMessage::SetChunkViewDistance { chunks } => {
+                let _ = self.local_coordinate_ipc.try_send(
+                    LocalCoordinateServerCommand::SetChunkViewDistance {
+                        connection_id,
+                        chunks,
+                    },
+                );
+            }
         }
     }
 }

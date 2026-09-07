@@ -35,6 +35,8 @@ impl ChunkReference {
 #[derive(Resource, Default)]
 pub struct VirtualChunkIndex {
     chunks: HashMap<VirtualChunkCoordinate, HashSet<ChunkReference>>,
+    references: HashMap<ChunkReference, Vec<VirtualChunkCoordinate>>,
+    entity_transforms: HashMap<Entity, [f32; 12]>,
 }
 
 impl VirtualChunkIndex {
@@ -44,7 +46,27 @@ impl VirtualChunkIndex {
     /// by a local coordinate remains an implementation detail of the returned
     /// references.
     pub fn chunks_in_radius(&self, x: f64, y: f64, z: f64, radius: f64) -> HashSet<ChunkReference> {
-        virtual_chunks_intersecting_radius([x, y, z], radius)
+        let center = [x, y, z];
+        if !radius.is_finite()
+            || radius < 0.0
+            || center.iter().any(|coordinate| !coordinate.is_finite())
+        {
+            return HashSet::new();
+        }
+        let edge = VIRTUAL_CHUNK_EDGE_LENGTH as f64;
+        let diameter_in_chunks = (radius * 2.0 / edge).ceil() as usize + 2;
+        let query_volume = diameter_in_chunks.saturating_pow(3);
+        if query_volume > self.chunks.len() {
+            return self
+                .chunks
+                .iter()
+                .filter(|(coordinate, _)| {
+                    virtual_chunk_intersects_radius(**coordinate, center, radius)
+                })
+                .flat_map(|(_, chunks)| chunks.iter().copied())
+                .collect();
+        }
+        virtual_chunks_intersecting_radius(center, radius)
             .into_iter()
             .filter_map(|coordinate| self.chunks.get(&coordinate))
             .flat_map(|chunks| chunks.iter().copied())
@@ -58,8 +80,31 @@ impl VirtualChunkIndex {
         self.chunks.get(&coordinate)
     }
 
-    fn clear(&mut self) {
-        self.chunks.clear();
+    fn remove_reference(&mut self, chunk_reference: ChunkReference) {
+        let Some(coordinates) = self.references.remove(&chunk_reference) else {
+            return;
+        };
+        for coordinate in coordinates {
+            if let Some(chunks) = self.chunks.get_mut(&coordinate) {
+                chunks.remove(&chunk_reference);
+                if chunks.is_empty() {
+                    self.chunks.remove(&coordinate);
+                }
+            }
+        }
+    }
+
+    fn remove_entity(&mut self, entity: Entity) {
+        let references = self
+            .references
+            .keys()
+            .filter(|reference| reference.local_coordinate_entity == entity)
+            .copied()
+            .collect::<Vec<_>>();
+        for reference in references {
+            self.remove_reference(reference);
+        }
+        self.entity_transforms.remove(&entity);
     }
 
     pub(crate) fn insert(
@@ -69,12 +114,15 @@ impl VirtualChunkIndex {
         transform: &GlobalTransform,
     ) {
         let chunk_reference = ChunkReference::new(local_coordinate_entity, local_chunk_position);
-        for virtual_coordinate in virtual_coordinates_for_chunk(local_chunk_position, transform) {
+        self.remove_reference(chunk_reference);
+        let coordinates = virtual_coordinates_for_chunk(local_chunk_position, transform);
+        for &virtual_coordinate in &coordinates {
             self.chunks
                 .entry(virtual_coordinate)
                 .or_default()
                 .insert(chunk_reference);
         }
+        self.references.insert(chunk_reference, coordinates);
     }
 }
 
@@ -82,10 +130,36 @@ pub(crate) fn rebuild_virtual_chunk_index(
     mut index: ResMut<VirtualChunkIndex>,
     local_coordinates: Query<(Entity, &LocalCoordinate, &GlobalTransform)>,
 ) {
-    index.clear();
+    let live_entities = local_coordinates
+        .iter()
+        .map(|(entity, _, _)| entity)
+        .collect::<HashSet<_>>();
+    let stale_entities = index
+        .entity_transforms
+        .keys()
+        .filter(|entity| !live_entities.contains(entity))
+        .copied()
+        .collect::<Vec<_>>();
+    for entity in stale_entities {
+        index.remove_entity(entity);
+    }
+
     for (entity, local_coordinate, transform) in &local_coordinates {
-        for local_chunk_position in local_coordinate.chunks.keys().copied() {
-            index.insert(entity, local_chunk_position, transform);
+        let transform_key = transform.affine().to_cols_array();
+        if index.entity_transforms.get(&entity) != Some(&transform_key) {
+            index.remove_entity(entity);
+            for position in local_coordinate.chunks.keys().copied() {
+                index.insert(entity, position, transform);
+            }
+            index.entity_transforms.insert(entity, transform_key);
+            continue;
+        }
+        for &position in &local_coordinate.changed_chunks {
+            let reference = ChunkReference::new(entity, position);
+            index.remove_reference(reference);
+            if local_coordinate.chunks.contains_key(&position) {
+                index.insert(entity, position, transform);
+            }
         }
     }
 }
@@ -137,6 +211,28 @@ fn virtual_coordinates_for_chunk(
     coordinates
 }
 
+fn virtual_chunk_intersects_radius(
+    coordinate: VirtualChunkCoordinate,
+    center: [f64; 3],
+    radius: f64,
+) -> bool {
+    let edge = VIRTUAL_CHUNK_EDGE_LENGTH as f64;
+    let distance_squared = (0..3)
+        .map(|axis| {
+            let minimum = coordinate[axis] as f64 * edge;
+            let maximum = minimum + edge;
+            if center[axis] < minimum {
+                (minimum - center[axis]).powi(2)
+            } else if center[axis] > maximum {
+                (center[axis] - maximum).powi(2)
+            } else {
+                0.0
+            }
+        })
+        .sum::<f64>();
+    distance_squared <= radius * radius
+}
+
 fn virtual_chunks_intersecting_radius(
     center: [f64; 3],
     radius: f64,
@@ -151,27 +247,13 @@ fn virtual_chunks_intersecting_radius(
     let edge = VIRTUAL_CHUNK_EDGE_LENGTH as f64;
     let minimum = center.map(|coordinate| ((coordinate - radius) / edge).floor() as i64);
     let maximum = center.map(|coordinate| ((coordinate + radius) / edge).floor() as i64);
-    let radius_squared = radius * radius;
     let mut virtual_chunks = Vec::new();
 
     for x in minimum[0]..=maximum[0] {
         for y in minimum[1]..=maximum[1] {
             for z in minimum[2]..=maximum[2] {
                 let coordinate = [x, y, z];
-                let distance_squared = (0..3)
-                    .map(|axis| {
-                        let chunk_minimum = coordinate[axis] as f64 * edge;
-                        let chunk_maximum = chunk_minimum + edge;
-                        if center[axis] < chunk_minimum {
-                            (chunk_minimum - center[axis]).powi(2)
-                        } else if center[axis] > chunk_maximum {
-                            (center[axis] - chunk_maximum).powi(2)
-                        } else {
-                            0.0
-                        }
-                    })
-                    .sum::<f64>();
-                if distance_squared <= radius_squared {
+                if virtual_chunk_intersects_radius(coordinate, center, radius) {
                     virtual_chunks.push(coordinate);
                 }
             }
@@ -245,6 +327,38 @@ mod tests {
                 ChunkReference::new(second, IVec3::X),
             ])
         );
+    }
+
+    #[test]
+    fn incrementally_tracks_changed_and_removed_chunks() {
+        use bevy::prelude::{App, Update};
+        let mut coordinate = LocalCoordinate::default();
+        coordinate.mark_chunk_loaded(IVec3::ZERO);
+        let mut app = App::new();
+        app.init_resource::<VirtualChunkIndex>()
+            .add_systems(Update, rebuild_virtual_chunk_index);
+        let entity = app
+            .world_mut()
+            .spawn((coordinate, GlobalTransform::default()))
+            .id();
+        app.update();
+        assert!(
+            app.world()
+                .resource::<VirtualChunkIndex>()
+                .chunks_at([0, 0, 0])
+                .is_some()
+        );
+
+        {
+            let mut coordinate = app.world_mut().get_mut::<LocalCoordinate>(entity).unwrap();
+            coordinate.changed_chunks.clear();
+            coordinate.mark_chunk_loaded(IVec3::X);
+            coordinate.remove_chunk(IVec3::ZERO);
+        }
+        app.update();
+        let index = app.world().resource::<VirtualChunkIndex>();
+        assert!(index.chunks_at([0, 0, 0]).is_none());
+        assert!(index.chunks_at([1, 0, 0]).is_some());
     }
 
     #[test]

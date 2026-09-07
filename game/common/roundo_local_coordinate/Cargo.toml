@@ -10,7 +10,6 @@ log.workspace = true
 roundo_algorithm.workspace = true
 roundo_networking.workspace = true
 roundo_presence.workspace = true
-roundo_rendering.workspace = true
 roundo_toolbox.workspace = true
 serde.workspace = true
 [features]

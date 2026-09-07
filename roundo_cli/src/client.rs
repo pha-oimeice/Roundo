@@ -558,6 +558,14 @@ fn settings_show_output(config: &ClientConfigStore) -> SettingsShowOutput {
                 step: 0.5,
                 default: roundo_user_config::DEFAULT_JOINABLE_WORLD_RADIUS,
             },
+            SettingDisplay {
+                key: "world.chunk_view_distance".into(),
+                value: settings.world.chunk_view_distance,
+                min: roundo_user_config::MIN_CHUNK_VIEW_DISTANCE,
+                max: roundo_user_config::MAX_CHUNK_VIEW_DISTANCE,
+                step: 1.0,
+                default: roundo_user_config::DEFAULT_CHUNK_VIEW_DISTANCE,
+            },
         ],
     }
 }
@@ -1551,6 +1559,9 @@ fn dispatch_typed_command(
             }
             "world.joinable_world_radius" => {
                 config.0.settings.world.joinable_world_radius = input.value
+            }
+            "world.chunk_view_distance" => {
+                config.0.settings.world.chunk_view_distance = input.value
             }
             _ => {
                 return Err(crate::json_command::CommandError::new(

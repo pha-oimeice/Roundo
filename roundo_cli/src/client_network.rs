@@ -645,6 +645,9 @@ fn bridge_resource_ecs_events(
             LocalCoordinateClientEvent::RequestChunks(chunks) => {
                 ClientResourceMessage::RequestLocalCoordinateChunks { chunks }
             }
+            LocalCoordinateClientEvent::SetChunkViewDistance { chunks } => {
+                ClientResourceMessage::SetChunkViewDistance { chunks }
+            }
         };
         let message_kind = message.kind();
         if let Err(error) = network.send(StreamId::Stream1, message) {

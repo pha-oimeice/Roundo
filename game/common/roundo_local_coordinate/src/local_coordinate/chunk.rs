@@ -1,9 +1,9 @@
 use crate::local_coordinate::data::{
     AtomicVoxel, AtomicVoxelId, CHUNK_EDGE_LENGTH, Chunk, EMPTY_VOXEL_ID, LocalAtomicVoxelData,
-    SOLID_VOXEL_ID, VoxelTriangle,
+    SOLID_VOXEL_ID,
 };
 use crate::local_coordinate::derived_svo::SvoSource;
-use bevy::prelude::{IVec3, Vec3};
+use bevy::prelude::IVec3;
 use roundo_algorithm::tree::BreadthFirstLosslessSvo;
 use roundo_algorithm::tree::Node;
 use std::sync::Arc;
@@ -25,6 +25,7 @@ impl Chunk {
 
         if changed {
             self.octree.optimized_octree = None;
+            self.content_revision = self.content_revision.wrapping_add(1);
             let index = dense_voxel_index(local_position);
             Arc::make_mut(
                 self.primitive_voxels
@@ -66,6 +67,11 @@ impl Chunk {
 
     pub fn is_empty(&self) -> bool {
         self.solid_count == 0
+    }
+
+    /// Returns the canonical compressed view when this chunk currently has one.
+    pub fn compressed_svo(&self) -> Option<&Arc<BreadthFirstLosslessSvo<AtomicVoxel>>> {
+        self.read_only_svo.as_ref()
     }
 
     pub(crate) fn from_read_only_svo(view: Arc<BreadthFirstLosslessSvo<AtomicVoxel>>) -> Self {
@@ -123,42 +129,6 @@ impl Chunk {
             },
             |svo| SvoSource::Cached(Arc::clone(svo)),
         )
-    }
-
-    pub(crate) fn rebuild_triangles(
-        &mut self,
-        chunk_position: IVec3,
-        color_for_voxel: impl Fn(IVec3) -> [f32; 4],
-        neighbor_chunk_is_solid: impl Fn(IVec3) -> bool,
-    ) {
-        self.triangles.clear();
-
-        let chunk_origin = chunk_position * CHUNK_EDGE_LENGTH;
-        for z in 0..CHUNK_EDGE_LENGTH {
-            for y in 0..CHUNK_EDGE_LENGTH {
-                for x in 0..CHUNK_EDGE_LENGTH {
-                    let local_position = IVec3::new(x, y, z);
-                    if !self.is_solid(local_position) {
-                        continue;
-                    }
-
-                    let voxel_position = chunk_origin + local_position;
-                    let color = color_for_voxel(voxel_position);
-                    for face in FaceDirection::ALL {
-                        let neighbor_local_position = local_position + face.offset();
-                        let neighbor_is_solid = if is_local_position(neighbor_local_position) {
-                            self.is_solid(neighbor_local_position)
-                        } else {
-                            neighbor_chunk_is_solid(voxel_position + face.offset())
-                        };
-
-                        if !neighbor_is_solid {
-                            self.push_face(local_position, face, color);
-                        }
-                    }
-                }
-            }
-        }
     }
 
     fn insert_solid(&mut self, local_position: IVec3, voxel: AtomicVoxel) -> bool {
@@ -244,22 +214,6 @@ impl Chunk {
 
         removed
     }
-
-    fn push_face(&mut self, voxel_position: IVec3, face: FaceDirection, color: [f32; 4]) {
-        let corners = face.corners(voxel_position);
-        let normal = face.normal();
-
-        self.triangles.push(VoxelTriangle {
-            vertices: [corners[0], corners[1], corners[2]],
-            normal,
-            color,
-        });
-        self.triangles.push(VoxelTriangle {
-            vertices: [corners[0], corners[2], corners[3]],
-            normal,
-            color,
-        });
-    }
 }
 
 fn remove_from_node(node: &mut Node<AtomicVoxel, 8>, local_position: IVec3, depth: usize) -> bool {
@@ -314,87 +268,6 @@ fn octant_at(position: IVec3, depth: usize) -> usize {
     (((position.x >> bit) & 1)
         | (((position.y >> bit) & 1) << 1)
         | (((position.z >> bit) & 1) << 2)) as usize
-}
-
-#[derive(Clone, Copy)]
-enum FaceDirection {
-    PosX,
-    NegX,
-    PosY,
-    NegY,
-    PosZ,
-    NegZ,
-}
-
-impl FaceDirection {
-    const ALL: [Self; 6] = [
-        Self::PosX,
-        Self::NegX,
-        Self::PosY,
-        Self::NegY,
-        Self::PosZ,
-        Self::NegZ,
-    ];
-
-    fn offset(self) -> IVec3 {
-        match self {
-            Self::PosX => IVec3::X,
-            Self::NegX => IVec3::NEG_X,
-            Self::PosY => IVec3::Y,
-            Self::NegY => IVec3::NEG_Y,
-            Self::PosZ => IVec3::Z,
-            Self::NegZ => IVec3::NEG_Z,
-        }
-    }
-
-    fn normal(self) -> Vec3 {
-        self.offset().as_vec3()
-    }
-
-    fn corners(self, position: IVec3) -> [Vec3; 4] {
-        let x = position.x as f32;
-        let y = position.y as f32;
-        let z = position.z as f32;
-
-        match self {
-            Self::PosX => [
-                Vec3::new(x + 1.0, y, z),
-                Vec3::new(x + 1.0, y + 1.0, z),
-                Vec3::new(x + 1.0, y + 1.0, z + 1.0),
-                Vec3::new(x + 1.0, y, z + 1.0),
-            ],
-            Self::NegX => [
-                Vec3::new(x, y, z),
-                Vec3::new(x, y, z + 1.0),
-                Vec3::new(x, y + 1.0, z + 1.0),
-                Vec3::new(x, y + 1.0, z),
-            ],
-            Self::PosY => [
-                Vec3::new(x, y + 1.0, z),
-                Vec3::new(x, y + 1.0, z + 1.0),
-                Vec3::new(x + 1.0, y + 1.0, z + 1.0),
-                Vec3::new(x + 1.0, y + 1.0, z),
-            ],
-            Self::NegY => [
-                Vec3::new(x, y, z),
-                Vec3::new(x + 1.0, y, z),
-                Vec3::new(x + 1.0, y, z + 1.0),
-                Vec3::new(x, y, z + 1.0),
-            ],
-            Self::PosZ => [
-                Vec3::new(x, y, z + 1.0),
-                Vec3::new(x + 1.0, y, z + 1.0),
-                Vec3::new(x + 1.0, y + 1.0, z + 1.0),
-                Vec3::new(x, y + 1.0, z + 1.0),
-            ],
-            Self::NegZ => [
-                Vec3::new(x, y, z),
-                Vec3::new(x, y + 1.0, z),
-                Vec3::new(x + 1.0, y + 1.0, z),
-                Vec3::new(x + 1.0, y, z),
-            ],
-        }
-    }
 }
 
 #[cfg(test)]

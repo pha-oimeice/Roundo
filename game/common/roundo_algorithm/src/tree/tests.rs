@@ -3,6 +3,22 @@ use super::{
     Octree, OctreeError,
 };
 
+#[test]
+fn gpu_packed_svo_nodes_have_a_stable_sixteen_byte_layout() {
+    let mut source = super::UnoptimizedOctree::new(0, 0_u32);
+    source.root.children[3] = Some(Box::new(Node::new(4, 7)));
+    let svo =
+        super::BreadthFirstLosslessSvo::from_unoptimized_mapped(&source, 1, |data| *data).unwrap();
+    let packed = svo.pack_with(|data| *data);
+
+    assert_eq!(std::mem::size_of::<super::PackedSvoNode>(), 16);
+    assert_eq!(packed.nodes()[0].child_mask, 1 << 3);
+    assert_eq!(packed.nodes()[0].reserved, 1);
+    assert_eq!(packed.nodes()[1].data, 7);
+    assert_eq!(packed.nodes()[1].reserved, 1);
+    assert_eq!(packed.node_bytes().len(), packed.nodes().len() * 16);
+}
+
 fn node_ids<T>(nodes: Vec<&Node<T, 8>>) -> Vec<u32> {
     nodes.into_iter().map(|node| node.id).collect()
 }

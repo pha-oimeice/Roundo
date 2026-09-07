@@ -76,6 +76,10 @@ impl<Action> EventController<Action>
 where
     Action: ControllerAction,
 {
+    pub(crate) const fn last_accepted_sequence(&self) -> u64 {
+        self.sequence.last_accepted
+    }
+
     pub fn issue(&mut self, action: Action) -> Result<ControllerCommand<Action>, ControllerError> {
         self.sequence.issue(action)
     }

@@ -15,9 +15,8 @@ pub struct LocalCoordinateBasePlugin;
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, SystemSet)]
 pub enum LocalCoordinateSet {
     ApplyCrud,
+    RebuildIndex,
 }
-
-const MAX_CHUNK_TRIANGULATIONS_PER_COORDINATE_PER_FRAME: usize = 8;
 
 impl Plugin for LocalCoordinateBasePlugin {
     fn build(&self, app: &mut App) {
@@ -31,11 +30,17 @@ impl Plugin for LocalCoordinateBasePlugin {
                 FixedUpdate,
                 apply_crud_messages.in_set(LocalCoordinateSet::ApplyCrud),
             )
+            // Core voxel edits need their spatial index in the same fixed tick.
+            // Streaming-generated dirtiness is consumed by the variable-rate
+            // Update copy before the following core tick.
             .add_systems(
                 FixedUpdate,
                 rebuild_virtual_chunk_index.after(apply_crud_messages),
             )
-            .add_systems(Update, rebuild_dirty_chunk_triangles);
+            .add_systems(
+                Update,
+                rebuild_virtual_chunk_index.in_set(LocalCoordinateSet::RebuildIndex),
+            );
     }
 }
 
@@ -61,12 +66,5 @@ fn apply_crud_messages(
             }
             LocalCoordinateCRUDMessageEnum::Retrieve { .. } => {}
         }
-    }
-}
-
-pub(crate) fn rebuild_dirty_chunk_triangles(mut local_coordinates: Query<&mut LocalCoordinate>) {
-    for mut local_coordinate in &mut local_coordinates {
-        local_coordinate
-            .rebuild_dirty_chunks_with_limit(MAX_CHUNK_TRIANGULATIONS_PER_COORDINATE_PER_FRAME);
     }
 }

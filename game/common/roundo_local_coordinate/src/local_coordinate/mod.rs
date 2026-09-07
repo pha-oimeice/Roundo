@@ -1,4 +1,4 @@
-//! Chunked local-coordinate voxel storage and its derived mesh and collider.
+//! Chunked local-coordinate voxel storage and its derived collider.
 //!
 //! Each [`data::LocalCoordinate`] owns its chunks and fill-weighted center of
 //! mass. [`VirtualChunkIndex`] is rebuilt from those chunks in absolute space on
@@ -6,9 +6,10 @@
 //! [`VirtualChunkIndex::chunks_in_radius`]; local-coordinate ownership is kept
 //! behind that interface.
 //!
-//! Derived triangles remain chunk-local. Rendering materializes one render
-//! object per chunk, while physics materializes one child collider per non-empty
-//! chunk; the local coordinate alone owns their shared transform and rigid body.
+//! Client presentation may observe compressed chunk state through the public
+//! read-only interface; this module does not own meshes, materials, render
+//! entities, or rendering LOD.
+//! Physics privately derives one child collider per non-empty chunk.
 
 mod base;
 mod chunk;
@@ -16,7 +17,6 @@ mod client;
 pub mod data;
 mod derived_svo;
 mod geometry;
-mod mesh;
 mod pcg;
 mod physics;
 mod raycast;
@@ -29,13 +29,14 @@ mod virtual_chunk;
 
 pub use base::LocalCoordinateSet;
 pub use client::{
-    LocalCoordinateClientCommand, LocalCoordinateClientEvent, LocalCoordinateClientIpc,
-    LocalCoordinateClientPlugin, LocalCoordinateClientWorld,
+    ClientChunkViewDistance, DEFAULT_CHUNK_VIEW_DISTANCE, LocalCoordinateClientCommand,
+    LocalCoordinateClientEvent, LocalCoordinateClientIpc, LocalCoordinateClientPlugin,
+    LocalCoordinateClientWorld, MAX_CHUNK_VIEW_DISTANCE, MIN_CHUNK_VIEW_DISTANCE,
 };
 pub use data::{
     AtomicVoxel, AtomicVoxelId, EMPTY_VOXEL_ID, GLOBAL_ATOMIC_VOXEL_DATA, GlobalAtomicVoxelData,
     LocalAtomicVoxelData, LocalCoordinate, LocalCoordinateCRUDMessage,
-    LocalCoordinateCRUDMessageEnum, PositionedAtomicVoxel, SOLID_VOXEL_ID,
+    LocalCoordinateCRUDMessageEnum, LocalCoordinateIdentity, PositionedAtomicVoxel, SOLID_VOXEL_ID,
 };
 pub use raycast::{VoxelRaycastHit, VoxelRaycaster};
 pub use server::{
@@ -60,7 +61,6 @@ pub mod plugins {
     #[allow(unused_imports)]
     pub use super::{
         LocalCoordinateClientPlugin, LocalCoordinateServerPlugin, base::LocalCoordinateBasePlugin,
-        mesh::LocalCoordinateMeshPlugin, physics::LocalCoordinatePhysicsPlugin,
-        test::LocalCoordinateTestPlugin,
+        physics::LocalCoordinatePhysicsPlugin, test::LocalCoordinateTestPlugin,
     };
 }

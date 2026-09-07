@@ -1,32 +1,36 @@
+mod generation;
 mod systems;
 
-use systems::{ObservationRegion, PlayerSubscription};
+use generation::{ChunkGenerationJob, ChunkGenerationWorker};
+use systems::{GenerationPlan, ObservationRegion, PlayerSubscription};
 
 use crate::local_coordinate::{
     base::{LocalCoordinateBasePlugin, LocalCoordinateSet},
     data::LocalCoordinate,
     derived_svo::{DerivedSvoJob, DerivedSvoResult, DerivedSvoWorker},
-    pcg::replace_generated_chunk,
-    physics::LocalCoordinatePhysicsPlugin,
+    pcg::{remove_generated_chunk, replace_generated_chunk},
+    physics::{
+        LocalCoordinatePhysicsInterests, LocalCoordinatePhysicsPlugin, LocalCoordinatePhysicsSet,
+    },
     transform::LocalCoordinateTransform,
-    virtual_chunk::{VirtualChunkIndex, rebuild_virtual_chunk_index},
+    virtual_chunk::VirtualChunkIndex,
 };
 use crate::{
-    CHUNK_EDGE_LENGTH, ChunkCoordinate, ChunkId, ChunkVersion, GeneratedChunk, LocalCoordinateId,
-    SuperflatGenerator,
+    CHUNK_EDGE_LENGTH, ChunkCoordinate, ChunkId, ChunkVersion, DEFAULT_CHUNK_VIEW_DISTANCE,
+    GeneratedChunk, LocalCoordinateId, LocalCoordinateIdentity, MAX_CHUNK_VIEW_DISTANCE,
+    MIN_CHUNK_VIEW_DISTANCE, SuperflatGenerator,
 };
 use avian3d::prelude::RigidBody;
 #[cfg(test)]
 use bevy::prelude::Transform;
 use bevy::prelude::{
-    App, Commands, Component, FixedUpdate, GlobalTransform, IntoScheduleConfigs, Plugin, Query,
-    Res, ResMut, Resource, Startup, With,
+    App, Commands, Component, GlobalTransform, IntoScheduleConfigs, Plugin, Query, Res, ResMut,
+    Resource, Startup, SystemSet, Update, With,
 };
 use roundo_networking::ConnectionId;
 use roundo_networking::SerializedPayload;
 use roundo_presence::{
-    Player, PlayerId, PlayerScene, PresenceServerSet, SceneId, ServerPlayer, ServerSceneWorlds,
-    TorusSpace,
+    Player, PlayerId, PlayerScene, SceneId, ServerPlayer, ServerSceneWorlds, TorusSpace,
 };
 use roundo_toolbox::{
     CrossbeamThreadPipe, CrossbeamThreadPipeEndpointA, CrossbeamThreadPipeEndpointB, UpdateVersion,
@@ -34,10 +38,19 @@ use roundo_toolbox::{
 use std::collections::{HashMap, HashSet, VecDeque};
 
 pub const DEFAULT_PCG_LOCAL_COORDINATE_ID: LocalCoordinateId = LocalCoordinateId(1);
-pub const PLAYER_CHUNK_LOAD_RADIUS: f64 = 64.0;
 const MAX_CHUNKS_GENERATED_PER_TICK: usize = 16;
+const MAX_CHUNK_GENERATION_JOBS_IN_FLIGHT: usize = 32;
+const MAX_CHUNKS_EVICTED_PER_TICK: usize = 32;
+const PHYSICS_CHUNK_RADIUS: f64 = 4.0;
 const MAX_CHUNK_RESPONSES_PER_TICK_PER_CONNECTION: usize = 16;
 const MAX_DERIVED_SVO_RESULTS_PER_TICK: usize = 16;
+const MAX_DERIVED_SVO_JOBS_IN_FLIGHT: usize = 32;
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, SystemSet)]
+enum LocalCoordinateServerStreamingSet {
+    Prepare,
+    Commit,
+}
 
 pub type LocalCoordinateServerIpc =
     CrossbeamThreadPipeEndpointA<LocalCoordinateServerCommand, LocalCoordinateServerEvent>;
@@ -133,6 +146,10 @@ pub enum LocalCoordinateServerCommand {
         connection_id: ConnectionId,
         chunks: Vec<ChunkId>,
     },
+    SetChunkViewDistance {
+        connection_id: ConnectionId,
+        chunks: u16,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -164,9 +181,14 @@ pub enum LocalCoordinateServerEvent {
 #[derive(Resource)]
 pub struct LocalCoordinateServerWorld {
     loaded_chunks: HashMap<LocalCoordinateId, HashMap<ChunkCoordinate, GeneratedChunk>>,
+    generation_plans: HashMap<LocalCoordinateId, GenerationPlan>,
+    generation_jobs: HashSet<ChunkId>,
+    generation_worker: ChunkGenerationWorker,
     chunk_versions: HashMap<ChunkId, UpdateVersion>,
     observation_by_player: HashMap<PlayerId, ObservationRegion>,
     subscriptions: HashMap<ConnectionId, PlayerSubscription>,
+    requested_view_distances: HashMap<ConnectionId, u16>,
+    derived_svo_jobs: HashMap<(ConnectionId, ChunkId), UpdateVersion>,
     derived_svo: DerivedSvoWorker,
 }
 
@@ -174,9 +196,14 @@ impl Default for LocalCoordinateServerWorld {
     fn default() -> Self {
         Self {
             loaded_chunks: HashMap::new(),
+            generation_plans: HashMap::new(),
+            generation_jobs: HashSet::new(),
+            generation_worker: ChunkGenerationWorker::spawn(),
             chunk_versions: HashMap::new(),
             observation_by_player: HashMap::new(),
             subscriptions: HashMap::new(),
+            requested_view_distances: HashMap::new(),
+            derived_svo_jobs: HashMap::new(),
             derived_svo: DerivedSvoWorker::spawn("roundo-server-derived-svo"),
         }
     }

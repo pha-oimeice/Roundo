@@ -1,6 +1,7 @@
 use crate::local_coordinate::transform::LocalCoordinateTransform;
 use bevy::prelude::{Component, Entity, IVec3, Message, Vec3};
 use roundo_algorithm::tree::{BreadthFirstLosslessSvo, Octree};
+use roundo_networking::LocalCoordinateId;
 use roundo_toolbox::{CRUDRequest, macros::identifier};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -44,14 +45,6 @@ pub struct LocalCoordinateCRUDMessage(pub LocalCoordinateCRUDMessageEnum);
 
 pub type LocalCoordinateCRUDMessageEnum = CRUDRequest<Entity, Vec<PositionedAtomicVoxel>>;
 
-/// One chunk-local triangle derived from solid voxel primitive data.
-#[derive(Debug, Clone, Copy)]
-pub struct VoxelTriangle {
-    pub vertices: [Vec3; 3],
-    pub normal: Vec3,
-    pub color: [f32; 4],
-}
-
 /// A sparse fixed-size voxel region backed by an editable octree.
 pub struct Chunk {
     pub octree: Octree<AtomicVoxel>,
@@ -59,9 +52,9 @@ pub struct Chunk {
     pub(crate) read_only_svo: Option<Arc<BreadthFirstLosslessSvo<AtomicVoxel>>>,
     pub(crate) read_only_svo_is_authoritative: bool,
     pub local_atomic_voxel_data: HashMap<AtomicVoxelId, LocalAtomicVoxelData>,
-    pub triangles: Vec<VoxelTriangle>,
     pub solid_count: usize,
-    pub geometry_revision: u64,
+    /// Monotonic revision of this chunk's authoritative voxel contents.
+    pub content_revision: u64,
 }
 
 impl Default for Chunk {
@@ -72,14 +65,17 @@ impl Default for Chunk {
             read_only_svo: None,
             read_only_svo_is_authoritative: false,
             local_atomic_voxel_data: HashMap::new(),
-            triangles: Vec::new(),
             solid_count: 0,
-            geometry_revision: 0,
+            content_revision: 0,
         }
     }
 }
 
-/// The complete voxel state and shared derived geometry for one Bevy entity.
+/// Stable domain identity attached to a local-coordinate entity.
+#[derive(Component, Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct LocalCoordinateIdentity(pub LocalCoordinateId);
+
+/// The complete authoritative voxel state for one Bevy entity.
 #[derive(Component, Default)]
 #[require(LocalCoordinateTransform)]
 pub struct LocalCoordinate {
@@ -87,14 +83,10 @@ pub struct LocalCoordinate {
     pub chunks: HashMap<IVec3, Chunk>,
     /// Fill-weighted center of the owned chunks in local-coordinate space.
     pub center_of_mass: Vec3,
-    /// Stable per-voxel RGB values used while materializing chunk triangles.
-    pub voxel_colors: HashMap<IVec3, [f32; 4]>,
-    /// Monotonic identifier backing collision-free RGB allocation.
-    pub next_color: u128,
-    /// Chunks whose triangles must be regenerated before the next output update.
-    pub dirty_chunks: HashSet<IVec3>,
     /// Primitive chunk changes not yet observed by an owning runtime.
     pub(crate) changed_chunks: HashSet<IVec3>,
-    /// Incremented whenever one or more chunk triangle caches change.
-    pub geometry_revision: u64,
+    /// Chunk changes not yet consumed by the private physics derivation.
+    pub(crate) physics_dirty_chunks: HashSet<IVec3>,
+    /// Monotonic revision of this local coordinate's authoritative voxel contents.
+    pub content_revision: u64,
 }

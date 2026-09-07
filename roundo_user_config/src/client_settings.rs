@@ -12,6 +12,9 @@ pub const DEFAULT_VOXEL_RAYCAST_DISTANCE: f32 = 8.0;
 pub const MIN_JOINABLE_WORLD_RADIUS: f32 = 0.5;
 pub const MAX_JOINABLE_WORLD_RADIUS: f32 = 32.0;
 pub const DEFAULT_JOINABLE_WORLD_RADIUS: f32 = 4.0;
+pub const MIN_CHUNK_VIEW_DISTANCE: f32 = 1.0;
+pub const MAX_CHUNK_VIEW_DISTANCE: f32 = 512.0;
+pub const DEFAULT_CHUNK_VIEW_DISTANCE: f32 = 64.0;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -48,6 +51,13 @@ impl ClientSettingsConfig {
             MIN_JOINABLE_WORLD_RADIUS,
             MAX_JOINABLE_WORLD_RADIUS,
         );
+        self.world.chunk_view_distance = finite_clamped(
+            self.world.chunk_view_distance,
+            DEFAULT_CHUNK_VIEW_DISTANCE,
+            MIN_CHUNK_VIEW_DISTANCE,
+            MAX_CHUNK_VIEW_DISTANCE,
+        )
+        .round();
     }
 }
 
@@ -79,12 +89,15 @@ impl Default for ClientSettingsConfig {
 #[serde(default)]
 pub struct ClientWorldSettingsConfig {
     pub joinable_world_radius: f32,
+    /// Chunk-radius requested from the authoritative world streamer.
+    pub chunk_view_distance: f32,
 }
 
 impl Default for ClientWorldSettingsConfig {
     fn default() -> Self {
         Self {
             joinable_world_radius: DEFAULT_JOINABLE_WORLD_RADIUS,
+            chunk_view_distance: DEFAULT_CHUNK_VIEW_DISTANCE,
         }
     }
 }
@@ -221,6 +234,7 @@ mod tests {
         settings.camera.move_speed = -10.0;
         settings.camera.voxel_raycast_distance = 100.0;
         settings.world.joinable_world_radius = f32::INFINITY;
+        settings.world.chunk_view_distance = 63.6;
 
         settings.normalize();
 
@@ -237,5 +251,6 @@ mod tests {
             settings.world.joinable_world_radius,
             DEFAULT_JOINABLE_WORLD_RADIUS
         );
+        assert_eq!(settings.world.chunk_view_distance, 64.0);
     }
 }

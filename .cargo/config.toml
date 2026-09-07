@@ -1,10 +1,10 @@
 [alias]
-workspace-dev = "build --workspace --features dev --profile dev --color=always --message-format=json-diagnostic-rendered-ansi"
-workspace-release = "build --workspace --features release --profile release --color=always --message-format=json-diagnostic-rendered-ansi"
-server-dev = "build --package roundo_server --features dev --profile dev --color=always --message-format=json-diagnostic-rendered-ansi"
-server-release = "build --package roundo_server --features release --profile release --color=always --message-format=json-diagnostic-rendered-ansi"
-client-dev = "build --package roundo_client --features dev --profile dev --color=always --message-format=json-diagnostic-rendered-ansi"
-client-release = "build --package roundo_client --features release --profile release --color=always --message-format=json-diagnostic-rendered-ansi"
+workspace-dev = "build --workspace --features dev --profile dev --color=always"
+workspace-release = "build --workspace --features release --profile release --color=always"
+server-dev = "build --package roundo_server --features dev --profile dev --color=always"
+server-release = "build --package roundo_server --features release --profile release --color=always"
+client-dev = "build --package roundo_client --features dev --profile dev --color=always"
+client-release = "build --package roundo_client --features release --profile release --color=always"
 
 [target.x86_64-pc-windows-msvc]
 linker = "rust-lld"

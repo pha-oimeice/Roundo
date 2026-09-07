@@ -1,12 +1,7 @@
 use crate::{JoinableWorld, JoinableWorldId, Player, PlayerId, PresenceSnapshot};
 use bevy::prelude::{
-    App, Commands, Component, DetectChanges, IntoScheduleConfigs, Plugin, Quat, Query, Res, ResMut,
-    Resource, Time, Update, Vec3,
-};
-use roundo_rendering::{
-    RenderMaterial, RenderMesh, RenderObject, RenderObjectId, RenderObjects, RenderTransform,
-    issue_render_object, remove_render_object, render_object_transform, update_render_object_name,
-    update_render_object_transform,
+    App, Commands, Component, DetectChanges, Entity, IntoScheduleConfigs, Name, Plugin, Quat,
+    Query, Res, ResMut, Resource, Time, Transform, Update, Vec3,
 };
 use roundo_toolbox::{
     CrossbeamThreadPipe, CrossbeamThreadPipeEndpointA, CrossbeamThreadPipeEndpointB,
@@ -104,10 +99,11 @@ pub enum ClientPresenceCommand {
     Clear,
 }
 
+/// Domain-side description of a player marker. Rendering observes this component.
 #[derive(Component, Clone, Copy, Debug)]
 pub struct ClientPlayerMarker {
     pub player_id: PlayerId,
-    pub render_object_id: RenderObjectId,
+    pub visible: bool,
 }
 
 #[derive(Component, Clone, Copy, Debug)]
@@ -122,25 +118,24 @@ impl PlayerTranslationInterpolation {
     }
 }
 
+/// Domain-side description of a joinable world marker.
 #[derive(Component, Clone, Copy, Debug)]
 pub struct ClientJoinableWorld {
     pub world_id: JoinableWorldId,
-    pub render_object_id: RenderObjectId,
 }
 
 #[derive(Resource, Clone)]
 struct ClientPresencePipe(CrossbeamThreadPipeEndpointB<ClientPresenceCommand, ()>);
 
 #[derive(Clone, Copy)]
-struct PresenceVisual {
-    entity: bevy::prelude::Entity,
-    render_object_id: RenderObjectId,
+struct PresenceEntity {
+    entity: Entity,
 }
 
 #[derive(Resource, Default)]
 struct ClientPresenceRegistry {
-    players: HashMap<PlayerId, PresenceVisual>,
-    worlds: HashMap<JoinableWorldId, PresenceVisual>,
+    players: HashMap<PlayerId, PresenceEntity>,
+    worlds: HashMap<JoinableWorldId, PresenceEntity>,
 }
 
 fn apply_presence_commands(
@@ -150,7 +145,6 @@ fn apply_presence_commands(
     mut local_identity: ResMut<LocalPlayerIdentity>,
     mut registry: ResMut<ClientPresenceRegistry>,
     mut players: Query<&mut PlayerTranslationInterpolation>,
-    mut render_objects: ResMut<RenderObjects>,
 ) {
     while let Some(command) = pipe.0.try_receive() {
         match command {
@@ -159,12 +153,11 @@ fn apply_presence_commands(
                 &settings,
                 &mut registry,
                 &mut players,
-                &mut render_objects,
                 &mut local_identity,
                 snapshot,
             ),
             ClientPresenceCommand::Clear => {
-                clear_presence(&mut commands, &mut registry, &mut render_objects);
+                clear_presence(&mut commands, &mut registry);
                 local_identity.player_id = None;
             }
         }
@@ -176,7 +169,6 @@ fn apply_snapshot(
     settings: &ClientPresenceSettings,
     registry: &mut ClientPresenceRegistry,
     players: &mut Query<&mut PlayerTranslationInterpolation>,
-    render_objects: &mut RenderObjects,
     local_identity: &mut LocalPlayerIdentity,
     snapshot: PresenceSnapshot,
 ) {
@@ -191,7 +183,6 @@ fn apply_snapshot(
             && let Some(visual) = registry.players.remove(&player_id)
         {
             commands.entity(visual.entity).despawn();
-            remove_render_object(render_objects, visual.render_object_id);
         }
     }
 
@@ -204,32 +195,21 @@ fn apply_snapshot(
             continue;
         }
         let player_id = player.player_id;
-        let render_object_id = issue_render_object(
-            render_objects,
-            RenderObject::new(
-                RenderMesh::tetrahedron(),
-                RenderMaterial::unlit([1.0, 0.55, 0.05, 1.0]).with_perceptual_roughness(0.55),
-                RenderTransform::from_translation(Vec3::from_array(player.translation)),
-            )
-            .with_name(format!("Player {}", player_id.0)),
-        );
         let entity = commands
             .spawn((
+                Name::new(format!("Player {}", player_id.0)),
                 Player { id: player_id },
                 ClientPlayerMarker {
                     player_id,
-                    render_object_id,
+                    visible: true,
                 },
                 PlayerTranslationInterpolation::stationary(player.translation),
+                Transform::from_translation(Vec3::from_array(player.translation)),
             ))
             .id();
-        registry.players.insert(
-            player_id,
-            PresenceVisual {
-                entity,
-                render_object_id,
-            },
-        );
+        registry
+            .players
+            .insert(player_id, PresenceEntity { entity });
     }
 
     let desired_worlds = snapshot
@@ -242,107 +222,68 @@ fn apply_snapshot(
             && let Some(visual) = registry.worlds.remove(&world_id)
         {
             commands.entity(visual.entity).despawn();
-            remove_render_object(render_objects, visual.render_object_id);
         }
     }
 
     for world in snapshot.joinable_worlds {
+        let transform = Transform::from_translation(Vec3::from_array(world.translation))
+            .with_scale(Vec3::splat(settings.joinable_world_radius()));
         if let Some(visual) = registry.worlds.get(&world.world_id).copied() {
-            update_render_object_transform(
-                render_objects,
-                visual.render_object_id,
-                RenderTransform::from_translation(Vec3::from_array(world.translation))
-                    .with_scale(Vec3::splat(settings.joinable_world_radius())),
-            );
-            update_render_object_name(render_objects, visual.render_object_id, world.name.clone());
-            commands.entity(visual.entity).insert(JoinableWorld {
-                id: world.world_id,
-                name: world.name,
-            });
+            commands.entity(visual.entity).insert((
+                Name::new(world.name.clone()),
+                JoinableWorld {
+                    id: world.world_id,
+                    name: world.name,
+                },
+                transform,
+            ));
             continue;
         }
         let world_id = world.world_id;
-        let render_object_id = issue_render_object(
-            render_objects,
-            RenderObject::new(
-                RenderMesh::uv_sphere(1.0, 32, 18),
-                RenderMaterial::unlit([0.12, 0.35, 0.95, 1.0])
-                    .with_perceptual_roughness(0.7)
-                    .with_metallic(0.1),
-                RenderTransform::from_translation(Vec3::from_array(world.translation))
-                    .with_scale(Vec3::splat(settings.joinable_world_radius())),
-            )
-            .with_name(world.name.clone()),
-        );
         let entity = commands
             .spawn((
+                Name::new(world.name.clone()),
                 JoinableWorld {
                     id: world_id,
                     name: world.name,
                 },
-                ClientJoinableWorld {
-                    world_id,
-                    render_object_id,
-                },
+                ClientJoinableWorld { world_id },
+                transform,
             ))
             .id();
-        registry.worlds.insert(
-            world_id,
-            PresenceVisual {
-                entity,
-                render_object_id,
-            },
-        );
+        registry.worlds.insert(world_id, PresenceEntity { entity });
     }
 }
 
-fn clear_presence(
-    commands: &mut Commands,
-    registry: &mut ClientPresenceRegistry,
-    render_objects: &mut RenderObjects,
-) {
+fn clear_presence(commands: &mut Commands, registry: &mut ClientPresenceRegistry) {
     for visual in registry.players.drain().map(|(_, visual)| visual) {
         commands.entity(visual.entity).despawn();
-        remove_render_object(render_objects, visual.render_object_id);
     }
     for visual in registry.worlds.drain().map(|(_, visual)| visual) {
         commands.entity(visual.entity).despawn();
-        remove_render_object(render_objects, visual.render_object_id);
     }
 }
 
 fn animate_player_markers(
     time: Res<Time>,
-    mut players: Query<(&ClientPlayerMarker, &mut PlayerTranslationInterpolation)>,
-    mut render_objects: ResMut<RenderObjects>,
+    mut players: Query<(&mut PlayerTranslationInterpolation, &mut Transform)>,
 ) {
-    for (player, mut interpolation) in &mut players {
-        let Some(mut transform) = render_object_transform(&render_objects, player.render_object_id)
-        else {
-            continue;
-        };
+    for (mut interpolation, mut transform) in &mut players {
         transform.translation = Vec3::from_array(interpolation.0.advance(time.delta_secs()));
         transform.rotation *= Quat::from_rotation_y(time.delta_secs() * 1.4);
         transform.rotation *= Quat::from_rotation_x(time.delta_secs() * 0.7);
-        update_render_object_transform(&mut render_objects, player.render_object_id, transform);
     }
 }
 
 fn sync_joinable_world_radius(
     settings: Res<ClientPresenceSettings>,
-    worlds: Query<&ClientJoinableWorld>,
-    mut render_objects: ResMut<RenderObjects>,
+    mut worlds: Query<&mut Transform, bevy::prelude::With<ClientJoinableWorld>>,
 ) {
     if !settings.is_changed() {
         return;
     }
-    for world in &worlds {
-        let Some(mut transform) = render_object_transform(&render_objects, world.render_object_id)
-        else {
-            continue;
-        };
+    for mut transform in &mut worlds {
         transform.scale = Vec3::splat(settings.joinable_world_radius());
-        update_render_object_transform(&mut render_objects, world.render_object_id, transform);
     }
 }
 
@@ -363,28 +304,20 @@ mod tests {
     fn player_marker_translation_advances_between_network_points() {
         let mut app = App::new();
         app.init_resource::<Time>()
-            .init_resource::<RenderObjects>()
             .add_systems(Update, animate_player_markers);
-        let render_object_id = {
-            let mut render_objects = app.world_mut().resource_mut::<RenderObjects>();
-            issue_render_object(
-                &mut render_objects,
-                RenderObject::new(
-                    RenderMesh::tetrahedron(),
-                    RenderMaterial::unlit([1.0; 4]),
-                    RenderTransform::from_translation(Vec3::new(2.0, 0.0, 0.0)),
-                ),
-            )
-        };
         let mut interpolation = PlayerTranslationInterpolation::stationary([2.0, 0.0, 0.0]);
         interpolation.0.retarget([2.0, 0.0, 0.0], [12.0, 0.0, 0.0]);
-        app.world_mut().spawn((
-            ClientPlayerMarker {
-                player_id: PlayerId(1),
-                render_object_id,
-            },
-            interpolation,
-        ));
+        let entity = app
+            .world_mut()
+            .spawn((
+                ClientPlayerMarker {
+                    player_id: PlayerId(1),
+                    visible: true,
+                },
+                interpolation,
+                Transform::from_xyz(2.0, 0.0, 0.0),
+            ))
+            .id();
 
         app.world_mut()
             .resource_mut::<Time>()
@@ -394,9 +327,7 @@ mod tests {
         app.update();
 
         assert_eq!(
-            render_object_transform(app.world().resource(), render_object_id)
-                .unwrap()
-                .translation,
+            app.world().get::<Transform>(entity).unwrap().translation,
             Vec3::new(7.0, 0.0, 0.0)
         );
     }

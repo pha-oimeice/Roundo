@@ -7,5 +7,4 @@ edition.workspace = true
 bevy.workspace = true
 roundo_marionette.workspace = true
 roundo_networking.workspace = true
-roundo_rendering.workspace = true
 roundo_toolbox.workspace = true

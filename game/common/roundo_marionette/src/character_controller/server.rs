@@ -4,7 +4,7 @@ use super::{
         BlockInteractionMessage, DestroyBlockControllerMessage, PlaceBlockControllerMessage,
         accept_block_interactions,
     },
-    movement::{Movement3DMessage, apply_movement},
+    movement::{Movement3DAction, Movement3DMessage, apply_movement},
     rotation::{RotationSyncMessage, apply_rotation_sync},
 };
 use bevy::prelude::{
@@ -15,6 +15,9 @@ pub use roundo_networking::ConnectionId;
 use roundo_toolbox::{
     CrossbeamThreadPipe, CrossbeamThreadPipeEndpointA, CrossbeamThreadPipeEndpointB,
 };
+use std::collections::HashMap;
+
+const MAX_CONTROL_COMMANDS_PER_TICK: usize = 4096;
 
 pub type ServerMarionetteIpc = CrossbeamThreadPipeEndpointA<ServerMarionetteCommand, ()>;
 
@@ -102,28 +105,56 @@ struct ServerPipeResource(CrossbeamThreadPipeEndpointB<ServerMarionetteCommand, 
 fn process_controller_commands(
     pipe: Res<ServerPipeResource>,
     targets: Query<(Entity, &NetworkControllerTarget)>,
+    movements: Query<&super::Movement3D>,
     mut movement_messages: MessageWriter<Movement3DMessage>,
     mut rotation_messages: MessageWriter<RotationSyncMessage>,
     mut destroy_block_messages: MessageWriter<DestroyBlockControllerMessage>,
     mut place_block_messages: MessageWriter<PlaceBlockControllerMessage>,
 ) {
-    while let Some(ServerMarionetteCommand::UsePlayerController {
-        connection_id,
-        command,
-    }) = pipe.0.try_receive()
-    {
-        let Some((entity, _)) = targets
-            .iter()
-            .find(|(_, target)| target.connection_id == connection_id)
+    let targets = targets
+        .iter()
+        .map(|(entity, target)| (target.connection_id, entity))
+        .collect::<HashMap<_, _>>();
+    let mut movement_by_entity =
+        HashMap::<Entity, roundo_networking::protocol::ControllerCommand<Movement3DAction>>::new();
+    let mut rotation_by_entity = HashMap::new();
+
+    for _ in 0..MAX_CONTROL_COMMANDS_PER_TICK {
+        let Some(ServerMarionetteCommand::UsePlayerController {
+            connection_id,
+            command,
+        }) = pipe.0.try_receive()
         else {
+            break;
+        };
+        let Some(&entity) = targets.get(&connection_id) else {
             continue;
         };
         match command {
             PlayerControllerCommand::Movement3D(command) => {
-                movement_messages.write(Movement3DMessage { entity, command });
+                let accepted_movement_sequence = movements
+                    .get(entity)
+                    .map_or(0, super::Movement3D::last_accepted_sequence);
+                if command.sequence <= accepted_movement_sequence {
+                    continue;
+                }
+                movement_by_entity
+                    .entry(entity)
+                    .and_modify(
+                        |pending: &mut roundo_networking::protocol::ControllerCommand<_>| {
+                            if command.sequence > pending.sequence {
+                                for axis in 0..3 {
+                                    pending.action.translation_delta[axis] +=
+                                        command.action.translation_delta[axis];
+                                }
+                                pending.sequence = command.sequence;
+                            }
+                        },
+                    )
+                    .or_insert(command);
             }
             PlayerControllerCommand::SyncRotation(sync) => {
-                rotation_messages.write(RotationSyncMessage { entity, sync });
+                rotation_by_entity.insert(entity, sync);
             }
             PlayerControllerCommand::DestroyBlock(command) => {
                 destroy_block_messages.write(DestroyBlockControllerMessage { entity, command });
@@ -132,6 +163,13 @@ fn process_controller_commands(
                 place_block_messages.write(PlaceBlockControllerMessage { entity, command });
             }
         }
+    }
+
+    for (entity, command) in movement_by_entity {
+        movement_messages.write(Movement3DMessage { entity, command });
+    }
+    for (entity, sync) in rotation_by_entity {
+        rotation_messages.write(RotationSyncMessage { entity, sync });
     }
 }
 
@@ -212,6 +250,54 @@ mod tests {
                 .abs_diff_eq(expected, f32::EPSILON)
         );
         assert!(app.world().get::<Movement3D>(entity).is_none());
+    }
+
+    #[test]
+    fn queued_movement_is_compacted_before_simulation() {
+        let plugin = MarionetteServerPlugin::new();
+        let ipc = plugin.ipc();
+        let mut app = App::new();
+        app.init_resource::<Time<bevy::prelude::Fixed>>()
+            .add_plugins(plugin);
+        let entity = app
+            .world_mut()
+            .spawn((
+                Movement3D::default(),
+                NetworkControllerTarget {
+                    connection_id: ConnectionId(10),
+                },
+                Transform::default(),
+            ))
+            .id();
+
+        for sequence in 1..=100 {
+            ipc.try_send(ServerMarionetteCommand::UsePlayerController {
+                connection_id: ConnectionId(10),
+                command: PlayerControllerCommand::Movement3D(ControllerCommand {
+                    sequence,
+                    action: Movement3DAction {
+                        translation_delta: [0.01, 0.0, 0.0],
+                    },
+                }),
+            })
+            .unwrap();
+        }
+        app.world_mut().run_schedule(FixedUpdate);
+
+        assert!(
+            app.world()
+                .get::<Transform>(entity)
+                .unwrap()
+                .translation
+                .abs_diff_eq(Vec3::X, 0.0001)
+        );
+        assert_eq!(
+            app.world()
+                .get::<Movement3D>(entity)
+                .unwrap()
+                .last_accepted_sequence(),
+            100
+        );
     }
 
     #[test]

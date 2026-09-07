@@ -4,7 +4,7 @@ use crate::local_coordinate::data::{
 use bevy::prelude::{IVec3, Vec3};
 
 impl LocalCoordinate {
-    /// Applies a voxel delta and marks every affected chunk mesh dirty.
+    /// Applies one authoritative voxel delta.
     pub fn apply_voxel(&mut self, voxel: PositionedAtomicVoxel) -> bool {
         let changed = self.apply_voxel_without_center_of_mass(voxel);
         if changed {
@@ -32,18 +32,13 @@ impl LocalCoordinate {
             return false;
         }
 
-        if voxel.voxel == SOLID_VOXEL_ID {
-            self.assign_color(voxel.position);
-        } else {
-            self.voxel_colors.remove(&voxel.position);
-        }
-
-        self.mark_dirty(chunk_position, local_position);
         self.changed_chunks.insert(chunk_position);
+        self.physics_dirty_chunks.insert(chunk_position);
+        self.content_revision = self.content_revision.wrapping_add(1);
         true
     }
 
-    /// Applies several updates while coalescing derived work through the dirty-chunk set.
+    /// Applies several authoritative voxel updates and rebuilds aggregate state once.
     pub fn apply_voxels(
         &mut self,
         voxels: impl IntoIterator<Item = PositionedAtomicVoxel>,
@@ -74,8 +69,9 @@ impl LocalCoordinate {
         }
 
         self.chunks.insert(chunk_position, Chunk::default());
-        self.dirty_chunks.insert(chunk_position);
         self.changed_chunks.insert(chunk_position);
+        self.physics_dirty_chunks.insert(chunk_position);
+        self.content_revision = self.content_revision.wrapping_add(1);
         true
     }
 
@@ -85,79 +81,24 @@ impl LocalCoordinate {
             return false;
         };
 
-        self.voxel_colors
-            .retain(|position, _| split_position(*position).0 != chunk_position);
-        self.dirty_chunks.insert(chunk_position);
-        self.mark_loaded_neighbors_dirty(chunk_position);
         self.changed_chunks.insert(chunk_position);
+        self.physics_dirty_chunks.insert(chunk_position);
+        self.content_revision = self.content_revision.wrapping_add(1);
         self.rebuild_center_of_mass();
         true
     }
 
-    pub(crate) fn replace_chunk(&mut self, chunk_position: IVec3, chunk: Chunk) {
-        self.remove_chunk(chunk_position);
+    pub(crate) fn replace_chunk(&mut self, chunk_position: IVec3, mut chunk: Chunk) {
+        let next_chunk_revision = self
+            .chunks
+            .get(&chunk_position)
+            .map_or(1, |current| current.content_revision.wrapping_add(1));
+        chunk.content_revision = next_chunk_revision;
         self.chunks.insert(chunk_position, chunk);
-        self.dirty_chunks.insert(chunk_position);
-        self.mark_loaded_neighbors_dirty(chunk_position);
         self.changed_chunks.insert(chunk_position);
-        let chunk_origin = chunk_position * CHUNK_EDGE_LENGTH;
-        for z in 0..CHUNK_EDGE_LENGTH {
-            for y in 0..CHUNK_EDGE_LENGTH {
-                for x in 0..CHUNK_EDGE_LENGTH {
-                    let local_position = IVec3::new(x, y, z);
-                    if self.chunks[&chunk_position].is_solid(local_position) {
-                        self.assign_color(chunk_origin + local_position);
-                    }
-                }
-            }
-        }
+        self.physics_dirty_chunks.insert(chunk_position);
+        self.content_revision = self.content_revision.wrapping_add(1);
         self.rebuild_center_of_mass();
-    }
-
-    pub(crate) fn rebuild_dirty_chunks(&mut self) -> bool {
-        self.rebuild_dirty_chunks_with_limit(usize::MAX) > 0
-    }
-
-    pub(crate) fn rebuild_dirty_chunks_with_limit(&mut self, limit: usize) -> usize {
-        if self.dirty_chunks.is_empty() || limit == 0 {
-            return 0;
-        }
-
-        let mut dirty_positions = self.dirty_chunks.iter().copied().collect::<Vec<_>>();
-        dirty_positions.sort_by_key(|position| (position.x, position.y, position.z));
-        dirty_positions.truncate(limit);
-        for position in &dirty_positions {
-            self.dirty_chunks.remove(position);
-        }
-        if dirty_positions.is_empty() {
-            return 0;
-        }
-        let processed_count = dirty_positions.len();
-
-        let next_revision = self.geometry_revision.wrapping_add(1);
-        let (chunks, voxel_colors) = (&mut self.chunks, &self.voxel_colors);
-
-        for chunk_position in dirty_positions {
-            let Some(mut chunk) = chunks.remove(&chunk_position) else {
-                continue;
-            };
-            chunk.rebuild_triangles(
-                chunk_position,
-                |position| voxel_colors.get(&position).copied().unwrap_or([1.0; 4]),
-                |position| {
-                    let (neighbor_chunk_position, neighbor_local_position) =
-                        split_position(position);
-                    chunks
-                        .get(&neighbor_chunk_position)
-                        .is_some_and(|neighbor| neighbor.is_solid(neighbor_local_position))
-                },
-            );
-            chunk.geometry_revision = next_revision;
-            chunks.insert(chunk_position, chunk);
-        }
-
-        self.geometry_revision = next_revision;
-        processed_count
     }
 
     fn rebuild_center_of_mass(&mut self) {
@@ -184,114 +125,6 @@ impl LocalCoordinate {
             Vec3::ZERO
         };
     }
-
-    fn assign_color(&mut self, voxel_position: IVec3) {
-        if self.voxel_colors.contains_key(&voxel_position) {
-            return;
-        }
-
-        const MAX_UNIQUE_RGB_COLORS: u128 = 1_u128 << 72;
-        assert!(
-            self.next_color < MAX_UNIQUE_RGB_COLORS,
-            "local coordinate exhausted its unique RGB color space"
-        );
-
-        let color_id = self.next_color;
-        self.next_color += 1;
-        self.voxel_colors
-            .insert(voxel_position, unique_color(color_id));
-    }
-
-    fn mark_dirty(&mut self, chunk_position: IVec3, local_position: IVec3) {
-        self.dirty_chunks.insert(chunk_position);
-
-        if local_position.x == 0 {
-            self.mark_solid_neighbor_dirty(
-                chunk_position + IVec3::NEG_X,
-                IVec3::new(CHUNK_EDGE_LENGTH - 1, local_position.y, local_position.z),
-            );
-        }
-        if local_position.x == CHUNK_EDGE_LENGTH - 1 {
-            self.mark_solid_neighbor_dirty(
-                chunk_position + IVec3::X,
-                IVec3::new(0, local_position.y, local_position.z),
-            );
-        }
-        if local_position.y == 0 {
-            self.mark_solid_neighbor_dirty(
-                chunk_position + IVec3::NEG_Y,
-                IVec3::new(local_position.x, CHUNK_EDGE_LENGTH - 1, local_position.z),
-            );
-        }
-        if local_position.y == CHUNK_EDGE_LENGTH - 1 {
-            self.mark_solid_neighbor_dirty(
-                chunk_position + IVec3::Y,
-                IVec3::new(local_position.x, 0, local_position.z),
-            );
-        }
-        if local_position.z == 0 {
-            self.mark_solid_neighbor_dirty(
-                chunk_position + IVec3::NEG_Z,
-                IVec3::new(local_position.x, local_position.y, CHUNK_EDGE_LENGTH - 1),
-            );
-        }
-        if local_position.z == CHUNK_EDGE_LENGTH - 1 {
-            self.mark_solid_neighbor_dirty(
-                chunk_position + IVec3::Z,
-                IVec3::new(local_position.x, local_position.y, 0),
-            );
-        }
-    }
-
-    fn mark_solid_neighbor_dirty(&mut self, chunk_position: IVec3, local_position: IVec3) {
-        if self
-            .chunks
-            .get(&chunk_position)
-            .is_some_and(|chunk| chunk.is_solid(local_position))
-        {
-            self.dirty_chunks.insert(chunk_position);
-        }
-    }
-
-    fn mark_loaded_neighbors_dirty(&mut self, chunk_position: IVec3) {
-        for offset in [
-            IVec3::X,
-            IVec3::NEG_X,
-            IVec3::Y,
-            IVec3::NEG_Y,
-            IVec3::Z,
-            IVec3::NEG_Z,
-        ] {
-            self.mark_loaded_chunk_dirty(chunk_position + offset);
-        }
-    }
-
-    fn mark_loaded_chunk_dirty(&mut self, chunk_position: IVec3) {
-        if self.chunks.contains_key(&chunk_position) {
-            self.dirty_chunks.insert(chunk_position);
-        }
-    }
-}
-
-fn unique_color(color_id: u128) -> [f32; 4] {
-    const RGB_MASK: u128 = (1_u128 << 24) - 1;
-    const RGB_ID_MASK: u128 = (1_u128 << 72) - 1;
-    const RGB_SCALE: f32 = 16_777_216.0;
-    const COLOR_PERMUTATION: u128 = 0x9e37_79b9_7f4a_7c15;
-    const COLOR_OFFSET: u128 = 0x4cf5_ad43_2745_937f;
-
-    // Odd multiplication and addition are bijective modulo 2^72, so RGB stays unique.
-    let shuffled_id = color_id
-        .wrapping_mul(COLOR_PERMUTATION)
-        .wrapping_add(COLOR_OFFSET)
-        & RGB_ID_MASK;
-
-    [
-        (shuffled_id & RGB_MASK) as f32 / RGB_SCALE,
-        ((shuffled_id >> 24) & RGB_MASK) as f32 / RGB_SCALE,
-        ((shuffled_id >> 48) & RGB_MASK) as f32 / RGB_SCALE,
-        1.0,
-    ]
 }
 
 fn split_position(position: IVec3) -> (IVec3, IVec3) {

@@ -64,6 +64,7 @@ pub fn save_settings(
         },
         world: ClientWorldSettingsConfig {
             joinable_world_radius: presence.joinable_world_radius(),
+            chunk_view_distance: settings().world.chunk_view_distance,
         },
         key_bindings: bindings
             .iter()

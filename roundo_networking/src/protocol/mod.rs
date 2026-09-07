@@ -225,12 +225,14 @@ impl From<ClientGameMessage> for ClientMessage {
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub enum ClientResourceMessage {
     RequestLocalCoordinateChunks { chunks: Vec<ChunkId> },
+    SetChunkViewDistance { chunks: u16 },
 }
 
 impl ClientResourceMessage {
     pub const fn kind(&self) -> &'static str {
         match self {
             Self::RequestLocalCoordinateChunks { .. } => "RequestLocalCoordinateChunks",
+            Self::SetChunkViewDistance { .. } => "SetChunkViewDistance",
         }
     }
 }

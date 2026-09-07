@@ -73,16 +73,10 @@ fn bind_player_controller_to_debug_camera(
 fn sync_local_player_marker_visibility(
     controller: Res<ClientPlayerController>,
     local_identity: Res<LocalPlayerIdentity>,
-    players: Query<(&Player, &ClientPlayerMarker)>,
-    mut render_objects: ResMut<roundo_rendering::RenderObjects>,
+    mut players: Query<(&Player, &mut ClientPlayerMarker)>,
 ) {
-    for (player, marker) in &players {
-        let visible =
+    for (player, mut marker) in &mut players {
+        marker.visible =
             Some(player.id) != local_identity.player_id() || controller.is_spirit_walking();
-        roundo_rendering::update_render_object_visibility(
-            &mut render_objects,
-            marker.render_object_id,
-            visible,
-        );
     }
 }

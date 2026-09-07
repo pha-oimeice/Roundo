@@ -259,12 +259,17 @@ fn sync_runtime_settings(
     mut input: ResMut<ClientMarionetteInputSettings>,
     mut bindings: ResMut<ClientKeyBindings>,
     mut presence: ResMut<ClientPresenceSettings>,
+    mut chunk_view_distance: ResMut<roundo_local_coordinate::ClientChunkViewDistance>,
     mut targeting: ResMut<ClientVoxelRaycastSettings>,
 ) {
     input.mouse_sensitivity = config.0.settings.controls.mouse_sensitivity;
     input.camera_move_speed = config.0.settings.camera.move_speed;
     *bindings = crate::config::runtime_key_bindings(&config.0.settings);
     presence.set_joinable_world_radius(config.0.settings.world.joinable_world_radius);
+    let configured_view_distance = config.0.settings.world.chunk_view_distance as u16;
+    if chunk_view_distance.chunks() != configured_view_distance {
+        chunk_view_distance.set_chunks(configured_view_distance);
+    }
     targeting.set_max_distance(config.0.settings.camera.voxel_raycast_distance);
 }
 

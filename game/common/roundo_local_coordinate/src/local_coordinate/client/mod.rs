@@ -3,18 +3,20 @@ mod systems;
 use systems::{CachedClientChunk, PendingChunkUpdate};
 
 use crate::local_coordinate::{
-    base::{LocalCoordinateBasePlugin, rebuild_dirty_chunk_triangles},
+    base::{LocalCoordinateBasePlugin, LocalCoordinateSet},
     data::LocalCoordinate,
     derived_svo::{DerivedSvoJob, DerivedSvoResult, DerivedSvoWorker},
-    mesh::LocalCoordinateMeshPlugin,
     pcg::{remove_generated_chunk, replace_read_only_chunk},
     transform::LocalCoordinateTransform,
-    virtual_chunk::rebuild_virtual_chunk_index,
 };
-use crate::{ChunkCoordinate, ChunkId, ChunkVersion, LocalCoordinateId, VoxelChunkSvo};
+use crate::{
+    ChunkCoordinate, ChunkId, ChunkVersion, LocalCoordinateId, LocalCoordinateIdentity,
+    VoxelChunkSvo,
+};
 use avian3d::prelude::RigidBody;
 use bevy::prelude::{
-    App, Commands, Entity, IntoScheduleConfigs, Plugin, Query, Res, ResMut, Resource, Update,
+    App, Commands, DetectChanges, Entity, IntoScheduleConfigs, Plugin, Query, Res, ResMut,
+    Resource, Update,
 };
 use roundo_networking::SerializedPayload;
 use roundo_toolbox::{
@@ -25,6 +27,32 @@ use std::sync::Arc;
 
 const MAX_COMMANDS_INGESTED_PER_FRAME: usize = 32;
 const MAX_CHUNK_UPDATES_APPLIED_PER_FRAME: usize = 16;
+pub const MIN_CHUNK_VIEW_DISTANCE: u16 = 1;
+pub const MAX_CHUNK_VIEW_DISTANCE: u16 = 512;
+pub const DEFAULT_CHUNK_VIEW_DISTANCE: u16 = 64;
+
+#[derive(Clone, Copy, Debug, Resource)]
+pub struct ClientChunkViewDistance(u16);
+
+impl ClientChunkViewDistance {
+    pub fn new(chunks: u16) -> Self {
+        Self(chunks.clamp(MIN_CHUNK_VIEW_DISTANCE, MAX_CHUNK_VIEW_DISTANCE))
+    }
+
+    pub const fn chunks(self) -> u16 {
+        self.0
+    }
+
+    pub fn set_chunks(&mut self, chunks: u16) {
+        self.0 = chunks.clamp(MIN_CHUNK_VIEW_DISTANCE, MAX_CHUNK_VIEW_DISTANCE);
+    }
+}
+
+impl Default for ClientChunkViewDistance {
+    fn default() -> Self {
+        Self(DEFAULT_CHUNK_VIEW_DISTANCE)
+    }
+}
 
 pub type LocalCoordinateClientIpc =
     CrossbeamThreadPipeEndpointA<LocalCoordinateClientCommand, LocalCoordinateClientEvent>;
@@ -72,6 +100,7 @@ pub enum LocalCoordinateClientCommand {
 #[derive(Clone, Debug)]
 pub enum LocalCoordinateClientEvent {
     RequestChunks(Vec<ChunkId>),
+    SetChunkViewDistance { chunks: u16 },
 }
 
 #[derive(Resource)]

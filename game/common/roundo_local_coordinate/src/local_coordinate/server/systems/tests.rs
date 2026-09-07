@@ -1,8 +1,180 @@
 use super::*;
 use crate::VoxelChunkSvo;
 use crate::local_coordinate::data::{Chunk, PositionedAtomicVoxel, SOLID_VOXEL_ID};
-use bevy::prelude::{IVec3, Schedule, Update, Vec3, World};
+use bevy::prelude::{FixedUpdate, IVec3, Schedule, Update, Vec3, World};
 use roundo_presence::DEFAULT_S0_ROOM_SIZE;
+
+#[test]
+fn core_fixed_tick_does_not_run_world_streaming() {
+    let plugin = LocalCoordinateServerPlugin::new();
+    let commands = plugin.ipc();
+    let connection_id = ConnectionId(99);
+    let player_id = PlayerId(99);
+    let mut app = App::new();
+    app.insert_resource(ServerSceneWorlds::default())
+        .add_plugins(plugin);
+    app.world_mut().run_schedule(Startup);
+    app.world_mut().spawn((
+        Player { id: player_id },
+        PlayerScene {
+            scene_id: SceneId::S1,
+        },
+        ServerPlayer,
+        GlobalTransform::default(),
+    ));
+    commands
+        .try_send(LocalCoordinateServerCommand::SubscribePlayer {
+            connection_id,
+            player_id,
+        })
+        .unwrap();
+
+    app.world_mut().run_schedule(FixedUpdate);
+    assert!(
+        app.world()
+            .resource::<LocalCoordinateServerWorld>()
+            .subscriptions
+            .is_empty(),
+        "world streaming ran inside the core FixedUpdate schedule"
+    );
+
+    app.world_mut().run_schedule(Update);
+    assert!(
+        app.world()
+            .resource::<LocalCoordinateServerWorld>()
+            .subscriptions
+            .contains_key(&connection_id)
+    );
+}
+
+#[test]
+fn chunk_view_distance_is_clamped_and_retained_before_subscription() {
+    let transport = CrossbeamThreadPipe::new();
+    let commands = transport.endpoint_a();
+    let connection_id = ConnectionId(11);
+    let mut app = App::new();
+    app.insert_resource(LocalCoordinateServerPipe(transport.endpoint_b()))
+        .insert_resource(ServerSceneWorlds::default())
+        .init_resource::<LocalCoordinateServerWorld>()
+        .init_resource::<LocalCoordinatePhysicsInterests>()
+        .add_systems(Update, prepare_player_chunks);
+    commands
+        .try_send(LocalCoordinateServerCommand::SetChunkViewDistance {
+            connection_id,
+            chunks: u16::MAX,
+        })
+        .unwrap();
+    app.update();
+    assert_eq!(
+        app.world()
+            .resource::<LocalCoordinateServerWorld>()
+            .requested_view_distances[&connection_id],
+        MAX_CHUNK_VIEW_DISTANCE
+    );
+}
+
+#[test]
+fn moving_observation_does_not_accumulate_pristine_generated_chunks() {
+    let transport = CrossbeamThreadPipe::new();
+    let commands = transport.endpoint_a();
+    let connection_id = ConnectionId(12);
+    let player_id = PlayerId(12);
+    let mut app = App::new();
+    app.insert_resource(LocalCoordinateServerPipe(transport.endpoint_b()))
+        .insert_resource(ServerSceneWorlds::default())
+        .init_resource::<LocalCoordinateServerWorld>()
+        .init_resource::<LocalCoordinatePhysicsInterests>()
+        .add_systems(
+            Update,
+            (
+                prepare_player_chunks,
+                commit_generated_chunks,
+                update_authoritative_chunk_versions,
+            )
+                .chain(),
+        );
+    let player = app
+        .world_mut()
+        .spawn((
+            Player { id: player_id },
+            PlayerScene {
+                scene_id: SceneId::S1,
+            },
+            ServerPlayer,
+            GlobalTransform::default(),
+        ))
+        .id();
+    app.world_mut().spawn((
+        PcgLocalCoordinate::new(DEFAULT_PCG_LOCAL_COORDINATE_ID, SuperflatGenerator::new(0)),
+        GlobalTransform::default(),
+        LocalCoordinate::default(),
+    ));
+    commands
+        .try_send(LocalCoordinateServerCommand::SetChunkViewDistance {
+            connection_id,
+            chunks: 1,
+        })
+        .unwrap();
+    commands
+        .try_send(LocalCoordinateServerCommand::SubscribePlayer {
+            connection_id,
+            player_id,
+        })
+        .unwrap();
+    for _ in 0..100 {
+        app.update();
+        if app
+            .world()
+            .resource::<LocalCoordinateServerWorld>()
+            .loaded_chunk_count(DEFAULT_PCG_LOCAL_COORDINATE_ID)
+            >= 4
+        {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    let initial_count = app
+        .world()
+        .resource::<LocalCoordinateServerWorld>()
+        .loaded_chunks[&DEFAULT_PCG_LOCAL_COORDINATE_ID]
+        .len();
+
+    *app.world_mut()
+        .entity_mut(player)
+        .get_mut::<GlobalTransform>()
+        .unwrap() = GlobalTransform::from_translation(Vec3::new(160.0, 0.0, 0.0));
+    for _ in 0..100 {
+        app.update();
+        if app
+            .world()
+            .resource::<LocalCoordinateServerWorld>()
+            .loaded_chunks
+            .get(&DEFAULT_PCG_LOCAL_COORDINATE_ID)
+            .is_some_and(|chunks| chunks.contains_key(&[10, 0, 0]))
+        {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    let loaded = &app
+        .world()
+        .resource::<LocalCoordinateServerWorld>()
+        .loaded_chunks[&DEFAULT_PCG_LOCAL_COORDINATE_ID];
+
+    assert!(
+        loaded.contains_key(&[10, 0, 0]),
+        "new observation was not generated"
+    );
+    assert!(
+        !loaded.contains_key(&[0, 0, 0]),
+        "old pristine chunk survived eviction"
+    );
+    assert!(
+        loaded.len() <= 6,
+        "pristine generated chunks accumulated from {initial_count} to {}",
+        loaded.len()
+    );
+}
 
 #[test]
 fn player_chunk_generation_stays_inside_scene_bounds() {
@@ -18,7 +190,11 @@ fn player_chunk_generation_stays_inside_scene_bounds() {
     app.insert_resource(LocalCoordinateServerPipe(transport.endpoint_b()))
         .insert_resource(scenes)
         .init_resource::<LocalCoordinateServerWorld>()
-        .add_systems(Update, prepare_player_chunks);
+        .init_resource::<LocalCoordinatePhysicsInterests>()
+        .add_systems(
+            Update,
+            (prepare_player_chunks, commit_generated_chunks).chain(),
+        );
     app.world_mut().spawn((
         Player { id: player_id },
         PlayerScene { scene_id },
@@ -38,16 +214,27 @@ fn player_chunk_generation_stays_inside_scene_bounds() {
         })
         .unwrap();
 
-    app.update();
+    let chunks_per_axis = (DEFAULT_S0_ROOM_SIZE[0] / CHUNK_EDGE_LENGTH as f32) as i64;
+    for _ in 0..100 {
+        app.update();
+        if app
+            .world()
+            .resource::<LocalCoordinateServerWorld>()
+            .loaded_chunk_count(DEFAULT_PCG_LOCAL_COORDINATE_ID)
+            == chunks_per_axis.pow(2) as usize
+        {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
 
     let world = app.world().resource::<LocalCoordinateServerWorld>();
     let chunks = &world.loaded_chunks[&DEFAULT_PCG_LOCAL_COORDINATE_ID];
-    let chunks_per_axis = (DEFAULT_S0_ROOM_SIZE[0] / CHUNK_EDGE_LENGTH as f32) as i64;
-    assert_eq!(chunks.len(), chunks_per_axis.pow(3) as usize);
+    assert_eq!(chunks.len(), chunks_per_axis.pow(2) as usize);
     assert!(chunks.keys().all(|coordinate| {
-        coordinate
-            .iter()
-            .all(|value| (0..chunks_per_axis).contains(value))
+        coordinate[1] == 0
+            && (0..chunks_per_axis).contains(&coordinate[0])
+            && (0..chunks_per_axis).contains(&coordinate[2])
     }));
 }
 
@@ -88,6 +275,7 @@ fn only_advertised_chunk_ids_enter_the_response_queue_once() {
     let current = UpdateVersion::new(7);
     let mut subscription = PlayerSubscription {
         player_id: PlayerId(1),
+        view_distance_chunks: DEFAULT_CHUNK_VIEW_DISTANCE,
         spawned_coordinates: HashSet::new(),
         advertised_chunks: HashMap::from([(key, current)]),
         pending_requests: VecDeque::new(),
@@ -141,8 +329,8 @@ fn version_events_include_only_added_or_changed_chunks() {
 }
 
 #[test]
-fn subscription_snapshots_retain_chunks_outside_the_latest_observation() {
-    let retained = ChunkId {
+fn subscription_snapshot_drops_chunks_outside_the_latest_observation() {
+    let removed = ChunkId {
         local_coordinate_id: LocalCoordinateId(1),
         coordinate: [0, 0, 0],
     };
@@ -152,25 +340,60 @@ fn subscription_snapshots_retain_chunks_outside_the_latest_observation() {
     };
     let mut subscription = PlayerSubscription {
         player_id: PlayerId(1),
+        view_distance_chunks: DEFAULT_CHUNK_VIEW_DISTANCE,
         spawned_coordinates: HashSet::from([LocalCoordinateId(1)]),
-        advertised_chunks: HashMap::from([(retained, UpdateVersion::new(4))]),
-        pending_requests: VecDeque::new(),
+        advertised_chunks: HashMap::from([(removed, UpdateVersion::new(4))]),
+        pending_requests: VecDeque::from([removed, added]),
     };
 
-    retain_subscription_snapshot(
+    update_subscription_snapshot(
         &mut subscription,
         HashSet::from([LocalCoordinateId(1)]),
         HashMap::from([(added, UpdateVersion::new(2))]),
     );
 
-    assert_eq!(
-        subscription.advertised_chunks.get(&retained),
-        Some(&UpdateVersion::new(4))
-    );
+    assert!(!subscription.advertised_chunks.contains_key(&removed));
     assert_eq!(
         subscription.advertised_chunks.get(&added),
         Some(&UpdateVersion::new(2))
     );
+    assert_eq!(subscription.pending_requests, VecDeque::from([added]));
+}
+
+#[test]
+fn stale_or_unsubscribed_svo_jobs_are_not_published() {
+    let connection_id = ConnectionId(9);
+    let chunk = ChunkVersion {
+        local_coordinate_id: LocalCoordinateId(1),
+        coordinate: [2, 0, 0],
+        version: UpdateVersion::new(3),
+    };
+    let mut world = LocalCoordinateServerWorld::default();
+    world.subscriptions.insert(
+        connection_id,
+        PlayerSubscription {
+            player_id: PlayerId(1),
+            view_distance_chunks: DEFAULT_CHUNK_VIEW_DISTANCE,
+            spawned_coordinates: HashSet::new(),
+            advertised_chunks: HashMap::from([(chunk.id(), chunk.version)]),
+            pending_requests: VecDeque::new(),
+        },
+    );
+    world
+        .derived_svo_jobs
+        .insert((connection_id, chunk.id()), chunk.version);
+    assert!(complete_svo_job(&mut world, connection_id, chunk));
+
+    world
+        .derived_svo_jobs
+        .insert((connection_id, chunk.id()), chunk.version);
+    world
+        .subscriptions
+        .get_mut(&connection_id)
+        .unwrap()
+        .advertised_chunks
+        .clear();
+    assert!(!complete_svo_job(&mut world, connection_id, chunk));
 }
 
 #[test]

@@ -3,13 +3,15 @@ pub mod local_coordinate;
 pub mod roundo_physics;
 
 pub use local_coordinate::{
-    AtomicVoxel, AtomicVoxelId, ChunkReference, DEFAULT_PCG_LOCAL_COORDINATE_ID, EMPTY_VOXEL_ID,
+    AtomicVoxel, AtomicVoxelId, ChunkReference, ClientChunkViewDistance,
+    DEFAULT_CHUNK_VIEW_DISTANCE, DEFAULT_PCG_LOCAL_COORDINATE_ID, EMPTY_VOXEL_ID,
     GLOBAL_ATOMIC_VOXEL_DATA, GlobalAtomicVoxelData, LocalAtomicVoxelData, LocalCoordinate,
     LocalCoordinateCRUDMessage, LocalCoordinateCRUDMessageEnum, LocalCoordinateClientCommand,
     LocalCoordinateClientEvent, LocalCoordinateClientIpc, LocalCoordinateClientPlugin,
-    LocalCoordinateClientWorld, LocalCoordinateServerCommand, LocalCoordinateServerEvent,
-    LocalCoordinateServerIpc, LocalCoordinateServerPlugin, LocalCoordinateServerWorld,
-    LocalCoordinateSet, LocalCoordinateTransform, PcgLocalCoordinate, PositionedAtomicVoxel,
+    LocalCoordinateClientWorld, LocalCoordinateIdentity, LocalCoordinateServerCommand,
+    LocalCoordinateServerEvent, LocalCoordinateServerIpc, LocalCoordinateServerPlugin,
+    LocalCoordinateServerWorld, LocalCoordinateSet, LocalCoordinateTransform,
+    MAX_CHUNK_VIEW_DISTANCE, MIN_CHUNK_VIEW_DISTANCE, PcgLocalCoordinate, PositionedAtomicVoxel,
     SOLID_VOXEL_ID, VIRTUAL_CHUNK_EDGE_LENGTH, VirtualChunkCoordinate, VirtualChunkIndex,
     VoxelRaycastHit, VoxelRaycaster,
 };

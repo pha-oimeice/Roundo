@@ -1,8 +1,9 @@
 use super::*;
+use crate::AtomicVoxel;
 use roundo_algorithm::tree::{BreadthFirstLosslessSvo, UnoptimizedOctree};
 
 fn add_ingest_systems(app: &mut App) {
-    app.add_systems(
+    app.init_resource::<ClientChunkViewDistance>().add_systems(
         Update,
         (ingest_commands, collect_derived_svo_results).chain(),
     );
@@ -146,11 +147,67 @@ fn unloading_a_chunk_keeps_its_transferred_data_cached() {
 }
 
 #[test]
+fn pending_chunk_updates_are_latest_wins_per_chunk() {
+    let id = ChunkId {
+        local_coordinate_id: LocalCoordinateId(1),
+        coordinate: [2, 0, 3],
+    };
+    let mut world = LocalCoordinateClientWorld::default();
+    queue_pending_chunk_update(
+        &mut world,
+        PendingChunkUpdate::Unload {
+            local_coordinate_id: id.local_coordinate_id,
+            coordinate: id.coordinate,
+        },
+    );
+    let source = UnoptimizedOctree::new(0, AtomicVoxel::default());
+    let svo = Arc::new(
+        BreadthFirstLosslessSvo::from_unoptimized_mapped(&source, 4, |data| *data).unwrap(),
+    );
+    queue_pending_chunk_update(
+        &mut world,
+        PendingChunkUpdate::Load {
+            chunk: ChunkVersion {
+                local_coordinate_id: id.local_coordinate_id,
+                coordinate: id.coordinate,
+                version: UpdateVersion::INITIAL,
+            },
+            svo,
+        },
+    );
+    assert_eq!(world.pending_chunk_updates.len(), 1);
+    assert!(matches!(
+        world.pending_chunk_updates.front(),
+        Some(PendingChunkUpdate::Load { .. })
+    ));
+}
+
+#[test]
+fn a_new_session_publishes_the_configured_chunk_view_distance() {
+    let transport = CrossbeamThreadPipe::new();
+    let client = transport.endpoint_a();
+    let mut app = App::new();
+    app.init_resource::<LocalCoordinateClientWorld>()
+        .insert_resource(ClientChunkViewDistance::new(128))
+        .insert_resource(LocalCoordinateClientPipe(transport.endpoint_b()))
+        .add_systems(Update, ingest_commands);
+    client
+        .try_send(LocalCoordinateClientCommand::BeginSession)
+        .unwrap();
+    app.update();
+    assert!(matches!(
+        client.try_receive(),
+        Some(LocalCoordinateClientEvent::SetChunkViewDistance { chunks: 128 })
+    ));
+}
+
+#[test]
 fn a_new_session_clears_old_active_and_cached_chunks() {
     let transport = CrossbeamThreadPipe::new();
     let client = transport.endpoint_a();
     let mut app = App::new();
     app.init_resource::<LocalCoordinateClientWorld>()
+        .init_resource::<ClientChunkViewDistance>()
         .insert_resource(LocalCoordinateClientPipe(transport.endpoint_b()))
         .add_systems(Update, ingest_commands);
     let chunk = ChunkVersion {

@@ -710,6 +710,8 @@ fn vanilla_settings_asset_consumes_command_metadata_and_keeps_edits_atomic() {
     assert!(settings.contains("slider.min=def.min"));
     assert!(settings.contains("number.step=def.step"));
     assert!(settings.contains("saveSetting(def,def.default)"));
+    assert!(settings.contains("data-tab=\"world\""));
+    assert!(settings.contains("View distance (chunks)"));
 }
 
 #[test]

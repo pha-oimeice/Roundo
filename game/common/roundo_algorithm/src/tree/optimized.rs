@@ -9,6 +9,60 @@ use super::{
 /// Sentinel used by compact nodes that have no children.
 pub const NO_CHILDREN: u32 = u32::MAX;
 
+/// Stable 16-byte SVO node representation shared with GPU consumers.
+///
+/// Every field is a `u32` so WGSL storage buffers can use the same stride
+/// without depending on Rust enum, generic, or narrow-integer layout.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(C)]
+pub struct PackedSvoNode {
+    pub first_child: u32,
+    pub child_mask: u32,
+    pub data: u32,
+    pub reserved: u32,
+}
+
+impl PackedSvoNode {
+    pub const BYTE_SIZE: usize = 16;
+
+    pub fn append_le_bytes(self, output: &mut Vec<u8>) {
+        output.extend_from_slice(&self.first_child.to_le_bytes());
+        output.extend_from_slice(&self.child_mask.to_le_bytes());
+        output.extend_from_slice(&self.data.to_le_bytes());
+        output.extend_from_slice(&self.reserved.to_le_bytes());
+    }
+}
+
+/// Immutable GPU-ready node array plus its traversal metadata.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PackedSvo {
+    nodes: Box<[PackedSvoNode]>,
+    root_index: u32,
+    maximum_depth: u8,
+}
+
+impl PackedSvo {
+    pub fn nodes(&self) -> &[PackedSvoNode] {
+        &self.nodes
+    }
+
+    pub const fn root_index(&self) -> u32 {
+        self.root_index
+    }
+
+    pub const fn maximum_depth(&self) -> u8 {
+        self.maximum_depth
+    }
+
+    pub fn node_bytes(&self) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(self.nodes.len() * PackedSvoNode::BYTE_SIZE);
+        for node in &self.nodes {
+            node.append_le_bytes(&mut bytes);
+        }
+        bytes
+    }
+}
+
 /// One node in a lossless SVO stored in breadth-first order.
 ///
 /// `data` is the value inherited by every missing child region. A node with no
@@ -86,6 +140,37 @@ impl<T: Clone + Eq> BreadthFirstLosslessSvo<T> {
 }
 
 impl<T> BreadthFirstLosslessSvo<T> {
+    /// Packs this SVO into the stable representation consumed by GPU storage buffers.
+    pub fn pack_with(&self, map_data: impl Fn(&T) -> u32) -> PackedSvo {
+        let mapped = self
+            .nodes
+            .iter()
+            .map(|node| map_data(&node.data))
+            .collect::<Vec<_>>();
+        let mut subtree_has_nonzero = vec![false; self.nodes.len()];
+        let mut nodes = Vec::with_capacity(self.nodes.len());
+        for (index, _) in self.nodes.iter().enumerate().rev() {
+            let explicit_child_has_nonzero = (0..8_u8)
+                .filter_map(|octant| self.child_index(index as u32, octant))
+                .any(|child| subtree_has_nonzero[child as usize]);
+            subtree_has_nonzero[index] = mapped[index] != 0 || explicit_child_has_nonzero;
+        }
+        for (index, node) in self.nodes.iter().enumerate() {
+            nodes.push(PackedSvoNode {
+                first_child: node.first_child,
+                child_mask: u32::from(node.child_mask),
+                data: mapped[index],
+                // Bit zero is a conservative surface-preserving occupancy summary.
+                reserved: u32::from(subtree_has_nonzero[index]),
+            });
+        }
+        PackedSvo {
+            nodes: nodes.into_boxed_slice(),
+            root_index: self.root_index,
+            maximum_depth: self.maximum_depth,
+        }
+    }
+
     pub fn nodes(&self) -> &[BreadthFirstLosslessSvoNode<T>] {
         &self.nodes
     }

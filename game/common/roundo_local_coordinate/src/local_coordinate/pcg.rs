@@ -53,7 +53,7 @@ pub(crate) fn remove_generated_chunk(
     local_chunk_position(coordinate).is_some_and(|position| local_coordinate.remove_chunk(position))
 }
 
-fn local_chunk_position(coordinate: ChunkCoordinate) -> Option<IVec3> {
+pub(crate) fn local_chunk_position(coordinate: ChunkCoordinate) -> Option<IVec3> {
     let minimum = i64::from(i32::MIN / CHUNK_EDGE_LENGTH);
     let maximum = i64::from(i32::MAX / CHUNK_EDGE_LENGTH);
     if coordinate
@@ -103,10 +103,6 @@ mod tests {
 
         assert!(replace_generated_chunk(&mut local_coordinate, &chunk));
         assert!(local_coordinate.chunks.contains_key(&IVec3::new(3, 4, 5)));
-        assert!(
-            local_coordinate.chunks[&IVec3::new(3, 4, 5)]
-                .triangles
-                .is_empty()
-        );
+        assert!(local_coordinate.chunks[&IVec3::new(3, 4, 5)].is_empty());
     }
 }

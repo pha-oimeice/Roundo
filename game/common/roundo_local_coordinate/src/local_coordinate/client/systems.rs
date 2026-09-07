@@ -2,20 +2,24 @@ use super::*;
 
 impl Plugin for LocalCoordinateClientPlugin {
     fn build(&self, app: &mut App) {
-        app.add_plugins((LocalCoordinateBasePlugin, LocalCoordinateMeshPlugin))
+        app.add_plugins(LocalCoordinateBasePlugin)
             .init_resource::<LocalCoordinateClientWorld>()
+            .init_resource::<ClientChunkViewDistance>()
             .insert_resource(LocalCoordinateClientPipe(self.pipe.endpoint_b()))
             .add_systems(
                 Update,
                 (
+                    publish_chunk_view_distance,
                     ingest_commands,
                     collect_derived_svo_results,
                     apply_pending_chunk_updates,
-                    discard_client_chunk_changes,
-                    rebuild_virtual_chunk_index,
                 )
                     .chain()
-                    .before(rebuild_dirty_chunk_triangles),
+                    .before(LocalCoordinateSet::RebuildIndex),
+            )
+            .add_systems(
+                Update,
+                discard_client_chunk_changes.after(LocalCoordinateSet::RebuildIndex),
             );
     }
 }
@@ -41,9 +45,23 @@ pub(super) enum PendingChunkUpdate {
     },
 }
 
+fn publish_chunk_view_distance(
+    distance: Res<ClientChunkViewDistance>,
+    pipe: Res<LocalCoordinateClientPipe>,
+) {
+    if distance.is_changed() {
+        let _ = pipe
+            .0
+            .try_send(LocalCoordinateClientEvent::SetChunkViewDistance {
+                chunks: distance.chunks(),
+            });
+    }
+}
+
 fn ingest_commands(
     mut commands: Commands,
     pipe: Res<LocalCoordinateClientPipe>,
+    distance: Res<ClientChunkViewDistance>,
     mut world: ResMut<LocalCoordinateClientWorld>,
 ) {
     for _ in 0..MAX_COMMANDS_INGESTED_PER_FRAME {
@@ -53,6 +71,11 @@ fn ingest_commands(
 
         match command {
             LocalCoordinateClientCommand::BeginSession => {
+                let _ = pipe
+                    .0
+                    .try_send(LocalCoordinateClientEvent::SetChunkViewDistance {
+                        chunks: distance.chunks(),
+                    });
                 for entity in world.coordinates.drain().map(|(_, entity)| entity) {
                     commands.entity(entity).despawn();
                 }
@@ -103,12 +126,13 @@ fn ingest_commands(
                 };
                 world.active_server_versions.remove(&key);
                 world.requested_server_versions.remove(&key);
-                world
-                    .pending_chunk_updates
-                    .push_back(PendingChunkUpdate::Unload {
+                queue_pending_chunk_update(
+                    &mut world,
+                    PendingChunkUpdate::Unload {
                         local_coordinate_id,
                         coordinate,
-                    });
+                    },
+                );
             }
         }
     }
@@ -139,9 +163,7 @@ fn collect_derived_svo_results(
                 );
                 world.active_server_versions.insert(key, chunk.version);
                 ensure_coordinate(&mut commands, &mut world, chunk.local_coordinate_id);
-                world
-                    .pending_chunk_updates
-                    .push_back(PendingChunkUpdate::Load { chunk, svo });
+                queue_pending_chunk_update(&mut world, PendingChunkUpdate::Load { chunk, svo });
             }
             DerivedSvoResult::Failed {
                 connection_id: None,
@@ -180,12 +202,8 @@ fn ingest_version_updates(
             world.requested_server_versions.remove(&key);
             if world.active_server_versions.get(&key) != Some(&chunk.version) {
                 world.active_server_versions.insert(key, chunk.version);
-                world
-                    .pending_chunk_updates
-                    .push_back(PendingChunkUpdate::Load {
-                        chunk,
-                        svo: Arc::clone(&cached.svo),
-                    });
+                let svo = Arc::clone(&cached.svo);
+                queue_pending_chunk_update(world, PendingChunkUpdate::Load { chunk, svo });
             }
             continue;
         }
@@ -213,6 +231,7 @@ fn ensure_coordinate(
         .or_insert_with(|| {
             commands
                 .spawn((
+                    LocalCoordinateIdentity(local_coordinate_id),
                     LocalCoordinate::default(),
                     RigidBody::Static,
                     LocalCoordinateTransform::default(),
@@ -253,6 +272,27 @@ fn apply_pending_chunk_updates(
     }
 }
 
+fn queue_pending_chunk_update(world: &mut LocalCoordinateClientWorld, update: PendingChunkUpdate) {
+    let id = pending_chunk_id(&update);
+    world
+        .pending_chunk_updates
+        .retain(|pending| pending_chunk_id(pending) != id);
+    world.pending_chunk_updates.push_back(update);
+}
+
+fn pending_chunk_id(update: &PendingChunkUpdate) -> ChunkId {
+    match update {
+        PendingChunkUpdate::Load { chunk, .. } => chunk.id(),
+        PendingChunkUpdate::Unload {
+            local_coordinate_id,
+            coordinate,
+        } => ChunkId {
+            local_coordinate_id: *local_coordinate_id,
+            coordinate: *coordinate,
+        },
+    }
+}
+
 fn pending_local_coordinate_id(update: &PendingChunkUpdate) -> LocalCoordinateId {
     match update {
         PendingChunkUpdate::Load { chunk, .. } => chunk.local_coordinate_id,
@@ -266,6 +306,7 @@ fn pending_local_coordinate_id(update: &PendingChunkUpdate) -> LocalCoordinateId
 fn discard_client_chunk_changes(mut local_coordinates: Query<&mut LocalCoordinate>) {
     for mut local_coordinate in &mut local_coordinates {
         local_coordinate.changed_chunks.clear();
+        local_coordinate.physics_dirty_chunks.clear();
     }
 }
 
