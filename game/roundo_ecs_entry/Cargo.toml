@@ -5,11 +5,12 @@ edition.workspace = true
 
 [features]
 client = ["dep:roundo_marionette", "dep:roundo_rendering"]
-server = ["dep:avian3d", "dep:roundo_marionette", "dep:roundo_portal"]
+server = ["dep:avian3d", "dep:roundo_block_interaction", "dep:roundo_marionette", "dep:roundo_portal"]
 
 [dependencies]
 avian3d = { workspace = true, optional = true }
 bevy.workspace = true
+roundo_block_interaction = { workspace = true, optional = true }
 roundo_marionette = { workspace = true, optional = true }
 roundo_local_coordinate.workspace = true
 roundo_rendering = { workspace = true, optional = true }

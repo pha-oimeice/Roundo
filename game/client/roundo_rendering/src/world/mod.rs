@@ -16,8 +16,8 @@ use bevy::{
             BindGroup, BindGroupEntries, BindGroupLayoutDescriptor, BindGroupLayoutEntries,
             BlendState, Buffer, BufferInitDescriptor, BufferUsages, CachedComputePipelineId,
             CachedRenderPipelineId, ColorTargetState, ColorWrites, CompareFunction,
-            ComputePassDescriptor, ComputePipelineDescriptor, DepthStencilState, FragmentState,
-            FrontFace, MultisampleState, PipelineCache, PolygonMode, PrimitiveState,
+            ComputePassDescriptor, ComputePipelineDescriptor, DepthStencilState, Face,
+            FragmentState, FrontFace, MultisampleState, PipelineCache, PolygonMode, PrimitiveState,
             PrimitiveTopology, RenderPassDescriptor, RenderPipelineDescriptor, ShaderStages,
             ShaderType, StencilState, StoreOp, TextureFormat, VertexState,
             binding_types::{storage_buffer, storage_buffer_read_only, uniform_buffer},
@@ -43,12 +43,18 @@ const FACE_PLANE_COUNT: u32 = 6 * CHUNK_EDGE;
 const MAX_CHUNK_LOD: u8 = CHUNK_EDGE.ilog2() as u8;
 const GENERATED_VERTEX_SIZE: u64 = 16;
 const MAX_GEOMETRY_BUILDS_PER_FRAME: usize = 32;
+const DEFAULT_LOD_TARGET_PIXELS: f32 = 4.0;
+const DEFAULT_PERIODIC_WORLD_EXTENT: [f32; 3] = [16_384.0; 3];
 
 #[derive(Clone, Copy, Debug, ExtractResource, Resource)]
 pub struct WorldRenderSettings {
     pub material_seed: u32,
     pub retirement_frames: u64,
     pub geometry_budget_bytes: u64,
+    /// Desired upper bound for one rendered LOD cell in screen pixels.
+    pub lod_target_pixels: f32,
+    /// Period of the canonical world on each axis.
+    pub periodic_world_extent: [f32; 3],
 }
 
 impl Default for WorldRenderSettings {
@@ -57,6 +63,8 @@ impl Default for WorldRenderSettings {
             material_seed: DEFAULT_WORLD_MATERIAL_SEED,
             retirement_frames: DEFAULT_RETIREMENT_FRAMES,
             geometry_budget_bytes: DEFAULT_GEOMETRY_BUDGET_BYTES,
+            lod_target_pixels: DEFAULT_LOD_TARGET_PIXELS,
+            periodic_world_extent: DEFAULT_PERIODIC_WORLD_EXTENT,
         }
     }
 }
@@ -127,25 +135,22 @@ fn extract_loaded_chunks(
     extracted.chunks.clear();
 
     for (identity, local_coordinate, global_transform) in &chunks {
-        for (position, chunk) in &local_coordinate.chunks {
-            let Some(svo) = chunk.compressed_svo() else {
-                continue;
-            };
+        for chunk in local_coordinate.loaded_chunk_views() {
             let chunk_translation = bevy::math::Affine3A::from_translation(
-                (*position * CHUNK_EDGE_LENGTH as i32).as_vec3(),
+                (chunk.position * CHUNK_EDGE_LENGTH as i32).as_vec3(),
             );
             let world_from_chunk = global_transform.affine() * chunk_translation;
             extracted.chunks.push(ExtractedChunk {
                 id: ChunkId {
                     local_coordinate_id: identity.0,
                     coordinate: [
-                        i64::from(position.x),
-                        i64::from(position.y),
-                        i64::from(position.z),
+                        i64::from(chunk.position.x),
+                        i64::from(chunk.position.y),
+                        i64::from(chunk.position.z),
                     ],
                 },
-                revision: chunk.content_revision,
-                svo: Arc::clone(svo),
+                revision: chunk.revision,
+                svo: Arc::clone(chunk.svo),
                 world_from_chunk: bevy::math::Mat4::from(world_from_chunk).to_cols_array(),
             });
         }
@@ -168,6 +173,7 @@ struct ResidentChunk {
     uniform: Buffer,
     geometry: Option<ResidentGeometry>,
     world_from_chunk: [f32; 16],
+    rendered_world_from_chunk: [f32; 16],
     last_seen_epoch: u64,
 }
 
@@ -285,6 +291,34 @@ fn init_world_pipelines(
     });
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ResidentUpdate {
+    Unchanged,
+    Transform,
+    Replace,
+}
+
+fn resident_update(
+    resident: Option<(u64, [f32; 16])>,
+    observed_revision: u64,
+    observed_transform: [f32; 16],
+) -> ResidentUpdate {
+    match resident {
+        Some((revision, transform)) if revision == observed_revision => {
+            if transform == observed_transform {
+                ResidentUpdate::Unchanged
+            } else {
+                ResidentUpdate::Transform
+            }
+        }
+        _ => ResidentUpdate::Replace,
+    }
+}
+
+fn retain_retired(retired_at_epoch: u64, epoch: u64, retirement_frames: u64) -> bool {
+    epoch.wrapping_sub(retired_at_epoch) < retirement_frames.max(1)
+}
+
 fn prepare_residency(
     extracted: Res<ExtractedChunks>,
     settings: Res<WorldRenderSettings>,
@@ -294,15 +328,26 @@ fn prepare_residency(
 ) {
     let epoch = extracted.epoch;
     for observed in &extracted.chunks {
+        let update = resident_update(
+            residency
+                .chunks
+                .get(&observed.id)
+                .map(|resident| (resident.revision, resident.world_from_chunk)),
+            observed.revision,
+            observed.world_from_chunk,
+        );
         if let Some(resident) = residency.chunks.get_mut(&observed.id) {
             resident.last_seen_epoch = epoch;
-            if resident.revision == observed.revision {
-                if resident.world_from_chunk != observed.world_from_chunk {
+            match update {
+                ResidentUpdate::Unchanged => continue,
+                ResidentUpdate::Transform => {
                     resident.world_from_chunk = observed.world_from_chunk;
+                    resident.rendered_world_from_chunk = observed.world_from_chunk;
                     let matrix = world_matrix_bytes(observed.world_from_chunk);
                     render_queue.write_buffer(&resident.uniform, 0, &matrix);
+                    continue;
                 }
-                continue;
+                ResidentUpdate::Replace => {}
             }
         }
 
@@ -337,13 +382,13 @@ fn prepare_residency(
         }
     }
 
-    let retirement_frames = settings.retirement_frames.max(1);
+    let retirement_frames = settings.retirement_frames;
     residency
         .retired
-        .retain(|retired| epoch.wrapping_sub(retired.retired_at_epoch) < retirement_frames);
+        .retain(|retired| retain_retired(retired.retired_at_epoch, epoch, retirement_frames));
     residency
         .retired_geometry
-        .retain(|retired| epoch.wrapping_sub(retired.retired_at_epoch) < retirement_frames);
+        .retain(|retired| retain_retired(retired.retired_at_epoch, epoch, retirement_frames));
 }
 
 fn resident_chunk(
@@ -373,6 +418,7 @@ fn resident_chunk(
         uniform,
         geometry: None,
         world_from_chunk: observed.world_from_chunk,
+        rendered_world_from_chunk: observed.world_from_chunk,
         last_seen_epoch: epoch,
     }
 }
@@ -430,9 +476,6 @@ fn world_compute(
     mut residency: ResMut<WorldResidency>,
     mut context: RenderContext,
 ) {
-    let Some(pipeline) = pipeline_cache.get_compute_pipeline(pipelines.compute) else {
-        return;
-    };
     if residency.chunks.is_empty() {
         return;
     }
@@ -443,29 +486,50 @@ fn world_compute(
         .map_or(1.0, |size| size.y.max(1) as f32);
     let camera_position = view.world_from_view.translation();
     let projection_scale = view.clip_from_view.y_axis.y;
+    for chunk in residency.chunks.values_mut() {
+        let rendered_world_from_chunk = nearest_periodic_transform(
+            chunk.world_from_chunk,
+            camera_position,
+            settings.periodic_world_extent,
+        );
+        if chunk.rendered_world_from_chunk != rendered_world_from_chunk {
+            chunk.rendered_world_from_chunk = rendered_world_from_chunk;
+            render_queue.write_buffer(
+                &chunk.uniform,
+                0,
+                &world_matrix_bytes(rendered_world_from_chunk),
+            );
+        }
+    }
+    let Some(pipeline) = pipeline_cache.get_compute_pipeline(pipelines.compute) else {
+        return;
+    };
 
+    let periodic_chunk_counts = periodic_chunk_counts(settings.periodic_world_extent);
     let chunks_to_mesh = residency
         .chunks
         .iter()
         .filter_map(|(id, chunk)| {
-            if !chunk_visible(view, chunk.world_from_chunk) {
+            if !chunk_visible(view, chunk.rendered_world_from_chunk) {
                 return None;
             }
             let lod = selected_lod(
-                chunk.world_from_chunk,
+                chunk.rendered_world_from_chunk,
                 camera_position,
                 viewport_height,
                 projection_scale,
+                settings.lod_target_pixels,
                 chunk.geometry.as_ref().map(|geometry| geometry.lod),
             );
-            let boundary_signature = chunk_boundary_signature(*id, &residency.chunks);
+            let boundary_signature =
+                chunk_boundary_signature(*id, &residency.chunks, periodic_chunk_counts);
             (chunk.geometry.as_ref().is_none_or(|geometry| {
                 geometry.lod != lod || geometry.boundary_signature != boundary_signature
             }))
             .then_some((
                 *id,
                 lod,
-                Mat4::from_cols_array(&chunk.world_from_chunk)
+                Mat4::from_cols_array(&chunk.rendered_world_from_chunk)
                     .transform_point3(bevy::prelude::Vec3::splat(8.0))
                     .distance_squared(camera_position),
                 boundary_signature,
@@ -476,29 +540,59 @@ fn world_compute(
         return;
     }
     let mut chunks_to_mesh = chunks_to_mesh;
-    chunks_to_mesh.sort_by(|left, right| left.2.total_cmp(&right.2));
+    chunks_to_mesh.sort_by(|left, right| {
+        left.2
+            .total_cmp(&right.2)
+            .then_with(|| chunk_id_key(left.0).cmp(&chunk_id_key(right.0)))
+    });
+    // The budget governs the active cache. Retired buffers remain alive only for
+    // GPU safety and are allowed to transiently exceed it during a swap.
     let mut allocated_bytes = residency
         .chunks
         .values()
         .filter_map(|chunk| chunk.geometry.as_ref())
         .map(|geometry| geometry.allocated_bytes)
-        .sum::<u64>()
-        + residency
-            .retired_geometry
-            .iter()
-            .map(|retired| retired._geometry.allocated_bytes)
-            .sum::<u64>();
+        .sum::<u64>();
     let mut admitted = Vec::new();
 
     for (id, lod, _, boundary_signature) in
         chunks_to_mesh.iter().take(MAX_GEOMETRY_BUILDS_PER_FRAME)
     {
         let new_bytes = geometry_bytes_for_lod(*lod);
-        if allocated_bytes.saturating_add(new_bytes) > settings.geometry_budget_bytes {
+        let replaced_bytes = residency.chunks[id]
+            .geometry
+            .as_ref()
+            .map_or(0, |geometry| geometry.allocated_bytes);
+        let mut required_bytes = allocated_bytes
+            .saturating_sub(replaced_bytes)
+            .saturating_add(new_bytes);
+        while required_bytes > settings.geometry_budget_bytes {
+            let Some(victim) =
+                farthest_geometry_victim(*id, view, camera_position, &residency.chunks)
+            else {
+                break;
+            };
+            let geometry = residency
+                .chunks
+                .get_mut(&victim)
+                .unwrap()
+                .geometry
+                .take()
+                .unwrap();
+            allocated_bytes = allocated_bytes.saturating_sub(geometry.allocated_bytes);
+            residency.retired_geometry.push(RetiredGeometry {
+                retired_at_epoch: extracted.epoch,
+                _geometry: geometry,
+            });
+            required_bytes = allocated_bytes
+                .saturating_sub(replaced_bytes)
+                .saturating_add(new_bytes);
+        }
+        if required_bytes > settings.geometry_budget_bytes {
             continue;
         }
-        allocated_bytes += new_bytes;
-        let neighbor_metadata = neighbor_svo_bytes(*id, &residency.chunks);
+        allocated_bytes = required_bytes;
+        let neighbor_metadata = neighbor_svo_bytes(*id, &residency.chunks, periodic_chunk_counts);
         render_queue.write_buffer(&residency.chunks[id].uniform, 96, &neighbor_metadata);
         let geometry = create_geometry(
             &render_device,
@@ -508,6 +602,7 @@ fn world_compute(
             &residency.chunks,
             *lod,
             *boundary_signature,
+            periodic_chunk_counts,
         );
         let previous = {
             let chunk = residency.chunks.get_mut(id).unwrap();
@@ -542,6 +637,32 @@ fn world_compute(
     }
 }
 
+fn farthest_geometry_victim(
+    protected: ChunkId,
+    view: &ExtractedView,
+    camera_position: bevy::prelude::Vec3,
+    chunks: &HashMap<ChunkId, ResidentChunk>,
+) -> Option<ChunkId> {
+    chunks
+        .iter()
+        .filter(|(id, chunk)| **id != protected && chunk.geometry.is_some())
+        .max_by(|(left_id, left), (right_id, right)| {
+            let left_visible = chunk_visible(view, left.rendered_world_from_chunk);
+            let right_visible = chunk_visible(view, right.rendered_world_from_chunk);
+            let left_distance = Mat4::from_cols_array(&left.rendered_world_from_chunk)
+                .transform_point3(bevy::prelude::Vec3::splat(8.0))
+                .distance_squared(camera_position);
+            let right_distance = Mat4::from_cols_array(&right.rendered_world_from_chunk)
+                .transform_point3(bevy::prelude::Vec3::splat(8.0))
+                .distance_squared(camera_position);
+            (!left_visible)
+                .cmp(&(!right_visible))
+                .then_with(|| left_distance.total_cmp(&right_distance))
+                .then_with(|| chunk_id_key(**left_id).cmp(&chunk_id_key(**right_id)))
+        })
+        .map(|(id, _)| *id)
+}
+
 fn create_geometry(
     render_device: &RenderDevice,
     pipeline_cache: &PipelineCache,
@@ -550,6 +671,7 @@ fn create_geometry(
     chunks: &HashMap<ChunkId, ResidentChunk>,
     lod: u8,
     boundary_signature: u64,
+    periodic_chunk_counts: [i64; 3],
 ) -> ResidentGeometry {
     let chunk = &chunks[&id];
     let vertices = render_device.create_buffer(&bevy::render::render_resource::BufferDescriptor {
@@ -563,7 +685,7 @@ fn create_geometry(
         contents: &indirect_bytes(),
         usage: BufferUsages::STORAGE | BufferUsages::INDIRECT | BufferUsages::COPY_DST,
     });
-    let neighbors = chunk_neighbors(id, chunks);
+    let neighbors = chunk_neighbors(id, chunks, periodic_chunk_counts);
     let compute_bind_group = render_device.create_bind_group(
         Some("world chunk compute bind group"),
         &pipeline_cache.get_bind_group_layout(&pipelines.compute_layout),
@@ -607,13 +729,29 @@ const CHUNK_NEIGHBOR_OFFSETS: [[i64; 3]; 6] = [
     [0, 0, -1],
 ];
 
-fn neighbor_id(id: ChunkId, offset: [i64; 3]) -> Option<ChunkId> {
+fn periodic_chunk_counts(extent: [f32; 3]) -> [i64; 3] {
+    extent.map(|axis| {
+        if axis.is_finite() && axis >= CHUNK_EDGE as f32 {
+            (axis / CHUNK_EDGE as f32).floor() as i64
+        } else {
+            1
+        }
+    })
+}
+
+fn neighbor_id(id: ChunkId, offset: [i64; 3], periodic_chunk_counts: [i64; 3]) -> Option<ChunkId> {
     Some(ChunkId {
         local_coordinate_id: id.local_coordinate_id,
         coordinate: [
-            id.coordinate[0].checked_add(offset[0])?,
-            id.coordinate[1].checked_add(offset[1])?,
-            id.coordinate[2].checked_add(offset[2])?,
+            id.coordinate[0]
+                .checked_add(offset[0])?
+                .rem_euclid(periodic_chunk_counts[0]),
+            id.coordinate[1]
+                .checked_add(offset[1])?
+                .rem_euclid(periodic_chunk_counts[1]),
+            id.coordinate[2]
+                .checked_add(offset[2])?
+                .rem_euclid(periodic_chunk_counts[2]),
         ],
     })
 }
@@ -621,19 +759,25 @@ fn neighbor_id(id: ChunkId, offset: [i64; 3]) -> Option<ChunkId> {
 fn chunk_neighbors<'a>(
     id: ChunkId,
     chunks: &'a HashMap<ChunkId, ResidentChunk>,
+    periodic_chunk_counts: [i64; 3],
 ) -> [&'a ResidentChunk; 6] {
     let fallback = &chunks[&id];
     std::array::from_fn(|index| {
-        neighbor_id(id, CHUNK_NEIGHBOR_OFFSETS[index])
+        neighbor_id(id, CHUNK_NEIGHBOR_OFFSETS[index], periodic_chunk_counts)
             .and_then(|neighbor| chunks.get(&neighbor))
             .unwrap_or(fallback)
     })
 }
 
-fn neighbor_svo_bytes(id: ChunkId, chunks: &HashMap<ChunkId, ResidentChunk>) -> Vec<u8> {
+fn neighbor_svo_bytes(
+    id: ChunkId,
+    chunks: &HashMap<ChunkId, ResidentChunk>,
+    periodic_chunk_counts: [i64; 3],
+) -> Vec<u8> {
     let mut bytes = Vec::with_capacity(6 * 16);
     for offset in CHUNK_NEIGHBOR_OFFSETS {
-        let neighbor = neighbor_id(id, offset).and_then(|neighbor| chunks.get(&neighbor));
+        let neighbor = neighbor_id(id, offset, periodic_chunk_counts)
+            .and_then(|neighbor| chunks.get(&neighbor));
         let metadata = neighbor.map_or([0, 0, 0, 0], |neighbor| {
             [neighbor.svo_root, neighbor.svo_maximum_depth, 1, 0]
         });
@@ -644,13 +788,27 @@ fn neighbor_svo_bytes(id: ChunkId, chunks: &HashMap<ChunkId, ResidentChunk>) -> 
     bytes
 }
 
-fn chunk_boundary_signature(id: ChunkId, chunks: &HashMap<ChunkId, ResidentChunk>) -> u64 {
+fn chunk_boundary_signature(
+    id: ChunkId,
+    chunks: &HashMap<ChunkId, ResidentChunk>,
+    periodic_chunk_counts: [i64; 3],
+) -> u64 {
+    boundary_signature_from_revisions(id, periodic_chunk_counts, |neighbor| {
+        chunks.get(&neighbor).map(|chunk| chunk.revision)
+    })
+}
+
+fn boundary_signature_from_revisions(
+    id: ChunkId,
+    periodic_chunk_counts: [i64; 3],
+    mut revision: impl FnMut(ChunkId) -> Option<u64>,
+) -> u64 {
     CHUNK_NEIGHBOR_OFFSETS
         .into_iter()
         .fold(0xcbf2_9ce4_8422_2325_u64, |signature, offset| {
-            let revision = neighbor_id(id, offset)
-                .and_then(|neighbor| chunks.get(&neighbor))
-                .map_or(0, |neighbor| neighbor.revision.wrapping_add(1));
+            let revision = neighbor_id(id, offset, periodic_chunk_counts)
+                .and_then(&mut revision)
+                .map_or(0, |revision| revision.wrapping_add(1));
             (signature ^ revision).wrapping_mul(0x0000_0100_0000_01b3)
         })
 }
@@ -692,32 +850,73 @@ fn aabb_intersects_clip(clip_from_chunk: Mat4) -> bool {
     !outside.into_iter().any(|plane| plane)
 }
 
+fn nearest_periodic_transform(
+    world_from_chunk: [f32; 16],
+    camera_position: bevy::prelude::Vec3,
+    extent: [f32; 3],
+) -> [f32; 16] {
+    let mut transform = Mat4::from_cols_array(&world_from_chunk);
+    let center = transform.transform_point3(bevy::prelude::Vec3::splat(CHUNK_EDGE as f32 * 0.5));
+    let mut offset = bevy::prelude::Vec3::ZERO;
+    for axis in 0..3 {
+        if extent[axis].is_finite() && extent[axis] > 0.0 {
+            offset[axis] =
+                ((camera_position[axis] - center[axis]) / extent[axis]).round() * extent[axis];
+        }
+    }
+    transform.w_axis += offset.extend(0.0);
+    transform.to_cols_array()
+}
+
+fn chunk_id_key(id: ChunkId) -> (u64, i64, i64, i64) {
+    (
+        id.local_coordinate_id.0,
+        id.coordinate[0],
+        id.coordinate[1],
+        id.coordinate[2],
+    )
+}
+
 fn selected_lod(
     world_from_chunk: [f32; 16],
     camera_position: bevy::prelude::Vec3,
     viewport_height: f32,
     projection_scale: f32,
+    target_pixels: f32,
     current_lod: Option<u8>,
 ) -> u8 {
     let transform = Mat4::from_cols_array(&world_from_chunk);
     let center = transform.transform_point3(bevy::prelude::Vec3::splat(8.0));
     let distance = center.distance(camera_position).max(0.001);
     let world_cell_size = transform.x_axis.truncate().length();
-    let base_pixels = world_cell_size * viewport_height * projection_scale / (2.0 * distance);
+    let base_pixels = world_cell_size * viewport_height * projection_scale.abs() / (2.0 * distance);
+    let target_pixels = target_pixels.max(1.0);
     let Some(mut lod) = current_lod else {
         let mut lod = 0_u8;
-        while lod < MAX_CHUNK_LOD && base_pixels * ((1_u32 << lod) as f32) < 1.5 {
+        while lod < MAX_CHUNK_LOD && base_pixels * ((1_u32 << lod) as f32) < target_pixels {
             lod += 1;
         }
         return lod;
     };
-    while lod < MAX_CHUNK_LOD && base_pixels * ((1_u32 << lod) as f32) < 1.25 {
+    while lod < MAX_CHUNK_LOD && base_pixels * ((1_u32 << lod) as f32) < target_pixels * 0.875 {
         lod += 1;
     }
-    while lod > 0 && base_pixels * ((1_u32 << (lod - 1)) as f32) > 1.75 {
+    while lod > 0 && base_pixels * ((1_u32 << (lod - 1)) as f32) > target_pixels * 1.125 {
         lod -= 1;
     }
     lod
+}
+
+fn world_primitive_state() -> PrimitiveState {
+    PrimitiveState {
+        topology: PrimitiveTopology::TriangleList,
+        strip_index_format: None,
+        front_face: FrontFace::Ccw,
+        cull_mode: Some(Face::Back),
+        unclipped_depth: false,
+        polygon_mode: PolygonMode::Fill,
+        conservative: false,
+    }
 }
 
 #[derive(Resource, Default)]
@@ -748,15 +947,7 @@ fn prepare_view_pipelines(
                     buffers: Vec::new(),
                     ..Default::default()
                 },
-                primitive: PrimitiveState {
-                    topology: PrimitiveTopology::TriangleList,
-                    strip_index_format: None,
-                    front_face: FrontFace::Ccw,
-                    cull_mode: None,
-                    unclipped_depth: false,
-                    polygon_mode: PolygonMode::Fill,
-                    conservative: false,
-                },
+                primitive: world_primitive_state(),
                 depth_stencil: Some(DepthStencilState {
                     format: TextureFormat::Depth32Float,
                     depth_write_enabled: Some(true),
@@ -816,6 +1007,7 @@ fn world_draw(
     view_bind_group: Res<WorldViewBindGroup>,
     pipelines: Res<PipelineCache>,
     residency: Res<WorldResidency>,
+    settings: Res<WorldRenderSettings>,
     mut context: RenderContext,
 ) {
     if residency.chunks.is_empty() {
@@ -836,8 +1028,14 @@ fn world_draw(
     });
     pass.set_render_pipeline(pipeline);
     pass.set_bind_group(0, &view_bind_group.0, &[view_offset.offset]);
+    let camera_position = extracted_view.world_from_view.translation();
     for chunk in residency.chunks.values() {
-        if !chunk_visible(extracted_view, chunk.world_from_chunk) {
+        let rendered_world_from_chunk = nearest_periodic_transform(
+            chunk.world_from_chunk,
+            camera_position,
+            settings.periodic_world_extent,
+        );
+        if !chunk_visible(extracted_view, rendered_world_from_chunk) {
             continue;
         }
         let Some(geometry) = &chunk.geometry else {
@@ -891,6 +1089,7 @@ mod tests {
             bevy::prelude::Vec3::new(8.0, 24.0, 8.0),
             1080.0,
             1.7,
+            DEFAULT_LOD_TARGET_PIXELS,
             None,
         );
         let far = selected_lod(
@@ -898,6 +1097,7 @@ mod tests {
             bevy::prelude::Vec3::new(8.0, 1_000.0, 8.0),
             1080.0,
             1.7,
+            DEFAULT_LOD_TARGET_PIXELS,
             Some(near),
         );
         let returned = selected_lod(
@@ -905,11 +1105,94 @@ mod tests {
             bevy::prelude::Vec3::new(8.0, 24.0, 8.0),
             1080.0,
             1.7,
+            DEFAULT_LOD_TARGET_PIXELS,
             Some(far),
         );
         assert_eq!(near, 0);
-        assert!(far > near);
+        assert!(
+            far >= 2,
+            "far chunks must use materially coarser SVO levels"
+        );
         assert_eq!(returned, near);
+    }
+
+    #[test]
+    fn world_triangles_cull_back_faces() {
+        assert_eq!(world_primitive_state().cull_mode, Some(Face::Back));
+    }
+
+    #[test]
+    fn periodic_chunk_transform_uses_the_camera_nearest_image() {
+        let canonical = Mat4::from_translation(bevy::prelude::Vec3::new(0.0, 0.0, 0.0));
+        let periodic = nearest_periodic_transform(
+            canonical.to_cols_array(),
+            bevy::prelude::Vec3::new(16_383.0, 8.0, 8.0),
+            [16_384.0; 3],
+        );
+        let translation =
+            Mat4::from_cols_array(&periodic).transform_point3(bevy::prelude::Vec3::ZERO);
+        assert_eq!(translation, bevy::prelude::Vec3::new(16_384.0, 0.0, 0.0));
+    }
+
+    #[test]
+    fn residency_reuses_equal_revisions_and_replaces_changed_revisions() {
+        let transform = Mat4::IDENTITY.to_cols_array();
+        assert_eq!(
+            resident_update(Some((4, transform)), 4, transform),
+            ResidentUpdate::Unchanged
+        );
+        assert_eq!(
+            resident_update(
+                Some((4, transform)),
+                4,
+                Mat4::from_translation(bevy::prelude::Vec3::X).to_cols_array(),
+            ),
+            ResidentUpdate::Transform
+        );
+        assert_eq!(
+            resident_update(Some((4, transform)), 5, transform),
+            ResidentUpdate::Replace
+        );
+        assert_eq!(resident_update(None, 1, transform), ResidentUpdate::Replace);
+    }
+
+    #[test]
+    fn retired_resources_live_for_the_configured_frame_window() {
+        assert!(retain_retired(10, 10, 3));
+        assert!(retain_retired(10, 12, 3));
+        assert!(!retain_retired(10, 13, 3));
+        assert!(retain_retired(10, 10, 0));
+        assert!(!retain_retired(10, 11, 0));
+    }
+
+    #[test]
+    fn chunk_neighbors_wrap_across_the_periodic_seam() {
+        let first = ChunkId {
+            local_coordinate_id: roundo_local_coordinate::LocalCoordinateId(1),
+            coordinate: [0, 0, 0],
+        };
+        let counts = periodic_chunk_counts(DEFAULT_PERIODIC_WORLD_EXTENT);
+        assert_eq!(
+            neighbor_id(first, [-1, 0, 0], counts).unwrap().coordinate,
+            [counts[0] - 1, 0, 0]
+        );
+    }
+
+    #[test]
+    fn neighbor_revision_changes_invalidate_boundary_geometry() {
+        let center = ChunkId {
+            local_coordinate_id: roundo_local_coordinate::LocalCoordinateId(1),
+            coordinate: [0, 0, 0],
+        };
+        let counts = periodic_chunk_counts(DEFAULT_PERIODIC_WORLD_EXTENT);
+        let neighbor = neighbor_id(center, [1, 0, 0], counts).unwrap();
+        let absent = boundary_signature_from_revisions(center, counts, |_| None);
+        let revision_four =
+            boundary_signature_from_revisions(center, counts, |id| (id == neighbor).then_some(4));
+        let revision_five =
+            boundary_signature_from_revisions(center, counts, |id| (id == neighbor).then_some(5));
+        assert_ne!(absent, revision_four);
+        assert_ne!(revision_four, revision_five);
     }
 
     #[test]

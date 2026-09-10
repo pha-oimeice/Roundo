@@ -73,6 +73,28 @@ impl VirtualChunkIndex {
             .collect()
     }
 
+    /// Returns known chunks within a periodic scene-space radius.
+    ///
+    /// Queries the nearest image on each side of every torus seam and deduplicates
+    /// canonical Chunk references.
+    pub fn chunks_in_torus_radius(
+        &self,
+        center: [f64; 3],
+        radius: f64,
+        extent: [f32; 3],
+    ) -> HashSet<ChunkReference> {
+        if extent.iter().any(|axis| !axis.is_finite() || *axis <= 0.0) {
+            return HashSet::new();
+        }
+        self.chunks
+            .iter()
+            .filter(|(coordinate, _)| {
+                virtual_chunk_intersects_torus_radius(**coordinate, center, radius, extent)
+            })
+            .flat_map(|(_, chunks)| chunks.iter().copied())
+            .collect()
+    }
+
     pub(crate) fn chunks_at(
         &self,
         coordinate: VirtualChunkCoordinate,
@@ -233,6 +255,43 @@ fn virtual_chunk_intersects_radius(
     distance_squared <= radius * radius
 }
 
+fn virtual_chunk_intersects_torus_radius(
+    coordinate: VirtualChunkCoordinate,
+    center: [f64; 3],
+    radius: f64,
+    extent: [f32; 3],
+) -> bool {
+    if !radius.is_finite()
+        || radius < 0.0
+        || center.iter().any(|coordinate| !coordinate.is_finite())
+    {
+        return false;
+    }
+    let edge = VIRTUAL_CHUNK_EDGE_LENGTH as f64;
+    let distance_squared = (0..3)
+        .map(|axis| {
+            let minimum = coordinate[axis] as f64 * edge;
+            let maximum = minimum + edge;
+            let axis_extent = f64::from(extent[axis]);
+            [-axis_extent, 0.0, axis_extent]
+                .into_iter()
+                .map(|offset| {
+                    if center[axis] < minimum + offset {
+                        minimum + offset - center[axis]
+                    } else if center[axis] > maximum + offset {
+                        center[axis] - maximum - offset
+                    } else {
+                        0.0
+                    }
+                })
+                .reduce(f64::min)
+                .unwrap_or(f64::INFINITY)
+                .powi(2)
+        })
+        .sum::<f64>();
+    distance_squared <= radius * radius
+}
+
 fn virtual_chunks_intersecting_radius(
     center: [f64; 3],
     radius: f64,
@@ -327,6 +386,24 @@ mod tests {
                 ChunkReference::new(second, IVec3::X),
             ])
         );
+    }
+
+    #[test]
+    fn torus_radius_query_crosses_the_scene_seam() {
+        let mut world = bevy::prelude::World::new();
+        let near_zero = world.spawn_empty().id();
+        let near_end = world.spawn_empty().id();
+        let mut index = VirtualChunkIndex::default();
+        index.insert(near_zero, IVec3::ZERO, &GlobalTransform::default());
+        index.insert(
+            near_end,
+            IVec3::new(1023, 0, 0),
+            &GlobalTransform::default(),
+        );
+
+        let chunks = index.chunks_in_torus_radius([0.0, 8.0, 8.0], 16.0, [16_384.0; 3]);
+        assert!(chunks.contains(&ChunkReference::new(near_zero, IVec3::ZERO)));
+        assert!(chunks.contains(&ChunkReference::new(near_end, IVec3::new(1023, 0, 0))));
     }
 
     #[test]

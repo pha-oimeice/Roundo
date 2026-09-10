@@ -1,9 +1,27 @@
 use crate::local_coordinate::data::{
-    CHUNK_EDGE_LENGTH, Chunk, LocalCoordinate, PositionedAtomicVoxel, SOLID_VOXEL_ID,
+    CHUNK_EDGE_LENGTH, Chunk, LocalCoordinate, LocalCoordinateChunkView, PositionedAtomicVoxel,
+    SOLID_VOXEL_ID,
 };
 use bevy::prelude::{IVec3, Vec3};
 
 impl LocalCoordinate {
+    /// Reads one voxel in local-coordinate space without exposing Chunk storage.
+    pub fn voxel(&self, position: IVec3) -> Option<crate::AtomicVoxel> {
+        let (chunk_position, local_position) = split_position(position);
+        self.chunks.get(&chunk_position)?.voxel(local_position)
+    }
+
+    /// Observes renderable loaded Chunks without exposing the backing map or Chunk layout.
+    pub fn loaded_chunk_views(&self) -> impl Iterator<Item = LocalCoordinateChunkView<'_>> {
+        self.chunks.iter().filter_map(|(position, chunk)| {
+            chunk.compressed_svo().map(|svo| LocalCoordinateChunkView {
+                position: *position,
+                revision: chunk.content_revision,
+                svo,
+            })
+        })
+    }
+
     /// Applies one authoritative voxel delta.
     pub fn apply_voxel(&mut self, voxel: PositionedAtomicVoxel) -> bool {
         let changed = self.apply_voxel_without_center_of_mass(voxel);

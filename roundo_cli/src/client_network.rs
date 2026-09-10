@@ -5,16 +5,17 @@ use roundo_local_coordinate::{
 };
 use roundo_marionette::{ClientMarionetteCommand, ClientMarionetteEvent, ClientMarionetteIpc};
 use roundo_networking::{
-    CertificatePolicy, ClientGameMessage, ClientHooks, ClientNetwork, ClientNetworkConfig,
-    ClientResourceMessage, NetworkError, ServerGameMessage, ServerResourceMessage, StreamId,
-    probe_quic_endpoint,
+    CertificatePolicy, ClientGameMessage, ClientHooks, ClientNetwork,
+    ClientNetworkConfig as NetworkRuntimeConfig, ClientResourceMessage, NetworkError,
+    ServerGameMessage, ServerResourceMessage, StreamId, probe_quic_endpoint,
 };
 use roundo_presence::{ClientPresenceCommand, ClientPresenceIpc};
-use roundo_user_config::ServerEntry;
+use roundo_toolbox::{BridgeStep, BridgeThreadGroup, run_polling_bridge};
+use roundo_user_config::{ClientNetworkConfig as ClientNetworkSettings, ServerEntry};
 use serde::Serialize;
 use std::collections::BTreeMap;
 use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
@@ -65,7 +66,11 @@ pub struct ProbeResult {
 }
 
 impl ServerProbeManager {
-    pub fn refresh(&self, servers: &[ServerEntry]) -> u64 {
+    pub fn refresh(
+        &self,
+        servers: &[ServerEntry],
+        network_settings: &ClientNetworkSettings,
+    ) -> u64 {
         let revision = {
             let mut cache = self
                 .cache
@@ -95,8 +100,9 @@ impl ServerProbeManager {
         };
         for (index, server) in servers.iter().cloned().enumerate() {
             let cache = Arc::clone(&self.cache);
+            let network_settings = network_settings.clone();
             std::thread::spawn(move || {
-                let result = probe_server(&server);
+                let result = probe_server(&server, &network_settings);
                 let mut cache = cache
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -153,8 +159,8 @@ impl ServerProbeManager {
     }
 }
 
-fn probe_server(server: &ServerEntry) -> ProbeResult {
-    let config = match network_config(server) {
+fn probe_server(server: &ServerEntry, network_settings: &ClientNetworkSettings) -> ProbeResult {
+    let config = match network_config(server, network_settings) {
         Ok(config) => config,
         Err(error) => {
             return ProbeResult {
@@ -182,6 +188,7 @@ fn probe_server(server: &ServerEntry) -> ProbeResult {
 
 #[derive(bevy::prelude::Resource)]
 pub struct ClientNetworkManager {
+    network_settings: ClientNetworkSettings,
     marionette_ipc: ClientMarionetteIpc,
     presence_ipc: ClientPresenceIpc,
     local_coordinate_ipc: LocalCoordinateClientIpc,
@@ -191,11 +198,13 @@ pub struct ClientNetworkManager {
 
 impl ClientNetworkManager {
     pub fn new(
+        network_settings: ClientNetworkSettings,
         marionette_ipc: ClientMarionetteIpc,
         presence_ipc: ClientPresenceIpc,
         local_coordinate_ipc: LocalCoordinateClientIpc,
     ) -> Self {
         Self {
+            network_settings,
             marionette_ipc,
             presence_ipc,
             local_coordinate_ipc,
@@ -223,6 +232,7 @@ impl ClientNetworkManager {
         };
         match ActiveClientConnection::start(
             server,
+            &self.network_settings,
             self.marionette_ipc.clone(),
             self.presence_ipc.clone(),
             self.local_coordinate_ipc.clone(),
@@ -264,7 +274,7 @@ impl ClientNetworkManager {
         info!(
             "Client connection state transition requested: {previous:?} -> Disconnected; server={server:?}"
         );
-        if let Some(active) = self.active.take() {
+        if let Some(mut active) = self.active.take() {
             active.shutdown();
         }
         self.snapshot = ClientConnectionSnapshot {
@@ -285,20 +295,21 @@ impl ClientNetworkManager {
 pub struct ActiveClientConnection {
     name: String,
     network: Arc<ClientNetwork>,
-    bridge_stop: Arc<AtomicBool>,
+    bridges: BridgeThreadGroup,
     status: Arc<RwLock<ClientConnectionStatus>>,
 }
 
 impl ActiveClientConnection {
     pub fn start(
         server: &ServerEntry,
+        network_settings: &ClientNetworkSettings,
         marionette_ipc: ClientMarionetteIpc,
         presence_ipc: ClientPresenceIpc,
         local_coordinate_ipc: LocalCoordinateClientIpc,
     ) -> Result<Self, String> {
-        validate_server_entry(server)?;
+        validate_server_entry(server, network_settings)?;
         let name = server.name.trim();
-        let network_config = network_config(server)?;
+        let network_config = network_config(server, network_settings)?;
         info!(
             "Starting client connection: server={}, quic_address={}",
             name, network_config.quic_address
@@ -314,20 +325,24 @@ impl ActiveClientConnection {
             ClientNetwork::start(network_config, hooks)
                 .map_err(|error| format!("Failed to start network client: {error}"))?,
         );
-        let bridge_stop = Arc::new(AtomicBool::new(false));
+        let mut bridges = BridgeThreadGroup::new();
         let game_network = Arc::clone(&network);
-        let game_stop = Arc::clone(&bridge_stop);
-        std::thread::spawn(move || bridge_game_ecs_events(marionette_ipc, game_network, game_stop));
+        bridges
+            .spawn("roundo-client-game-bridge", move |stop| {
+                bridge_game_ecs_events(marionette_ipc, game_network, stop)
+            })
+            .map_err(|error| format!("failed to start client game bridge: {error}"))?;
         let resource_network = Arc::clone(&network);
-        let resource_stop = Arc::clone(&bridge_stop);
-        std::thread::spawn(move || {
-            bridge_resource_ecs_events(local_coordinate_ipc, resource_network, resource_stop)
-        });
+        bridges
+            .spawn("roundo-client-resource-bridge", move |stop| {
+                bridge_resource_ecs_events(local_coordinate_ipc, resource_network, stop)
+            })
+            .map_err(|error| format!("failed to start client resource bridge: {error}"))?;
 
         Ok(Self {
             name: name.to_string(),
             network,
-            bridge_stop,
+            bridges,
             status,
         })
     }
@@ -343,9 +358,11 @@ impl ActiveClientConnection {
             .clone()
     }
 
-    pub fn shutdown(&self) {
+    /// Deterministically stops both ECS bridge adapters before stopping the
+    /// network runtime. Calling it more than once is harmless.
+    pub fn shutdown(&mut self) {
         debug!("Stopping client connection: server={}", self.name);
-        self.bridge_stop.store(true, Ordering::Release);
+        self.bridges.shutdown();
         self.network.shutdown();
     }
 }
@@ -356,21 +373,26 @@ impl Drop for ActiveClientConnection {
     }
 }
 
-pub fn validate_server_entry(server: &ServerEntry) -> Result<(), String> {
+pub fn validate_server_entry(
+    server: &ServerEntry,
+    configured: &ClientNetworkSettings,
+) -> Result<(), String> {
     if server.name.trim().is_empty() {
         return Err("Server name cannot be empty".to_string());
     }
-    network_config(server).map(|_| ())
+    network_config(server, configured).map(|_| ())
 }
 
-fn network_config(server: &ServerEntry) -> Result<ClientNetworkConfig, String> {
-    let configured = roundo_user_config::load_client_config("roundo-client-config.toml").network;
+fn network_config(
+    server: &ServerEntry,
+    configured: &ClientNetworkSettings,
+) -> Result<NetworkRuntimeConfig, String> {
     let (quic_address, server_name) = resolve_socket_address(
         &server.address,
         configured.endpoint.quic_port,
         "QUIC address",
     )?;
-    Ok(ClientNetworkConfig {
+    Ok(NetworkRuntimeConfig {
         quic_address,
         server_name,
         certificate_policy: if configured.ca_verification {
@@ -605,28 +627,24 @@ fn bridge_game_ecs_events(
     stop: Arc<AtomicBool>,
 ) {
     debug!("Started client game IPC bridge");
-    while !stop.load(Ordering::Acquire) {
-        let mut handled_event = false;
-        while let Some(event) = marionette_ipc.try_receive() {
-            handled_event = true;
-            let message = match event {
-                ClientMarionetteEvent::UsePlayerController(command) => {
-                    ClientGameMessage::UsePlayerController { command }
-                }
-            };
-            let message_kind = message.kind();
-            if let Err(error) = network.send(StreamId::Stream0, message) {
-                warn!(
-                    "Stopped client network bridge after send failure: message={message_kind}, error={error}"
-                );
-                return;
+    run_polling_bridge(&stop, || {
+        let Some(event) = marionette_ipc.try_receive() else {
+            return BridgeStep::Idle;
+        };
+        let message = match event {
+            ClientMarionetteEvent::UsePlayerController(command) => {
+                ClientGameMessage::UsePlayerController { command }
             }
+        };
+        let message_kind = message.kind();
+        if let Err(error) = network.send(StreamId::Stream0, message) {
+            warn!(
+                "Stopped client network bridge after send failure: message={message_kind}, error={error}"
+            );
+            return BridgeStep::Stop;
         }
-
-        if !handled_event {
-            std::thread::sleep(Duration::from_millis(1));
-        }
-    }
+        BridgeStep::Forwarded
+    });
     debug!("Stopped client game IPC bridge");
 }
 
@@ -636,10 +654,9 @@ fn bridge_resource_ecs_events(
     stop: Arc<AtomicBool>,
 ) {
     debug!("Started client resource IPC bridge");
-    while !stop.load(Ordering::Acquire) {
+    run_polling_bridge(&stop, || {
         let Some(event) = local_coordinate_ipc.try_receive() else {
-            std::thread::sleep(Duration::from_millis(1));
-            continue;
+            return BridgeStep::Idle;
         };
         let message = match event {
             LocalCoordinateClientEvent::RequestChunks(chunks) => {
@@ -654,9 +671,10 @@ fn bridge_resource_ecs_events(
             warn!(
                 "Stopped client resource bridge after send failure: message={message_kind}, error={error}"
             );
-            return;
+            return BridgeStep::Stop;
         }
-    }
+        BridgeStep::Forwarded
+    });
     debug!("Stopped client resource IPC bridge");
 }
 
@@ -671,6 +689,10 @@ mod tests {
     use roundo_presence::ClientPresenceCommand;
     use roundo_toolbox::CrossbeamThreadPipe;
     use roundo_user_config::ServerEntry;
+    use std::{
+        net::UdpSocket,
+        time::{Duration, Instant},
+    };
 
     fn network_manager() -> ClientNetworkManager {
         let marionette =
@@ -679,6 +701,7 @@ mod tests {
         let local_coordinate =
             CrossbeamThreadPipe::<LocalCoordinateClientCommand, LocalCoordinateClientEvent>::new();
         ClientNetworkManager::new(
+            roundo_user_config::ClientNetworkConfig::default(),
             marionette.endpoint_a(),
             presence.endpoint_a(),
             local_coordinate.endpoint_a(),
@@ -695,15 +718,25 @@ mod tests {
     }
 
     #[test]
-    fn builds_config_from_server_address() {
-        let config = network_config(&ServerEntry {
-            name: "Test".to_string(),
-            address: "127.0.0.1:4000".to_string(),
-        })
+    fn builds_config_from_the_runtime_owned_network_settings() {
+        let mut settings = roundo_user_config::ClientNetworkConfig::default();
+        settings.endpoint.quic_port = 4000;
+        settings.ca_verification = true;
+        let config = network_config(
+            &ServerEntry {
+                name: "Test".to_string(),
+                address: "127.0.0.1".to_string(),
+            },
+            &settings,
+        )
         .unwrap();
 
         assert_eq!(config.quic_address.to_string(), "127.0.0.1:4000");
         assert_eq!(config.server_name, "127.0.0.1");
+        assert_eq!(
+            config.certificate_policy,
+            roundo_networking::CertificatePolicy::SystemRoots
+        );
     }
 
     #[test]
@@ -743,10 +776,37 @@ mod tests {
     }
 
     #[test]
+    fn disconnect_cancels_an_in_progress_connection_promptly() {
+        let blackhole = UdpSocket::bind("127.0.0.1:0").unwrap();
+        blackhole
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let mut manager = network_manager();
+        manager
+            .connect(&ServerEntry {
+                name: "blackhole".into(),
+                address: blackhole.local_addr().unwrap().to_string(),
+            })
+            .unwrap();
+
+        let mut packet = [0; 2048];
+        blackhole.recv_from(&mut packet).unwrap();
+        let started = Instant::now();
+        manager.disconnect();
+
+        assert!(
+            started.elapsed() < Duration::from_millis(500),
+            "disconnect took {:?}",
+            started.elapsed()
+        );
+    }
+
+    #[test]
     fn refresh_is_nonblocking_and_advances_the_probe_revision() {
         let probes = ServerProbeManager::default();
-        assert_eq!(probes.refresh(&[]), 1);
-        assert_eq!(probes.refresh(&[]), 2);
+        let settings = roundo_user_config::ClientNetworkConfig::default();
+        assert_eq!(probes.refresh(&[], &settings), 1);
+        assert_eq!(probes.refresh(&[], &settings), 2);
     }
 
     #[test]

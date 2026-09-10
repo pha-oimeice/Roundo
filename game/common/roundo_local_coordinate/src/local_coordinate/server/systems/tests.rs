@@ -2,7 +2,26 @@ use super::*;
 use crate::VoxelChunkSvo;
 use crate::local_coordinate::data::{Chunk, PositionedAtomicVoxel, SOLID_VOXEL_ID};
 use bevy::prelude::{FixedUpdate, IVec3, Schedule, Update, Vec3, World};
-use roundo_presence::DEFAULT_S0_ROOM_SIZE;
+const TEST_S0_ROOM_SIZE: [f32; 3] = [32.0; 3];
+const TEST_S1_SIZE: [f32; 3] = [16_384.0; 3];
+
+fn observation_input(
+    player_id: PlayerId,
+    scene_id: SceneId,
+    position: Vec3,
+    scene_extent: [f32; 3],
+) -> LocalCoordinateObservationInput {
+    let mut input = LocalCoordinateObservationInput::default();
+    input.replace(
+        [LocalCoordinateObserver {
+            player_id,
+            scene_id,
+            position: position.as_dvec3().to_array(),
+        }],
+        [(scene_id, scene_extent)],
+    );
+    input
+}
 
 #[test]
 fn core_fixed_tick_does_not_run_world_streaming() {
@@ -11,17 +30,14 @@ fn core_fixed_tick_does_not_run_world_streaming() {
     let connection_id = ConnectionId(99);
     let player_id = PlayerId(99);
     let mut app = App::new();
-    app.insert_resource(ServerSceneWorlds::default())
-        .add_plugins(plugin);
+    app.insert_resource(observation_input(
+        player_id,
+        SceneId::S1,
+        Vec3::ZERO,
+        TEST_S1_SIZE,
+    ))
+    .add_plugins(plugin);
     app.world_mut().run_schedule(Startup);
-    app.world_mut().spawn((
-        Player { id: player_id },
-        PlayerScene {
-            scene_id: SceneId::S1,
-        },
-        ServerPlayer,
-        GlobalTransform::default(),
-    ));
     commands
         .try_send(LocalCoordinateServerCommand::SubscribePlayer {
             connection_id,
@@ -54,7 +70,7 @@ fn chunk_view_distance_is_clamped_and_retained_before_subscription() {
     let connection_id = ConnectionId(11);
     let mut app = App::new();
     app.insert_resource(LocalCoordinateServerPipe(transport.endpoint_b()))
-        .insert_resource(ServerSceneWorlds::default())
+        .init_resource::<LocalCoordinateObservationInput>()
         .init_resource::<LocalCoordinateServerWorld>()
         .init_resource::<LocalCoordinatePhysicsInterests>()
         .add_systems(Update, prepare_player_chunks);
@@ -74,6 +90,33 @@ fn chunk_view_distance_is_clamped_and_retained_before_subscription() {
 }
 
 #[test]
+fn torus_streaming_wraps_the_chunk_radius_across_scene_edges() {
+    let chunks = superflat_chunks_intersecting_torus_radius(
+        [0.0, 2.0, 0.0],
+        CHUNK_EDGE_LENGTH as f64,
+        0,
+        TEST_S1_SIZE,
+    );
+    let last = i64::from((TEST_S1_SIZE[0] / CHUNK_EDGE_LENGTH as f32) as i32 - 1);
+
+    assert!(chunks.contains(&[0, 0, 0]));
+    assert!(chunks.contains(&[last, 0, 0]));
+    assert!(chunks.contains(&[0, 0, last]));
+}
+
+#[test]
+fn torus_streaming_keeps_ground_near_the_vertical_seam() {
+    let chunks = superflat_chunks_intersecting_torus_radius(
+        [0.0, f64::from(TEST_S1_SIZE[1]) - 1.0, 0.0],
+        CHUNK_EDGE_LENGTH as f64,
+        0,
+        TEST_S1_SIZE,
+    );
+
+    assert!(chunks.contains(&[0, 0, 0]));
+}
+
+#[test]
 fn moving_observation_does_not_accumulate_pristine_generated_chunks() {
     let transport = CrossbeamThreadPipe::new();
     let commands = transport.endpoint_a();
@@ -81,7 +124,12 @@ fn moving_observation_does_not_accumulate_pristine_generated_chunks() {
     let player_id = PlayerId(12);
     let mut app = App::new();
     app.insert_resource(LocalCoordinateServerPipe(transport.endpoint_b()))
-        .insert_resource(ServerSceneWorlds::default())
+        .insert_resource(observation_input(
+            player_id,
+            SceneId::S1,
+            Vec3::ZERO,
+            TEST_S1_SIZE,
+        ))
         .init_resource::<LocalCoordinateServerWorld>()
         .init_resource::<LocalCoordinatePhysicsInterests>()
         .add_systems(
@@ -93,17 +141,6 @@ fn moving_observation_does_not_accumulate_pristine_generated_chunks() {
             )
                 .chain(),
         );
-    let player = app
-        .world_mut()
-        .spawn((
-            Player { id: player_id },
-            PlayerScene {
-                scene_id: SceneId::S1,
-            },
-            ServerPlayer,
-            GlobalTransform::default(),
-        ))
-        .id();
     app.world_mut().spawn((
         PcgLocalCoordinate::new(DEFAULT_PCG_LOCAL_COORDINATE_ID, SuperflatGenerator::new(0)),
         GlobalTransform::default(),
@@ -139,10 +176,16 @@ fn moving_observation_does_not_accumulate_pristine_generated_chunks() {
         .loaded_chunks[&DEFAULT_PCG_LOCAL_COORDINATE_ID]
         .len();
 
-    *app.world_mut()
-        .entity_mut(player)
-        .get_mut::<GlobalTransform>()
-        .unwrap() = GlobalTransform::from_translation(Vec3::new(160.0, 0.0, 0.0));
+    app.world_mut()
+        .resource_mut::<LocalCoordinateObservationInput>()
+        .replace(
+            [LocalCoordinateObserver {
+                player_id,
+                scene_id: SceneId::S1,
+                position: [160.0, 0.0, 0.0],
+            }],
+            [(SceneId::S1, TEST_S1_SIZE)],
+        );
     for _ in 0..100 {
         app.update();
         if app
@@ -170,7 +213,7 @@ fn moving_observation_does_not_accumulate_pristine_generated_chunks() {
         "old pristine chunk survived eviction"
     );
     assert!(
-        loaded.len() <= 6,
+        loaded.len() <= initial_count,
         "pristine generated chunks accumulated from {initial_count} to {}",
         loaded.len()
     );
@@ -183,24 +226,20 @@ fn player_chunk_generation_stays_inside_scene_bounds() {
     let connection_id = ConnectionId(1);
     let player_id = PlayerId(1);
     let scene_id = SceneId::S0 { room_id: 7 };
-    let mut scenes = ServerSceneWorlds::default();
-    assert!(scenes.resize_s0_room(7, DEFAULT_S0_ROOM_SIZE));
-
     let mut app = App::new();
     app.insert_resource(LocalCoordinateServerPipe(transport.endpoint_b()))
-        .insert_resource(scenes)
+        .insert_resource(observation_input(
+            player_id,
+            scene_id,
+            Vec3::ZERO,
+            TEST_S0_ROOM_SIZE,
+        ))
         .init_resource::<LocalCoordinateServerWorld>()
         .init_resource::<LocalCoordinatePhysicsInterests>()
         .add_systems(
             Update,
             (prepare_player_chunks, commit_generated_chunks).chain(),
         );
-    app.world_mut().spawn((
-        Player { id: player_id },
-        PlayerScene { scene_id },
-        ServerPlayer,
-        GlobalTransform::default(),
-    ));
     app.world_mut().spawn((
         PcgLocalCoordinate::new(DEFAULT_PCG_LOCAL_COORDINATE_ID, SuperflatGenerator::new(0))
             .in_scene(scene_id),
@@ -214,7 +253,7 @@ fn player_chunk_generation_stays_inside_scene_bounds() {
         })
         .unwrap();
 
-    let chunks_per_axis = (DEFAULT_S0_ROOM_SIZE[0] / CHUNK_EDGE_LENGTH as f32) as i64;
+    let chunks_per_axis = (TEST_S0_ROOM_SIZE[0] / CHUNK_EDGE_LENGTH as f32) as i64;
     for _ in 0..100 {
         app.update();
         if app

@@ -6,7 +6,7 @@ mod server;
 mod shared;
 
 use bevy::prelude::Bundle;
-pub use roundo_networking::protocol::{ControllerCommand, PlayerControllerCommand};
+pub use roundo_contracts::{ControllerCommand, PlayerControllerCommand};
 
 pub use self::block_interaction::{
     BlockInteraction, BlockInteractionMessage, DestroyBlockController,

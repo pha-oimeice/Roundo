@@ -3,12 +3,9 @@
 use bevy::prelude::KeyCode;
 use roundo_marionette::{ClientKeyBindings, ClientMarionetteInputSettings, MovementAction};
 use roundo_presence::ClientPresenceSettings;
-use roundo_toolbox::fs::get_exe_root_path;
-pub use roundo_user_config::ServerEntry;
 use roundo_user_config::{
-    ClientCameraSettingsConfig, ClientConfig, ClientControlSettingsConfig, ClientKeyBindingConfig,
-    ClientKeyCode, ClientMovementAction, ClientNetworkConfig, ClientSettingsConfig,
-    ClientWorldSettingsConfig, CommonConfig,
+    ClientConfig, ClientKeyCode, ClientMovementAction, ClientNetworkConfig, ClientSettingsConfig,
+    CommonConfig,
 };
 use std::{
     path::PathBuf,
@@ -36,49 +33,8 @@ pub fn mod_path() -> PathBuf {
     COMMON_CONFIG.resolved_mod_path()
 }
 
-pub fn servers() -> Vec<ServerEntry> {
-    read_config().servers.clone()
-}
-
 pub fn settings() -> ClientSettingsConfig {
     read_config().settings.clone()
-}
-
-pub fn save_servers(servers: &[ServerEntry]) -> Result<(), String> {
-    update_config(|config| config.servers = servers.to_vec())
-}
-
-pub fn save_settings(
-    input: &ClientMarionetteInputSettings,
-    voxel_raycast_distance: f32,
-    presence: &ClientPresenceSettings,
-    bindings: &ClientKeyBindings,
-) -> Result<(), String> {
-    let mut settings = ClientSettingsConfig {
-        controls: ClientControlSettingsConfig {
-            mouse_sensitivity: input.mouse_sensitivity,
-        },
-        camera: ClientCameraSettingsConfig {
-            move_speed: input.camera_move_speed,
-            voxel_raycast_distance,
-        },
-        world: ClientWorldSettingsConfig {
-            joinable_world_radius: presence.joinable_world_radius(),
-            chunk_view_distance: settings().world.chunk_view_distance,
-        },
-        key_bindings: bindings
-            .iter()
-            .filter_map(|(key, actions)| {
-                let key = config_key_code(key)?;
-                Some(ClientKeyBindingConfig {
-                    key,
-                    actions: actions.iter().copied().map(config_action).collect(),
-                })
-            })
-            .collect(),
-    };
-    settings.normalize();
-    update_config(|config| config.settings = settings)
 }
 
 pub fn runtime_presence_settings(settings: &ClientSettingsConfig) -> ClientPresenceSettings {
@@ -107,17 +63,6 @@ fn read_config() -> std::sync::RwLockReadGuard<'static, ClientConfig> {
     CLIENT_CONFIG
         .read()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
-}
-
-fn update_config(update: impl FnOnce(&mut ClientConfig)) -> Result<(), String> {
-    let mut config = CLIENT_CONFIG
-        .write()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    update(&mut config);
-    let serialized = toml::to_string_pretty(&*config)
-        .map_err(|error| format!("Failed to serialize client config: {error}"))?;
-    std::fs::write(get_exe_root_path().join(CONFIG_FILE_NAME), serialized)
-        .map_err(|error| format!("Failed to save client config: {error}"))
 }
 
 const KEY_CODE_PAIRS: [(ClientKeyCode, KeyCode); 52] = [
@@ -182,12 +127,6 @@ fn runtime_key_code(configured: ClientKeyCode) -> KeyCode {
         .expect("every configured key code must have a runtime mapping")
 }
 
-fn config_key_code(runtime: KeyCode) -> Option<ClientKeyCode> {
-    KEY_CODE_PAIRS
-        .iter()
-        .find_map(|(config, key)| (*key == runtime).then_some(*config))
-}
-
 fn runtime_action(configured: ClientMovementAction) -> MovementAction {
     match configured {
         ClientMovementAction::MoveUp => MovementAction::MoveUp,
@@ -199,44 +138,9 @@ fn runtime_action(configured: ClientMovementAction) -> MovementAction {
     }
 }
 
-fn config_action(runtime: MovementAction) -> ClientMovementAction {
-    match runtime {
-        MovementAction::MoveUp => ClientMovementAction::MoveUp,
-        MovementAction::MoveDown => ClientMovementAction::MoveDown,
-        MovementAction::MoveLeft => ClientMovementAction::MoveLeft,
-        MovementAction::MoveRight => ClientMovementAction::MoveRight,
-        MovementAction::MoveForward => ClientMovementAction::MoveForward,
-        MovementAction::MoveBackward => ClientMovementAction::MoveBackward,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn runtime_key_bindings_round_trip_through_client_config() {
-        let settings = ClientSettingsConfig::default();
-        let runtime = runtime_key_bindings(&settings);
-        let serialized = runtime
-            .iter()
-            .map(|(key, actions)| {
-                (
-                    config_key_code(key).expect("default key must be configurable"),
-                    actions
-                        .iter()
-                        .copied()
-                        .map(config_action)
-                        .collect::<Vec<_>>(),
-                )
-            })
-            .collect::<Vec<_>>();
-
-        assert_eq!(serialized.len(), settings.key_bindings.len());
-        for configured in settings.key_bindings {
-            assert!(serialized.contains(&(configured.key, configured.actions)));
-        }
-    }
 
     #[test]
     fn missing_dev_mode_defaults_to_false() {

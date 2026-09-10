@@ -3,8 +3,8 @@ mod server;
 
 use super::shared::{ControllerAction, EventController};
 use bevy::prelude::{Entity, Message};
-use roundo_networking::protocol::ControllerCommand;
-pub use roundo_networking::protocol::{DestroyBlockControllerAction, PlaceBlockControllerAction};
+use roundo_contracts::ControllerCommand;
+pub use roundo_contracts::{DestroyBlockControllerAction, PlaceBlockControllerAction};
 
 pub(super) use self::client::route_block_interactions;
 pub(super) use self::server::accept_block_interactions;

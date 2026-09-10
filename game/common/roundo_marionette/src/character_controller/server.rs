@@ -11,7 +11,7 @@ use bevy::prelude::{
     App, Component, Entity, FixedUpdate, IntoScheduleConfigs, MessageWriter, Plugin, Query, Res,
     Resource, SystemSet,
 };
-pub use roundo_networking::ConnectionId;
+pub use roundo_contracts::ConnectionId;
 use roundo_toolbox::{
     CrossbeamThreadPipe, CrossbeamThreadPipeEndpointA, CrossbeamThreadPipeEndpointB,
 };
@@ -116,7 +116,7 @@ fn process_controller_commands(
         .map(|(entity, target)| (target.connection_id, entity))
         .collect::<HashMap<_, _>>();
     let mut movement_by_entity =
-        HashMap::<Entity, roundo_networking::protocol::ControllerCommand<Movement3DAction>>::new();
+        HashMap::<Entity, roundo_contracts::ControllerCommand<Movement3DAction>>::new();
     let mut rotation_by_entity = HashMap::new();
 
     for _ in 0..MAX_CONTROL_COMMANDS_PER_TICK {
@@ -140,17 +140,15 @@ fn process_controller_commands(
                 }
                 movement_by_entity
                     .entry(entity)
-                    .and_modify(
-                        |pending: &mut roundo_networking::protocol::ControllerCommand<_>| {
-                            if command.sequence > pending.sequence {
-                                for axis in 0..3 {
-                                    pending.action.translation_delta[axis] +=
-                                        command.action.translation_delta[axis];
-                                }
-                                pending.sequence = command.sequence;
+                    .and_modify(|pending: &mut roundo_contracts::ControllerCommand<_>| {
+                        if command.sequence > pending.sequence {
+                            for axis in 0..3 {
+                                pending.action.translation_delta[axis] +=
+                                    command.action.translation_delta[axis];
                             }
-                        },
-                    )
+                            pending.sequence = command.sequence;
+                        }
+                    })
                     .or_insert(command);
             }
             PlayerControllerCommand::SyncRotation(sync) => {

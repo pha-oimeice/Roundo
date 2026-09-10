@@ -1,5 +1,5 @@
 use bevy::prelude::Component;
-use roundo_networking::protocol::ControllerCommand;
+use roundo_contracts::ControllerCommand;
 use std::{fmt::Debug, marker::PhantomData};
 
 pub trait ControllerAction: Copy + Debug + Send + Sync + 'static {

@@ -1,3 +1,4 @@
+pub mod bridge_runtime;
 mod config_serialization;
 pub mod fs;
 pub mod macros;
@@ -8,7 +9,11 @@ pub mod version;
 
 #[allow(unused_imports)]
 pub use self::{
-    config_serialization::load_or_create_config, templates::*, traits::*, version::UpdateVersion,
+    bridge_runtime::{BridgeStep, BridgeThreadGroup, run_polling_bridge},
+    config_serialization::load_or_create_config,
+    templates::*,
+    traits::*,
+    version::UpdateVersion,
 };
 use std::net::{SocketAddr, ToSocketAddrs};
 

@@ -6,7 +6,7 @@ use crate::character_controller::client::{
 use bevy::prelude::{
     ButtonInput, Camera, EulerRot, KeyCode, Quat, Query, Res, ResMut, Time, Transform, Vec3, With,
 };
-use roundo_networking::protocol::PlayerControllerCommand;
+use roundo_contracts::PlayerControllerCommand;
 
 pub(crate) fn route_player_movement(
     keyboard: Res<ButtonInput<KeyCode>>,

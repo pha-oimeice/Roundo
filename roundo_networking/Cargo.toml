@@ -8,6 +8,7 @@ log.workspace = true
 postcard.workspace = true
 quinn.workspace = true
 rcgen.workspace = true
+roundo_contracts.workspace = true
 roundo_toolbox.workspace = true
 rustls.workspace = true
 serde.workspace = true

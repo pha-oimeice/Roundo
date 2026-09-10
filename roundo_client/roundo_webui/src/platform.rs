@@ -373,20 +373,17 @@ impl UiNavigationExecutor {
         opened
     }
 
-    pub fn prepare_open_response(&mut self) {
-        self.last_open_pending = None;
-    }
-
-    pub fn take_last_open(&mut self) -> Option<UiInstanceId> {
-        self.last_open_pending.take()
-    }
-
-    pub fn defer_open_response(
+    /// Completes the command side of the most recent successful UI Open.
+    /// The navigation module alone owns whether the result must wait for a
+    /// physical-view commit or can be delivered immediately.
+    pub fn complete_open_command(
         &mut self,
-        pending: UiInstanceId,
         sender: ResponseSender<Value>,
         success: Value,
-    ) {
+    ) -> Result<(), (ResponseSender<Value>, Value)> {
+        let Some(pending) = self.last_open_pending.take() else {
+            return Err((sender, success));
+        };
         #[cfg(target_os = "windows")]
         {
             self.deferred_open_responses
@@ -397,6 +394,7 @@ impl UiNavigationExecutor {
             let _ = pending;
             let _ = sender.respond(success);
         }
+        Ok(())
     }
 
     #[cfg(target_os = "windows")]

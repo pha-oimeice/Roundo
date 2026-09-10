@@ -2,7 +2,7 @@ mod client;
 mod server;
 
 use bevy::prelude::{Entity, Message};
-pub use roundo_networking::protocol::RotationSync;
+pub use roundo_contracts::RotationSync;
 
 #[cfg(test)]
 pub(super) use self::client::apply_camera_rotation;

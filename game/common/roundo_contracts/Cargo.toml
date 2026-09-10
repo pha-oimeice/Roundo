@@ -1,9 +1,9 @@
 [package]
-name = "roundo_presence"
+name = "roundo_contracts"
 version.workspace = true
 edition.workspace = true
 
 [dependencies]
-bevy.workspace = true
-roundo_contracts.workspace = true
+postcard.workspace = true
 roundo_toolbox.workspace = true
+serde.workspace = true

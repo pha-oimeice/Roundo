@@ -19,6 +19,7 @@ fn main() {
     let command_io = command_pipe.io();
     app.insert_resource(command_pipe)
         .insert_resource(roundo_cli::client_network::ClientNetworkManager::new(
+            config::network_config(),
             client_marionette_ipc(),
             client_presence_ipc(),
             client_local_coordinate_ipc(),

@@ -1,9 +1,5 @@
 use super::*;
 use bevy::prelude::{Fixed, Time};
-use roundo_marionette::{
-    ControllerCommand, DestroyBlockController, MarionetteServerPlugin, Movement3D,
-    Movement3DAction, PlaceBlockController, PlayerControllerCommand, ServerMarionetteCommand,
-};
 
 #[test]
 fn s1_has_configurable_constant_default_dimensions() {
@@ -126,17 +122,9 @@ fn connecting_publishes_the_initial_server_player_transform() {
 
     let player_entity =
         app.world().resource::<PlayerRegistry>().by_connection[&ConnectionId(12)].entity;
-    assert!(app.world().get::<Movement3D>(player_entity).is_some());
-    assert!(
-        app.world()
-            .get::<DestroyBlockController>(player_entity)
-            .is_some()
-    );
-    assert!(
-        app.world()
-            .get::<PlaceBlockController>(player_entity)
-            .is_some()
-    );
+    assert!(app.world().get::<Player>(player_entity).is_some());
+    assert!(app.world().get::<PlayerScene>(player_entity).is_some());
+    assert!(app.world().get::<Transform>(player_entity).is_some());
 
     let mut received_state = None;
     while let Some(event) = commands.try_receive() {
@@ -184,7 +172,7 @@ fn disconnecting_despawns_only_the_matching_player() {
     app.world_mut().run_schedule(FixedUpdate);
 
     assert!(app.world().get_entity(first).is_err());
-    assert!(app.world().get::<Movement3D>(second).is_some());
+    assert!(app.world().get::<ServerPlayer>(second).is_some());
     assert!(
         !app.world()
             .resource::<PlayerRegistry>()
@@ -196,44 +184,5 @@ fn disconnecting_despawns_only_the_matching_player() {
             .resource::<PlayerRegistry>()
             .by_connection
             .contains_key(&second_connection)
-    );
-}
-
-#[test]
-fn player_controller_commands_drive_the_presence_player() {
-    let marionette = MarionetteServerPlugin::new();
-    let controller_commands = marionette.ipc();
-    let presence = RoundoPresenceServerPlugin::new();
-    let presence_commands = presence.ipc();
-    let connection_id = ConnectionId(13);
-    let mut app = App::new();
-    app.init_resource::<Time<Fixed>>()
-        .add_plugins((marionette, presence));
-    presence_commands
-        .try_send(PresenceServerCommand::Connect { connection_id })
-        .unwrap();
-    app.world_mut().run_schedule(FixedUpdate);
-
-    controller_commands
-        .try_send(ServerMarionetteCommand::UsePlayerController {
-            connection_id,
-            command: PlayerControllerCommand::Movement3D(ControllerCommand {
-                sequence: 1,
-                action: Movement3DAction {
-                    translation_delta: [0.0, 0.0, 5.0],
-                },
-            }),
-        })
-        .unwrap();
-    app.world_mut().run_schedule(FixedUpdate);
-
-    let player_entity =
-        app.world().resource::<PlayerRegistry>().by_connection[&connection_id].entity;
-    assert_eq!(
-        app.world()
-            .get::<Transform>(player_entity)
-            .unwrap()
-            .translation,
-        Vec3::new(0.0, 2.0, 5.0)
     );
 }

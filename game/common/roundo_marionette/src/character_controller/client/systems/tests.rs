@@ -16,7 +16,7 @@ use bevy::{
         App, ButtonInput, Camera, EulerRot, MouseButton, Quat, Time, Transform, Update, Vec2, Vec3,
     },
 };
-use roundo_networking::protocol::{PlayerId, SceneId};
+use roundo_contracts::{PlayerId, SceneId};
 use roundo_toolbox::CrossbeamThreadPipe;
 use std::time::Duration;
 

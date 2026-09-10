@@ -36,12 +36,14 @@ pub use client::{
 pub use data::{
     AtomicVoxel, AtomicVoxelId, EMPTY_VOXEL_ID, GLOBAL_ATOMIC_VOXEL_DATA, GlobalAtomicVoxelData,
     LocalAtomicVoxelData, LocalCoordinate, LocalCoordinateCRUDMessage,
-    LocalCoordinateCRUDMessageEnum, LocalCoordinateIdentity, PositionedAtomicVoxel, SOLID_VOXEL_ID,
+    LocalCoordinateCRUDMessageEnum, LocalCoordinateChunkView, LocalCoordinateIdentity,
+    PositionedAtomicVoxel, SOLID_VOXEL_ID,
 };
 pub use raycast::{VoxelRaycastHit, VoxelRaycaster};
 pub use server::{
-    DEFAULT_PCG_LOCAL_COORDINATE_ID, LocalCoordinateServerCommand, LocalCoordinateServerEvent,
-    LocalCoordinateServerIpc, LocalCoordinateServerPlugin, LocalCoordinateServerWorld,
+    DEFAULT_PCG_LOCAL_COORDINATE_ID, LocalCoordinateObservationInput, LocalCoordinateObserver,
+    LocalCoordinateServerCommand, LocalCoordinateServerEvent, LocalCoordinateServerIpc,
+    LocalCoordinateServerPlugin, LocalCoordinateServerSet, LocalCoordinateServerWorld,
     PcgLocalCoordinate,
 };
 pub use transform::LocalCoordinateTransform;

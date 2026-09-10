@@ -1,7 +1,7 @@
 use crate::{AtomicVoxel, CHUNK_EDGE_LENGTH, EMPTY_VOXEL_ID};
 use crate::{ChunkVersion, VoxelChunkSvo};
 use roundo_algorithm::tree::{BreadthFirstLosslessSvo, Node, UnoptimizedOctree};
-use roundo_networking::{ConnectionId, SerializedPayload};
+use roundo_contracts::{ConnectionId, SerializedPayload};
 use roundo_toolbox::{
     CrossbeamThreadPipe, CrossbeamThreadPipeEndpointA, CrossbeamThreadPipeEndpointB,
 };

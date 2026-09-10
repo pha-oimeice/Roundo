@@ -6,20 +6,21 @@ pub use local_coordinate::{
     AtomicVoxel, AtomicVoxelId, ChunkReference, ClientChunkViewDistance,
     DEFAULT_CHUNK_VIEW_DISTANCE, DEFAULT_PCG_LOCAL_COORDINATE_ID, EMPTY_VOXEL_ID,
     GLOBAL_ATOMIC_VOXEL_DATA, GlobalAtomicVoxelData, LocalAtomicVoxelData, LocalCoordinate,
-    LocalCoordinateCRUDMessage, LocalCoordinateCRUDMessageEnum, LocalCoordinateClientCommand,
-    LocalCoordinateClientEvent, LocalCoordinateClientIpc, LocalCoordinateClientPlugin,
-    LocalCoordinateClientWorld, LocalCoordinateIdentity, LocalCoordinateServerCommand,
+    LocalCoordinateCRUDMessage, LocalCoordinateCRUDMessageEnum, LocalCoordinateChunkView,
+    LocalCoordinateClientCommand, LocalCoordinateClientEvent, LocalCoordinateClientIpc,
+    LocalCoordinateClientPlugin, LocalCoordinateClientWorld, LocalCoordinateIdentity,
+    LocalCoordinateObservationInput, LocalCoordinateObserver, LocalCoordinateServerCommand,
     LocalCoordinateServerEvent, LocalCoordinateServerIpc, LocalCoordinateServerPlugin,
-    LocalCoordinateServerWorld, LocalCoordinateSet, LocalCoordinateTransform,
-    MAX_CHUNK_VIEW_DISTANCE, MIN_CHUNK_VIEW_DISTANCE, PcgLocalCoordinate, PositionedAtomicVoxel,
-    SOLID_VOXEL_ID, VIRTUAL_CHUNK_EDGE_LENGTH, VirtualChunkCoordinate, VirtualChunkIndex,
-    VoxelRaycastHit, VoxelRaycaster,
+    LocalCoordinateServerSet, LocalCoordinateServerWorld, LocalCoordinateSet,
+    LocalCoordinateTransform, MAX_CHUNK_VIEW_DISTANCE, MIN_CHUNK_VIEW_DISTANCE, PcgLocalCoordinate,
+    PositionedAtomicVoxel, SOLID_VOXEL_ID, VIRTUAL_CHUNK_EDGE_LENGTH, VirtualChunkCoordinate,
+    VirtualChunkIndex, VoxelRaycastHit, VoxelRaycaster,
 };
 pub use roundo_algorithm::pcg::{
     infinite_spheres::{CHUNK_EDGE_LENGTH, EMPTY_MATERIAL_ID, GeneratedChunk, SOLID_MATERIAL_ID},
     superflat::{SuperflatGenerator, generate_chunk},
 };
-pub use roundo_networking::{ChunkId, ChunkVersion, LocalCoordinateId};
+pub use roundo_contracts::{ChunkId, ChunkVersion, LocalCoordinateId};
 pub type VoxelChunkSvo = roundo_algorithm::tree::BreadthFirstLosslessSvo<AtomicVoxel>;
 
 pub type ChunkCoordinate = [i64; 3];

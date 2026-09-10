@@ -7,13 +7,14 @@ impl Plugin for LocalCoordinateServerPlugin {
                 self.generated_coordinates.clone(),
             ))
             .init_resource::<LocalCoordinateServerWorld>()
+            .init_resource::<LocalCoordinateObservationInput>()
             .insert_resource(LocalCoordinateServerPipe(self.pipe.endpoint_b()))
             .configure_sets(
                 Update,
                 (
-                    LocalCoordinateServerStreamingSet::Prepare,
+                    LocalCoordinateServerSet::Prepare,
                     LocalCoordinateSet::RebuildIndex,
-                    LocalCoordinateServerStreamingSet::Commit,
+                    LocalCoordinateServerSet::Commit,
                     LocalCoordinatePhysicsSet::Sync,
                 )
                     .chain(),
@@ -26,7 +27,7 @@ impl Plugin for LocalCoordinateServerPlugin {
                 Update,
                 (prepare_player_chunks, commit_generated_chunks)
                     .chain()
-                    .in_set(LocalCoordinateServerStreamingSet::Prepare),
+                    .in_set(LocalCoordinateServerSet::Prepare),
             )
             .add_systems(
                 Update,
@@ -37,7 +38,7 @@ impl Plugin for LocalCoordinateServerPlugin {
                     publish_derived_svo_results,
                 )
                     .chain()
-                    .in_set(LocalCoordinateServerStreamingSet::Commit),
+                    .in_set(LocalCoordinateServerSet::Commit),
             );
     }
 }
@@ -90,10 +91,9 @@ fn spawn_generated_local_coordinates(
 
 fn prepare_player_chunks(
     pipe: Res<LocalCoordinateServerPipe>,
-    scenes: Res<ServerSceneWorlds>,
+    observation_input: Res<LocalCoordinateObservationInput>,
     mut world: ResMut<LocalCoordinateServerWorld>,
     mut physics_interests: ResMut<LocalCoordinatePhysicsInterests>,
-    players: Query<(&Player, &PlayerScene, &GlobalTransform), With<ServerPlayer>>,
     mut local_coordinates: Query<(&PcgLocalCoordinate, &GlobalTransform, &mut LocalCoordinate)>,
 ) {
     while let Some(command) = pipe.0.try_receive() {
@@ -160,14 +160,14 @@ fn prepare_player_chunks(
         },
     );
     world.observation_by_player.clear();
-    for (player, scene, transform) in &players {
-        if let Some(&view_distance_chunks) = subscribed_players.get(&player.id) {
+    for observer in observation_input.observers() {
+        if let Some(&view_distance_chunks) = subscribed_players.get(&observer.player_id) {
             world.observation_by_player.insert(
-                player.id,
+                observer.player_id,
                 ObservationRegion {
-                    center: transform.translation().as_dvec3().to_array(),
+                    center: observer.position,
                     radius: f64::from(view_distance_chunks) * CHUNK_EDGE_LENGTH as f64,
-                    scene_id: scene.scene_id,
+                    scene_id: observer.scene_id,
                 },
             );
         }
@@ -181,7 +181,7 @@ fn prepare_player_chunks(
 
     for (generated, coordinate_transform, mut local_coordinate) in &mut local_coordinates {
         active_coordinates.insert(generated.id);
-        let Some(space) = scenes.space(generated.scene_id) else {
+        let Some(scene_extent) = observation_input.scene_extent(generated.scene_id) else {
             continue;
         };
         let observations = world
@@ -195,13 +195,14 @@ fn prepare_player_chunks(
             observations
                 .iter()
                 .flat_map(|observation| {
-                    superflat_chunks_intersecting_radius(
+                    superflat_chunks_intersecting_torus_radius(
                         observation.center,
                         PHYSICS_CHUNK_RADIUS * CHUNK_EDGE_LENGTH as f64,
                         generated.generator.height,
+                        scene_extent,
                     )
                 })
-                .filter(|coordinate| chunk_intersects_space(*coordinate, space))
+                .filter(|coordinate| chunk_intersects_space(*coordinate, scene_extent))
                 .filter_map(crate::local_coordinate::pcg::local_chunk_position)
                 .collect(),
         );
@@ -238,13 +239,14 @@ fn prepare_player_chunks(
             let desired_chunks = snapped_observations
                 .iter()
                 .flat_map(|observation| {
-                    superflat_chunks_intersecting_radius(
+                    superflat_chunks_intersecting_torus_radius(
                         observation.center,
                         observation.radius,
                         generated.generator.height,
+                        scene_extent,
                     )
                 })
-                .filter(|coordinate| chunk_intersects_space(*coordinate, space))
+                .filter(|coordinate| chunk_intersects_space(*coordinate, scene_extent))
                 .collect::<HashSet<_>>();
             let evictable = loaded_chunks
                 .keys()
@@ -270,10 +272,11 @@ fn prepare_player_chunks(
                 .copied()
                 .collect::<Vec<_>>();
             missing.sort_by(|left, right| {
-                nearest_chunk_distance_squared(*left, &snapped_observations)
+                nearest_chunk_distance_squared(*left, &snapped_observations, scene_extent)
                     .total_cmp(&nearest_chunk_distance_squared(
                         *right,
                         &snapped_observations,
+                        scene_extent,
                     ))
                     .then_with(|| left.cmp(right))
             });
@@ -431,6 +434,7 @@ fn changed_chunk_versions(
 fn publish_subscription_changes(
     pipe: Res<LocalCoordinateServerPipe>,
     virtual_chunks: Res<VirtualChunkIndex>,
+    observation_input: Res<LocalCoordinateObservationInput>,
     mut world: ResMut<LocalCoordinateServerWorld>,
     generated_coordinates: Query<(&PcgLocalCoordinate, &LocalCoordinate)>,
 ) {
@@ -447,13 +451,11 @@ fn publish_subscription_changes(
         };
         let observation = world.observation_by_player.get(&player_id).copied();
         let desired_chunks = observation.map_or_else(HashMap::new, |observation| {
+            let Some(scene_extent) = observation_input.scene_extent(observation.scene_id) else {
+                return HashMap::new();
+            };
             virtual_chunks
-                .chunks_in_radius(
-                    observation.center[0],
-                    observation.center[1],
-                    observation.center[2],
-                    observation.radius,
-                )
+                .chunks_in_torus_radius(observation.center, observation.radius, scene_extent)
                 .into_iter()
                 .filter_map(|chunk_reference| {
                     streamed_chunk(
@@ -478,17 +480,37 @@ fn publish_subscription_changes(
             });
         }
 
-        let chunks = changed_chunk_versions(&advertised_chunks, &desired_chunks);
+        let mut chunks = changed_chunk_versions(&advertised_chunks, &desired_chunks);
+        if let Some(observation) = observation {
+            let scene_extent = observation_input
+                .scene_extent(observation.scene_id)
+                .expect("an observed scene has a validated extent");
+            chunks.sort_by(|left, right| {
+                nearest_chunk_distance_squared(left.coordinate, &[observation], scene_extent)
+                    .total_cmp(&nearest_chunk_distance_squared(
+                        right.coordinate,
+                        &[observation],
+                        scene_extent,
+                    ))
+                    .then_with(|| {
+                        (left.local_coordinate_id.0, left.coordinate)
+                            .cmp(&(right.local_coordinate_id.0, right.coordinate))
+                    })
+            });
+        }
         if !chunks.is_empty() {
             let _ = pipe.0.try_send(LocalCoordinateServerEvent::ChunkVersions {
                 connection_id,
                 chunks,
             });
         }
-        for unloaded in advertised_chunks
+        let mut unloaded = advertised_chunks
             .keys()
             .filter(|chunk| !desired_chunks.contains_key(chunk))
-        {
+            .copied()
+            .collect::<Vec<_>>();
+        unloaded.sort_unstable_by_key(|chunk| (chunk.local_coordinate_id.0, chunk.coordinate));
+        for unloaded in unloaded {
             let _ = pipe.0.try_send(LocalCoordinateServerEvent::ChunkUnloaded {
                 connection_id,
                 local_coordinate_id: unloaded.local_coordinate_id,
@@ -546,7 +568,9 @@ fn serve_requested_chunks(
             else {
                 continue;
             };
-            let Some(local_position) = local_chunk_position(requested.coordinate) else {
+            let Some(local_position) =
+                crate::local_coordinate::pcg::local_chunk_position(requested.coordinate)
+            else {
                 continue;
             };
             let Some(chunk) = local_coordinate.chunks.get_mut(&local_position) else {
@@ -691,26 +715,10 @@ fn streamed_chunk(
     Some((chunk_id, *chunk_versions.get(&chunk_id)?))
 }
 
-fn local_chunk_position(coordinate: ChunkCoordinate) -> Option<bevy::prelude::IVec3> {
-    let edge_length = CHUNK_EDGE_LENGTH as i32;
-    let minimum = i64::from(i32::MIN / edge_length);
-    let maximum = i64::from(i32::MAX / edge_length);
-    if coordinate
-        .iter()
-        .any(|value| !(minimum..=maximum).contains(value))
-    {
-        return None;
-    }
-    Some(bevy::prelude::IVec3::new(
-        coordinate[0] as i32,
-        coordinate[1] as i32,
-        coordinate[2] as i32,
-    ))
-}
-
 fn nearest_chunk_distance_squared(
     coordinate: ChunkCoordinate,
     observations: &[ObservationRegion],
+    scene_extent: [f32; 3],
 ) -> f64 {
     let edge = CHUNK_EDGE_LENGTH as f64;
     observations
@@ -718,8 +726,13 @@ fn nearest_chunk_distance_squared(
         .map(|observation| {
             (0..3)
                 .map(|axis| {
-                    let center = coordinate[axis] as f64 * edge + edge * 0.5;
-                    (center - observation.center[axis]).powi(2)
+                    let chunk_center = coordinate[axis] as f64 * edge + edge * 0.5;
+                    periodic_delta(
+                        chunk_center,
+                        observation.center[axis],
+                        f64::from(scene_extent[axis]),
+                    )
+                    .powi(2)
                 })
                 .sum::<f64>()
         })
@@ -727,38 +740,73 @@ fn nearest_chunk_distance_squared(
         .unwrap_or(f64::INFINITY)
 }
 
-fn superflat_chunks_intersecting_radius(
+fn periodic_delta(first: f64, second: f64, extent: f64) -> f64 {
+    let difference = (first - second).abs().rem_euclid(extent);
+    difference.min(extent - difference)
+}
+
+fn distance_to_interval(value: f64, minimum: f64, maximum: f64) -> f64 {
+    if value < minimum {
+        minimum - value
+    } else if value > maximum {
+        value - maximum
+    } else {
+        0.0
+    }
+}
+
+fn periodic_distance_to_interval(value: f64, minimum: f64, maximum: f64, extent: f64) -> f64 {
+    [-extent, 0.0, extent]
+        .into_iter()
+        .map(|offset| distance_to_interval(value, minimum + offset, maximum + offset))
+        .reduce(f64::min)
+        .unwrap_or(f64::INFINITY)
+}
+
+fn superflat_chunks_intersecting_torus_radius(
     center: [f64; 3],
     radius: f64,
     height: i64,
+    scene_extent: [f32; 3],
 ) -> HashSet<ChunkCoordinate> {
     let edge = CHUNK_EDGE_LENGTH as f64;
+    let chunk_counts = scene_extent.map(|extent| (f64::from(extent) / edge).floor() as i64);
+    if chunk_counts.into_iter().any(|count| count <= 0) {
+        return HashSet::new();
+    }
     let minimum_x = ((center[0] - radius) / edge).floor() as i64;
     let maximum_x = ((center[0] + radius) / edge).floor() as i64;
     let minimum_z = ((center[2] - radius) / edge).floor() as i64;
     let maximum_z = ((center[2] + radius) / edge).floor() as i64;
     let y = height.div_euclid(CHUNK_EDGE_LENGTH as i64);
+    let canonical_y = y.rem_euclid(chunk_counts[1]);
+    let y_minimum = canonical_y as f64 * edge;
+    let y_distance = periodic_distance_to_interval(
+        center[1],
+        y_minimum,
+        y_minimum + edge,
+        f64::from(scene_extent[1]),
+    );
+    if y_distance > radius {
+        return HashSet::new();
+    }
     let radius_squared = radius * radius;
     let mut chunks = HashSet::new();
 
-    for x in minimum_x..=maximum_x {
-        for z in minimum_z..=maximum_z {
-            let coordinate = [x, y, z];
-            let distance_squared = (0..3)
-                .map(|axis| {
-                    let chunk_min = coordinate[axis] as f64 * edge;
-                    let chunk_max = chunk_min + edge;
-                    if center[axis] < chunk_min {
-                        (chunk_min - center[axis]).powi(2)
-                    } else if center[axis] > chunk_max {
-                        (center[axis] - chunk_max).powi(2)
-                    } else {
-                        0.0
-                    }
-                })
-                .sum::<f64>();
+    for image_x in minimum_x..=maximum_x {
+        for image_z in minimum_z..=maximum_z {
+            let x_minimum = image_x as f64 * edge;
+            let z_minimum = image_z as f64 * edge;
+            let distance_squared = distance_to_interval(center[0], x_minimum, x_minimum + edge)
+                .powi(2)
+                + y_distance.powi(2)
+                + distance_to_interval(center[2], z_minimum, z_minimum + edge).powi(2);
             if distance_squared <= radius_squared {
-                chunks.insert(coordinate);
+                chunks.insert([
+                    image_x.rem_euclid(chunk_counts[0]),
+                    canonical_y,
+                    image_z.rem_euclid(chunk_counts[2]),
+                ]);
             }
         }
     }
@@ -766,11 +814,11 @@ fn superflat_chunks_intersecting_radius(
     chunks
 }
 
-fn chunk_intersects_space(coordinate: ChunkCoordinate, space: TorusSpace) -> bool {
+fn chunk_intersects_space(coordinate: ChunkCoordinate, scene_extent: [f32; 3]) -> bool {
     let edge = CHUNK_EDGE_LENGTH as f64;
     coordinate
         .iter()
-        .zip(space.size())
+        .zip(scene_extent)
         .all(|(coordinate, extent)| {
             let minimum = *coordinate as f64 * edge;
             let maximum = minimum + edge;

@@ -18,7 +18,7 @@ use bevy::prelude::{
     App, Commands, DetectChanges, Entity, IntoScheduleConfigs, Plugin, Query, Res, ResMut,
     Resource, Update,
 };
-use roundo_networking::SerializedPayload;
+use roundo_contracts::SerializedPayload;
 use roundo_toolbox::{
     CrossbeamThreadPipe, CrossbeamThreadPipeEndpointA, CrossbeamThreadPipeEndpointB, UpdateVersion,
 };

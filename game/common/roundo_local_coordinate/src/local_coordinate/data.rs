@@ -1,7 +1,7 @@
 use crate::local_coordinate::transform::LocalCoordinateTransform;
 use bevy::prelude::{Component, Entity, IVec3, Message, Vec3};
 use roundo_algorithm::tree::{BreadthFirstLosslessSvo, Octree};
-use roundo_networking::LocalCoordinateId;
+use roundo_contracts::LocalCoordinateId;
 use roundo_toolbox::{CRUDRequest, macros::identifier};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -54,7 +54,7 @@ pub struct Chunk {
     pub local_atomic_voxel_data: HashMap<AtomicVoxelId, LocalAtomicVoxelData>,
     pub solid_count: usize,
     /// Monotonic revision of this chunk's authoritative voxel contents.
-    pub content_revision: u64,
+    pub(crate) content_revision: u64,
 }
 
 impl Default for Chunk {
@@ -71,6 +71,14 @@ impl Default for Chunk {
     }
 }
 
+/// Stable immutable observation of one loaded Chunk.
+#[derive(Clone, Copy)]
+pub struct LocalCoordinateChunkView<'a> {
+    pub position: IVec3,
+    pub revision: u64,
+    pub svo: &'a Arc<BreadthFirstLosslessSvo<AtomicVoxel>>,
+}
+
 /// Stable domain identity attached to a local-coordinate entity.
 #[derive(Component, Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct LocalCoordinateIdentity(pub LocalCoordinateId);
@@ -80,7 +88,7 @@ pub struct LocalCoordinateIdentity(pub LocalCoordinateId);
 #[require(LocalCoordinateTransform)]
 pub struct LocalCoordinate {
     /// Loaded primitive data partitioned by chunk coordinate, including empty chunks.
-    pub chunks: HashMap<IVec3, Chunk>,
+    pub(crate) chunks: HashMap<IVec3, Chunk>,
     /// Fill-weighted center of the owned chunks in local-coordinate space.
     pub center_of_mass: Vec3,
     /// Primitive chunk changes not yet observed by an owning runtime.

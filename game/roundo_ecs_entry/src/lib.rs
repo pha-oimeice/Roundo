@@ -4,6 +4,8 @@ mod client;
 mod mod_assets;
 #[cfg(feature = "server")]
 mod server;
+#[cfg(feature = "server")]
+mod server_integration;
 
 #[cfg(feature = "client")]
 pub use client::{

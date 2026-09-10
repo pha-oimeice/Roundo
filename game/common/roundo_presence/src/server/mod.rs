@@ -5,8 +5,7 @@ use bevy::prelude::{
     App, Changed, Commands, Component, Entity, FixedUpdate, IntoScheduleConfigs, Plugin, Quat,
     Query, Res, ResMut, Resource, SystemSet, Transform, Vec3, With,
 };
-use roundo_marionette::{MarionetteServerSet, NetworkControllerTarget, PlayerControllers};
-use roundo_networking::ConnectionId;
+use roundo_contracts::ConnectionId;
 use roundo_toolbox::{
     CrossbeamThreadPipe, CrossbeamThreadPipeEndpointA, CrossbeamThreadPipeEndpointB,
 };
@@ -137,6 +136,14 @@ impl ServerSceneWorlds {
             SceneId::S1 => Some(self.s1),
         }
     }
+
+    pub fn spaces(&self) -> impl Iterator<Item = (SceneId, TorusSpace)> + '_ {
+        std::iter::once((SceneId::S1, self.s1)).chain(
+            self.s0_rooms
+                .iter()
+                .map(|(room_id, space)| (SceneId::S0 { room_id: *room_id }, *space)),
+        )
+    }
 }
 
 impl Default for ServerSceneWorlds {
@@ -173,6 +180,10 @@ pub enum PresenceServerEvent {
 
 #[derive(Component, Clone, Copy, Debug, Default)]
 pub struct ServerPlayer;
+
+/// Transport identity associated with a server-side Presence Player.
+#[derive(Component, Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PlayerConnection(pub ConnectionId);
 
 #[derive(Component, Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PlayerScene {

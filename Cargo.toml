@@ -1,5 +1,7 @@
 [workspace]
 members = [
+    "game/common/roundo_block_interaction",
+    "game/common/roundo_contracts",
     "game/common/roundo_marionette",
     "game/common/roundo_local_coordinate",
     "game/server/roundo_lifecycle",
@@ -86,6 +88,8 @@ windows = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Gd
 roundo_proc_macros = { path = "roundo_proc_macros" }
 # ---
 roundo_algorithm = {path = "game/common/roundo_algorithm" }
+roundo_block_interaction = { path = "game/common/roundo_block_interaction" }
+roundo_contracts = { path = "game/common/roundo_contracts" }
 roundo_cli = { path = "roundo_cli" }
 roundo_ecs_entry = { path = "game/roundo_ecs_entry" }
 roundo_lifecycle = { path = "game/server/roundo_lifecycle" }

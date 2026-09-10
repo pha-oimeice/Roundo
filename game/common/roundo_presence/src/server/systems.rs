@@ -16,19 +16,13 @@ impl Plugin for RoundoPresenceServerPlugin {
                 )
                     .chain(),
             )
-            .configure_sets(
-                FixedUpdate,
-                PresenceServerSet::Commands.before(MarionetteServerSet::Commands),
-            )
             .add_systems(
                 FixedUpdate,
                 process_presence_commands.in_set(PresenceServerSet::Commands),
             )
             .add_systems(
                 FixedUpdate,
-                wrap_player_transforms
-                    .in_set(PresenceServerSet::SceneConstraints)
-                    .after(MarionetteServerSet::Movement),
+                wrap_player_transforms.in_set(PresenceServerSet::SceneConstraints),
             )
             .add_systems(
                 FixedUpdate,
@@ -86,9 +80,8 @@ fn process_presence_commands(
                     .spawn((
                         Player { id: player_id },
                         ServerPlayer,
+                        PlayerConnection(connection_id),
                         scene,
-                        PlayerControllers::default(),
-                        NetworkControllerTarget { connection_id },
                         transform,
                     ))
                     .id();

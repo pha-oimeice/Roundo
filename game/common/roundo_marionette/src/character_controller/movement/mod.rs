@@ -3,8 +3,8 @@ mod server;
 
 use super::shared::{ControllerAction, EventController};
 use bevy::prelude::{ButtonInput, KeyCode, Message, Vec3};
-use roundo_networking::protocol::ControllerCommand;
-pub use roundo_networking::protocol::Movement3DAction;
+use roundo_contracts::ControllerCommand;
+pub use roundo_contracts::Movement3DAction;
 use std::collections::BTreeMap;
 
 #[cfg(test)]
@@ -185,7 +185,7 @@ impl Default for ClientKeyBindings {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use roundo_networking::protocol::ControllerCommand;
+    use roundo_contracts::ControllerCommand;
 
     #[test]
     fn movement_rejects_non_finite_deltas_and_stale_sequences() {

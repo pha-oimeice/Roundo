@@ -139,13 +139,20 @@ async fn open_sender(
         .await
         .map_err(NetworkError::from_display)?;
     sender
-        .set_priority(stream_id.quinn_priority())
+        .set_priority(quinn_priority(stream_id))
         .map_err(NetworkError::from_display)?;
     sender
         .write_u8(stream_id as u8)
         .await
         .map_err(NetworkError::from_display)?;
     Ok(sender)
+}
+
+const fn quinn_priority(stream_id: StreamId) -> i32 {
+    match stream_id {
+        StreamId::Stream0 => 1,
+        StreamId::Stream1 => 0,
+    }
 }
 
 async fn accept_receivers(connection: &Connection) -> Result<Receivers, NetworkError> {
@@ -191,10 +198,11 @@ fn transport_config() -> Arc<quinn::TransportConfig> {
 
 #[cfg(test)]
 mod tests {
+    use super::quinn_priority;
     use crate::StreamId;
 
     #[test]
     fn stream0_has_higher_quinn_priority_than_stream1() {
-        assert!(StreamId::Stream0.quinn_priority() > StreamId::Stream1.quinn_priority());
+        assert!(quinn_priority(StreamId::Stream0) > quinn_priority(StreamId::Stream1));
     }
 }

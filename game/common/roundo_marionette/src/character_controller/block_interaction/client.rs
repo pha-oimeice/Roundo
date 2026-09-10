@@ -4,7 +4,7 @@ use crate::character_controller::client::{
     ClientPipeResource, ClientPlayerController,
 };
 use bevy::prelude::{ButtonInput, MouseButton, Res, ResMut};
-use roundo_networking::protocol::PlayerControllerCommand;
+use roundo_contracts::PlayerControllerCommand;
 
 const DEFAULT_PLACED_VOXEL_ID: u32 = 1;
 

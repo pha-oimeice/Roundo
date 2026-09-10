@@ -5,7 +5,7 @@ edition.workspace = true
 
 [dependencies]
 bevy.workspace = true
-roundo_networking.workspace = true
+roundo_contracts.workspace = true
 roundo_toolbox.workspace = true
 
 [features]

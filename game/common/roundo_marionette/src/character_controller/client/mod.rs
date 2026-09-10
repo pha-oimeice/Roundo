@@ -2,7 +2,7 @@ mod systems;
 
 use super::{DestroyBlockController, Movement3D, PlaceBlockController};
 use bevy::prelude::{App, Entity, Plugin, Resource};
-pub use roundo_networking::protocol::PlayerState;
+pub use roundo_contracts::PlayerState;
 use roundo_toolbox::{
     CrossbeamThreadPipe, CrossbeamThreadPipeEndpointA, CrossbeamThreadPipeEndpointB,
     LinearInterpolation,
@@ -46,7 +46,7 @@ pub enum ClientMarionetteCommand {
 
 #[derive(Clone, Debug)]
 pub enum ClientMarionetteEvent {
-    UsePlayerController(roundo_networking::protocol::PlayerControllerCommand),
+    UsePlayerController(roundo_contracts::PlayerControllerCommand),
 }
 
 #[derive(Resource, Clone, Copy, Debug)]

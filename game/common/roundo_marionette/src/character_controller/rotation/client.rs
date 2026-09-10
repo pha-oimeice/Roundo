@@ -6,7 +6,7 @@ use bevy::{
     input::mouse::AccumulatedMouseMotion,
     prelude::{Camera, EulerRot, Query, Res, ResMut, Resource, Time, Transform, With},
 };
-use roundo_networking::protocol::PlayerControllerCommand;
+use roundo_contracts::PlayerControllerCommand;
 
 #[derive(Resource, Clone, Copy, Debug)]
 pub(crate) struct ClientRotationSyncState {

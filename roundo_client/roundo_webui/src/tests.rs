@@ -4,7 +4,9 @@ use super::*;
 use crate::platform::{claim_webview_creation_turn, data_sync_script, enqueue_webui_command};
 use crate::registry::{LayoutRegistration, RegistryFile};
 use roundo_mod_loader::{LoadedMods, ModId, parse_mod_id};
-use roundo_toolbox::request_response_pipe::{CommandTransport, ContextualJsonRequestResponseIo};
+use roundo_toolbox::request_response_pipe::{
+    CommandTransport, ContextualJsonRequestResponseIo, RequestResponsePipe,
+};
 use serde_json::{Value, json};
 use std::{
     fs,
@@ -76,6 +78,40 @@ fn root_replacement_keeps_the_old_root_live_until_the_new_root_commits() {
     assert_eq!(committed.destroyed, vec![old_root]);
     assert!(manager.instance(old_root).is_none());
     assert!(manager.instance(committed.instance).is_some());
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn navigation_owns_pending_ui_open_response_completion() {
+    let root = fixture_root();
+    let registry = UiRegistry::load(&LoadedMods::discover(&root).unwrap()).unwrap();
+    let mut manager = UiLifecycleManager::new(registry);
+    let target = manager
+        .resolve_resource_path("vanilla.vanilla_ui.main", None)
+        .unwrap();
+    let mut executor = UiNavigationExecutor::default();
+    executor
+        .open(&mut manager, UiCommandSource::Host, target)
+        .unwrap();
+
+    let pipe = RequestResponsePipe::<CommandTransport<UiCommandSource>, Value>::bounded(2);
+    let io = ContextualJsonRequestResponseIo::new(pipe.io());
+    let _first_call = io.submit(json!({}), UiCommandSource::Host).unwrap();
+    let (_, first_sender) = pipe.try_receive().unwrap();
+    assert!(
+        executor
+            .complete_open_command(first_sender, json!({"ok": true}))
+            .is_ok()
+    );
+
+    let _second_call = io.submit(json!({}), UiCommandSource::Host).unwrap();
+    let (_, second_sender) = pipe.try_receive().unwrap();
+    assert!(
+        executor
+            .complete_open_command(second_sender, json!({"ok": true}))
+            .is_err(),
+        "the pending UI Open can transfer response ownership only once"
+    );
     fs::remove_dir_all(root).unwrap();
 }
 

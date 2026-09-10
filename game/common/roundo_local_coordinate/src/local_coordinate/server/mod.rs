@@ -25,13 +25,9 @@ use avian3d::prelude::RigidBody;
 use bevy::prelude::Transform;
 use bevy::prelude::{
     App, Commands, Component, GlobalTransform, IntoScheduleConfigs, Plugin, Query, Res, ResMut,
-    Resource, Startup, SystemSet, Update, With,
+    Resource, Startup, SystemSet, Update,
 };
-use roundo_networking::ConnectionId;
-use roundo_networking::SerializedPayload;
-use roundo_presence::{
-    Player, PlayerId, PlayerScene, SceneId, ServerPlayer, ServerSceneWorlds, TorusSpace,
-};
+use roundo_contracts::{ConnectionId, PlayerId, SceneId, SerializedPayload};
 use roundo_toolbox::{
     CrossbeamThreadPipe, CrossbeamThreadPipeEndpointA, CrossbeamThreadPipeEndpointB, UpdateVersion,
 };
@@ -47,13 +43,53 @@ const MAX_DERIVED_SVO_RESULTS_PER_TICK: usize = 16;
 const MAX_DERIVED_SVO_JOBS_IN_FLIGHT: usize = 32;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, SystemSet)]
-enum LocalCoordinateServerStreamingSet {
+pub enum LocalCoordinateServerSet {
     Prepare,
     Commit,
 }
 
 pub type LocalCoordinateServerIpc =
     CrossbeamThreadPipeEndpointA<LocalCoordinateServerCommand, LocalCoordinateServerEvent>;
+
+/// Transport-independent observation facts consumed by Chunk streaming.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LocalCoordinateObserver {
+    pub player_id: PlayerId,
+    pub scene_id: SceneId,
+    pub position: [f64; 3],
+}
+
+/// Stable input seam between a host's player/scene model and Chunk streaming.
+#[derive(Resource, Default)]
+pub struct LocalCoordinateObservationInput {
+    observers: Vec<LocalCoordinateObserver>,
+    scene_extents: HashMap<SceneId, [f32; 3]>,
+}
+
+impl LocalCoordinateObservationInput {
+    pub fn replace(
+        &mut self,
+        observers: impl IntoIterator<Item = LocalCoordinateObserver>,
+        scene_extents: impl IntoIterator<Item = (SceneId, [f32; 3])>,
+    ) {
+        self.observers.clear();
+        self.observers.extend(observers);
+        self.scene_extents.clear();
+        self.scene_extents.extend(
+            scene_extents
+                .into_iter()
+                .filter(|(_, extent)| extent.iter().all(|axis| axis.is_finite() && *axis > 0.0)),
+        );
+    }
+
+    fn observers(&self) -> &[LocalCoordinateObserver] {
+        &self.observers
+    }
+
+    fn scene_extent(&self, scene_id: SceneId) -> Option<[f32; 3]> {
+        self.scene_extents.get(&scene_id).copied()
+    }
+}
 
 #[derive(Clone)]
 pub struct LocalCoordinateServerPlugin {

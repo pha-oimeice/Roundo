@@ -4,6 +4,7 @@ pub struct ClientNetwork {
     stream0_outbound: mpsc::UnboundedSender<ClientMessage>,
     stream1_outbound: mpsc::UnboundedSender<ClientMessage>,
     shutdown: watch::Sender<bool>,
+    worker: std::sync::Mutex<Option<thread::JoinHandle<()>>>,
 }
 
 impl ClientNetwork {
@@ -25,7 +26,7 @@ impl ClientNetwork {
         let (stream0_outbound, stream0_receiver) = mpsc::unbounded_channel();
         let (stream1_outbound, stream1_receiver) = mpsc::unbounded_channel();
         let (shutdown, shutdown_receiver) = watch::channel(false);
-        thread::spawn(move || {
+        let worker = thread::spawn(move || {
             runtime.block_on(run_client(
                 config,
                 hooks,
@@ -39,6 +40,7 @@ impl ClientNetwork {
             stream0_outbound,
             stream1_outbound,
             shutdown,
+            worker: std::sync::Mutex::new(Some(worker)),
         })
     }
 
@@ -68,15 +70,31 @@ impl ClientNetwork {
         }
     }
 
+    /// Stops the network runtime and waits until reconnect and stream I/O have ended.
+    /// Calling it more than once is harmless.
     pub fn shutdown(&self) {
         log::info!("network client shutdown requested");
         let _ = self.shutdown.send(true);
+        let worker = self
+            .worker
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take();
+        if let Some(worker) = worker {
+            if worker.thread().id() == thread::current().id() {
+                log::error!("network client worker attempted to join itself during shutdown");
+                return;
+            }
+            if let Err(error) = worker.join() {
+                log::error!("network client worker panicked during shutdown: {error:?}");
+            }
+        }
     }
 }
 
 impl Drop for ClientNetwork {
     fn drop(&mut self) {
-        let _ = self.shutdown.send(true);
+        self.shutdown();
     }
 }
 
@@ -105,7 +123,17 @@ async fn run_client(
             "connecting to QUIC server: attempt={attempt}, quic_address={}",
             config.quic_address
         );
-        match establish_client_sessions(&config, Arc::clone(&tls_config)).await {
+        let establishment = tokio::select! {
+            changed = shutdown.changed() => {
+                if changed.is_err() || *shutdown.borrow() {
+                    log::info!("network client stopped during connection establishment");
+                    return;
+                }
+                continue;
+            }
+            result = establish_client_sessions(&config, Arc::clone(&tls_config)) => result,
+        };
+        match establishment {
             Ok(sessions) => {
                 log::info!(
                     "QUIC stream0 and stream1 established: quic_address={}, server_name={}",
