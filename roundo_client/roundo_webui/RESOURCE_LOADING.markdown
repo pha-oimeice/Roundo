@@ -2,7 +2,7 @@
 
 本文描述 Web UI 如何接入共享 Mod Resource 加载架构。通用加载规则见 [`roundo_mod_loader/ARCHITECTURE.markdown`](../../game/common/roundo_mod_loader/ARCHITECTURE.markdown)，UI 生命周期术语见仓库根目录 [`CONTEXT.md`](../../CONTEXT.md)。
 
-本文是目标技术文档。当前 `UiRegistry::load` 已实现 Mod 注册 UI、完整资源名、dependency closure、slot 裁决、以 slot 表达的 prefetch 和路径验证，并已与 lifecycle、Wry platform adapter、Bevy composition 分离；但尚未接入统一 Resource Type Loading Phase。
+本文是目标技术文档。当前 `UiRegistry::load` 已实现 Mod 注册 UI、完整资源名、dependency closure、slot 裁决、以 slot 表达的 prefetch 和路径验证，并已与 lifecycle、Wry platform adapter、Bevy composition 分离；Mod Resource Name/reference 解析已与 Atomic Voxel adapter 共用 `roundo_mod_loader` seam。Client 已通过共享 `ResourceTypeCatalog` 把 Web UI 与 Atomic Voxel 放入同一 Resource Type Loading Phase，并只把已发布的 `UiRegistry` 交给 platform adapter；adapter 内 declaration 仍是 fail-fast。
 
 ## 1. Adapter 职责
 
@@ -10,9 +10,9 @@ Web UI Resource Type adapter 只拥有 Web UI 特有规则：
 
 - UI Definition declaration schema；
 - project root 与 entry 文件验证；
-- interaction、world visibility、presentation、layout、instance limit；
+- interaction、world visibility、presentation、layout、instance limit 与原生首帧背景色；
 - UI Registry Slot 提名与裁决；
-- UI Prefetch slot 校验；
+- UI Import handle、slot 与 prefetch policy 校验；
 - UI 类型阶段的全量后处理；
 - 生成不可变 UI Registry 数据。
 
@@ -29,7 +29,7 @@ Wry 仍是消费已加载 UI Definition 的客户端平台 adapter。
 
 ## 2. Registry
 
-固定位置：
+固定位置（`mods/` 代表配置选定的 Mod root；当前 Web UI 使用 `CommonConfig.mod_path`，相对可执行文件目录解析）：
 
 ```text
 mods/<mod>/assets/webui/registry.toml
@@ -45,7 +45,10 @@ entry = "index.html"
 interaction_mode = "web-ui"
 world_visibility = "hidden"
 max_instances = 1
-prefetch = ["roundo.pause-menu"]
+background_color = [16, 21, 29, 255]
+[resource.imports.pause-menu]
+slot = "roundo.pause-menu"
+prefetch = false
 ```
 
 其中：
@@ -53,7 +56,8 @@ prefetch = ["roundo.pause-menu"]
 - `name` 是当前 Mod 内的 UI Definition local name；
 - `project` 是 `assets/webui/` 下的项目目录；
 - `entry` 是 project root 内的入口文件；
-- `prefetch` 只填写 UI Registry Slot，不直接填写 UI Definition local/full name；
+- `imports` 的 key 是 source-local handle，value 只填写 UI Registry Slot，不直接填写 UI Definition local/full name；
+- import 的 `prefetch` 默认为 `true`，可逐项设为 `false`；
 - 其他字段继续由 Web UI adapter 定义和验证。
 
 `registry.toml` 缺失表示该 Mod 不提供 Web UI，不是错误。
@@ -86,13 +90,15 @@ UI Definition 可以：
 
 因此 slot 不占用、不替换、不重命名，也不限制 UI Definition。
 
-## 4. UI Prefetch
+## 4. UI Import 与 Prefetch
 
-UI Prefetch 从一个 UI Definition 指向 UI Registry Slot：
+UI Import 是所属 UI Definition 内唯一的 source-local handle，并且只指向 UI Registry Slot：
 
 ```text
-UI Definition → UI Registry Slot → selected UI Definition
+UI Definition + import handle → UI Registry Slot → selected UI Definition
 ```
+
+Web UI 的 `ui.open` 只接受 import handle；禁止页面直接提交 slot、UI Definition resource name 或目标 path。Import permission 是单向、非传递的，但 import graph 不要求无环。Host-owned Root 与 pause 导航不伪装成 UI Import，仍通过内部 slot interface 完成。
 
 禁止直接建立：
 
@@ -102,12 +108,12 @@ UI Definition → UI Definition
 
 理由：
 
-- prefetch 应跟随 slot 的最终裁决；
+- 打开权限与 prefetch 应共同跟随 slot 的最终裁决；
 - 高优先级 Mod 替换 slot 后，调用方无需修改；
 - UI Definition 之间不形成同 Resource Type 加载依赖；
 - slot 是 UI 类型阶段内部的全量选择结果。
 
-prefetch 只准备 Prepared UI Candidate，不创建 UI Instance，不改变 Lifecycle Tree，不消耗 live-instance count，也不授予命令权限。
+每个 import 默认请求 prefetch，也可以设置 `prefetch = false`。平台 adapter 对当前可见 UI Definition 的可预取 imports 做集合对账，只保留当前可能使用的 Prepared UI Candidate。Prefetch 只准备物理 WebView 与初始 `about:blank`，不加载或执行 Mod document。真实 open 认领后才开始 document loading。预取不创建 UI Instance、不改变 Lifecycle Tree、不消耗 live-instance count，也不授予命令权限。
 
 ## 5. Web UI 类型阶段
 
@@ -120,11 +126,12 @@ Web UI Resource Type Loading Phase 必须按以下逻辑原子完成：
 5. 收集全部 slot 提名。
 6. 验证 slot value 的 Mod Dependency 可见性与目标存在性。
 7. 使用 `override_priority` 和 canonical Mod ID 裁决每个 slot。
-8. 校验每个 UI Prefetch 所引用的 slot。
-9. 验证所有类型内部不变量。
-10. 无错误时一次性发布 UI Definition、slot map 和 prefetch slot map。
+8. 校验每个 source-local UI Import handle、引用的 slot 和 prefetch policy。
+9. 将 import slot 解析到最终获胜 UI Definition，同时保留 slot 身份。
+10. 验证所有类型内部不变量。
+11. 无错误时一次性发布 UI Definition、slot map 和 import map。
 
-任何错误都使整个 Web UI 类型阶段失败。运行时不能观察只有部分 Definition、部分 slot 或未校验 prefetch 的 UI Registry。
+任何错误都使整个 Web UI 类型阶段失败。运行时不能观察只有部分 Definition、部分 slot 或未校验 import 的 UI Registry。
 
 ## 6. Payload 与协议读取
 
@@ -157,13 +164,12 @@ Resource Type adapter 不创建 UI Instance。Lifecycle Tree 也不反向修改 
 
 当前实现仍需迁移的内容：
 
-- `RoundoWebUiPlugin::build` 当前自行调用 `LoadedMods::discover`；目标由共享加载 module 提供已加载 UI Registry。
-- `UiRegistry::load` 仍处理部分通用 Mod 引用规则；目标只保留 Web UI 类型规则。
+- Client composition root 已通过共享加载 module 选择 Atomic Voxel 与 Web UI，并把已发布的 `UiRegistry` 直接交给 `RoundoWebUiPlugin`；plugin 仍保留自行 discovery 的 constructor 供嵌入/测试。
+- local/full name、dependency closure visibility 的引用解析已迁入 `roundo_mod_loader`；Catalog 会稳定聚合同一 phase 的 adapter 错误并阻止任何结果暴露，但 `UiRegistry::load` 内部遇到首个 declaration 错误即返回，尚无目标要求的 declaration 级稳定多错误聚合。
 - 当前已经使用共同 `[[resource]]` 外壳，旧 `[[ui]]` 仅作为反序列化迁移别名。
-- `resolve_reference` 中通用 Mod 可见性应迁入共享加载 module。
-- `RegistryUi.prefetch` 已保存并校验 UI Registry Slot，并在 slot 最终裁决后解析到选中的 UI Definition。
+- `RegistryUi.imports` 已保存并校验 source-local handle 与 UI Registry Slot，并在 slot 最终裁决后解析到选中的 UI Definition；每项 import 独立配置 prefetch。
 - manifest 已使用 `override_priority`；`load_priority` 仅作为迁移别名。
-- registry、lifecycle、Wry platform adapter 与 Bevy composition 已形成独立 module；统一 Resource Type Loading Phase 仍未接入。
+- registry、lifecycle、Wry platform adapter 与 Bevy composition 已形成独立 module；Atomic Voxel 已成为第二个真实 Resource Type adapter，下一步只收敛二者已证明重复的类型阶段 orchestration 和错误聚合。
 
 迁移不得改变 ADR-0002 已确定的原则：UI Definition 的可追踪身份与 UI Registry Slot 必须分离，高优先级 Mod 只能改变 slot 的选择结果，不能冒充另一 Mod 的 UI Definition。
 
@@ -177,10 +183,12 @@ Web UI adapter 测试至少覆盖：
 - slot value 指向未知或不可见 UI Definition；
 - `override_priority` 与 canonical Mod ID 的确定性 slot 裁决；
 - 一个 UI Definition 被零个、一个或多个 slot 选中；
-- prefetch 只接受已解析 slot；
-- slot 替换会让 prefetch 跟随新胜者；
+- UI Import 只接受已解析 slot，拒绝直接 Definition/path；
+- import handle 在所属 Definition 内唯一，权限单向且非传递；
+- `prefetch` 默认开启并可逐项关闭；
+- slot 替换会让打开权限和 prefetch 一起跟随新胜者；
 - project/entry/path traversal/symlink escape；
 - 任意 Mod 枚举顺序产生相同 Registry 和错误顺序；
-- 阶段失败时不暴露部分 Definition、slot 或 prefetch。
+- 阶段失败时不暴露部分 Definition、slot 或 import。
 
 UI Lifecycle Tree 和 Wry adapter 的测试继续通过各自 interface 进行，不应重复 registry 加载规则。

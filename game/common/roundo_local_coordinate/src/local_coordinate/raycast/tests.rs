@@ -1,7 +1,22 @@
 use super::*;
+
+fn test_candidate<'a>(
+    coordinates: &'a HashMap<Entity, (LocalCoordinate, GlobalTransform)>,
+    chunk_reference: ChunkReference,
+) -> Option<ChunkCandidate<'a>> {
+    let entity = chunk_reference.local_coordinate_entity();
+    let (local_coordinate, transform) = coordinates.get(&entity)?;
+    let position = chunk_reference.local_chunk_position();
+    let chunk = local_coordinate.chunks.get(&position)?;
+    Some(ChunkCandidate {
+        chunk_reference,
+        chunk,
+        transform: *transform,
+    })
+}
 use crate::local_coordinate::data::{LocalCoordinate, PositionedAtomicVoxel, SOLID_VOXEL_ID};
 use bevy::{
-    prelude::{Dir3, Quat, Transform},
+    prelude::{Dir3, Entity, Quat, Transform},
     tasks::TaskPool,
 };
 use std::collections::HashMap;
@@ -30,17 +45,7 @@ fn returns_the_first_voxel_with_point_normal_and_chunk_information() {
         &index,
         Ray3d::new(Vec3::new(-1.0, 2.5, 3.5), Dir3::X),
         10.0,
-        |chunk_reference| {
-            let (local_coordinate, transform) =
-                coordinates.get(&chunk_reference.local_coordinate_entity())?;
-            Some(ChunkCandidate {
-                chunk_reference,
-                chunk: local_coordinate
-                    .chunks
-                    .get(&chunk_reference.local_chunk_position())?,
-                transform: *transform,
-            })
-        },
+        |chunk_reference| test_candidate(&coordinates, chunk_reference),
     )
     .expect("ray should hit the nearest solid voxel");
 
@@ -114,17 +119,7 @@ fn returns_the_nearest_result_after_parallel_chunk_checks_finish() {
         &index,
         Ray3d::new(Vec3::new(-1.0, 0.5, 0.5), Dir3::X),
         10.0,
-        |chunk_reference| {
-            let (local_coordinate, transform) =
-                coordinates.get(&chunk_reference.local_coordinate_entity())?;
-            Some(ChunkCandidate {
-                chunk_reference,
-                chunk: local_coordinate
-                    .chunks
-                    .get(&chunk_reference.local_chunk_position())?,
-                transform: *transform,
-            })
-        },
+        |chunk_reference| test_candidate(&coordinates, chunk_reference),
     )
     .expect("one of the parallel chunk checks should hit");
 
@@ -146,17 +141,7 @@ fn respects_the_required_maximum_distance() {
         &index,
         Ray3d::new(Vec3::new(-1.0, 0.5, 0.5), Dir3::X),
         4.0,
-        |chunk_reference| {
-            let (local_coordinate, transform) =
-                coordinates.get(&chunk_reference.local_coordinate_entity())?;
-            Some(ChunkCandidate {
-                chunk_reference,
-                chunk: local_coordinate
-                    .chunks
-                    .get(&chunk_reference.local_chunk_position())?,
-                transform: *transform,
-            })
-        },
+        |chunk_reference| test_candidate(&coordinates, chunk_reference),
     );
 
     assert!(hit.is_none());

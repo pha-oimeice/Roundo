@@ -5,8 +5,12 @@ edition.workspace = true
 
 [dependencies]
 bevy.workspace = true
+log.workspace = true
 roundo_contracts.workspace = true
+roundo_mod_loader.workspace = true
 roundo_toolbox.workspace = true
+serde.workspace = true
+toml.workspace = true
 
 [features]
 dev = [

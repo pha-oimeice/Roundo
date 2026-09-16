@@ -1,8 +1,14 @@
-//! Proc macros for opt-in Unix command adapters.
+//! Derive support for projecting Unix-style tokens into the source-neutral JSON command seam.
+//!
+//! The generated parser handles token classification and scalar `FromStr`
+//! conversion only. Shell expansion, quoting, and escaping remain the terminal
+//! tokenizer's responsibility.
+
 use proc_macro::TokenStream;
 use quote::quote;
 use syn::{DeriveInput, LitChar, LitStr, Type, parse_macro_input};
 
+// Recognizes the final path segment of simple Option<T>/Vec<T>-style field types.
 fn generic_inner<'a>(ty: &'a Type, container: &str) -> Option<&'a Type> {
     let Type::Path(path) = ty else {
         return None;
@@ -24,6 +30,7 @@ fn is_bool(ty: &Type) -> bool {
     matches!(ty, Type::Path(path) if path.path.is_ident("bool"))
 }
 
+/// Parsed command-line projection metadata for one named struct field.
 struct UnixField {
     positional: bool,
     long: Option<String>,
@@ -31,6 +38,7 @@ struct UnixField {
     default: Option<String>,
 }
 
+// Defaults unannotated fields to positional arguments for backward compatibility.
 fn unix_field(field: &syn::Field) -> Result<UnixField, syn::Error> {
     let mut result = UnixField {
         positional: false,
@@ -79,8 +87,28 @@ fn unix_field(field: &syn::Field) -> Result<UnixField, syn::Error> {
     Ok(result)
 }
 
-/// Generates the Unix text adapter. It only projects tokens to JSON; execution
-/// still goes through the source-neutral typed command registry.
+/// Derives `roundo_cli::UnixCommand` for a named-field command struct.
+///
+/// The struct requires `#[unix(path = "command path")]`. Fields are positional
+/// by default and may instead declare `#[unix(long)]`,
+/// `#[unix(long = "name")]`, `#[unix(short = 'x')]`, or both long and short
+/// option spellings. `#[unix(default = "...")]` parses a scalar default through
+/// `FromStr` at runtime.
+///
+/// Exact `bool` options are flags initialized to `false`; encountering either
+/// spelling sets them to `true`. `Vec<T>` options append on repetition, while
+/// repeated scalar options keep the last value. Options and positionals may be
+/// interleaved, but this is intentionally not a shell parser.
+///
+/// Positional `Option<T>` fields must form a trailing suffix, and positional
+/// `Vec<T>` must be last. Tuple/unit structs, enums, empty command paths,
+/// positional/option conflicts, and unsupported `#[unix(...)]` keys produce
+/// compile errors. Final construction passes through Serde JSON, so missing
+/// required option fields and field-level Serde validation remain observable as
+/// runtime parse errors.
+///
+/// The macro only projects tokens to JSON; command execution still goes through
+/// the source-neutral typed registry.
 #[proc_macro_derive(UnixCommand, attributes(unix, command))]
 pub fn derive_unix_command(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);

@@ -23,12 +23,12 @@ pub use protocol::{
     ChunkId, ChunkVersion, ClientGameMessage, ClientResourceMessage, ConnectionId,
     ControllerCommand, DestroyBlockControllerAction, JoinableWorldId, LocalCoordinateId,
     Movement3DAction, NearbyJoinableWorld, NearbyPlayer, PlaceBlockControllerAction,
-    PlayerControllerCommand, PlayerId, PlayerState, PresenceSnapshot, RotationSync, SceneId,
-    SerializedPayload, ServerGameMessage, ServerResourceMessage, SessionId, StreamId, UserId,
-    UserSession,
+    PlayerControllerCommand, PlayerId, PlayerState, PresenceSnapshot, ResourceCatalogFingerprint,
+    RotationSync, SceneId, SerializedPayload, ServerGameMessage, ServerResourceMessage, SessionId,
+    StreamId, UserId, UserSession,
 };
 pub use service::{
     CertificatePolicy, ClientHooks, ClientNetwork, ClientNetworkConfig, HookFuture, NetworkError,
     PublicSession, ServerAddresses, ServerHooks, ServerNetwork, ServerNetworkConfig,
-    probe_quic_endpoint,
+    TransportAdmissionPolicy, probe_quic_endpoint,
 };

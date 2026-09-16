@@ -1,6 +1,9 @@
+//! Structural and encoding failures exposed by octree implementations.
+
 use std::fmt;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Conditions that prevent lossless compact SVO construction.
 pub enum OptimizedOctreeError {
     NodeCountExceedsIndexRange,
     MaximumDepthExceedsCoordinateBits,
@@ -29,6 +32,7 @@ impl fmt::Display for OptimizedOctreeError {
 impl std::error::Error for OptimizedOctreeError {}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Invalid mutations against the editable octree representation.
 pub enum OctreeError {
     ChildIndexOutOfBounds { index: u32 },
     NodeNotFound { id: u32 },
@@ -57,4 +61,5 @@ impl fmt::Display for OctreeError {
     }
 }
 
+// Both enums retain copy semantics so failed mutations remain inexpensive.
 impl std::error::Error for OctreeError {}

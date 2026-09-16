@@ -6,7 +6,7 @@
 use crate::registry::checked_file;
 use crate::{
     CONNECTED_ROOT_SLOT, ClientInteractionMode, DISCONNECTED_ROOT_SLOT, PresentationMode, UiLayout,
-    UiRegistry, UiRegistryError, UiResource, UiWorldVisibility,
+    UiRegistry, UiRegistryError, UiWorldVisibility,
 };
 use bevy::prelude::{Message, Resource};
 use std::{
@@ -17,7 +17,7 @@ use std::{
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Hash)]
 pub struct UiInstanceId(u64);
 impl UiInstanceId {
-    pub fn get(self) -> u64 {
+    pub fn value(self) -> u64 {
         self.0
     }
     /// Constructs an identity only from host-owned command transport metadata.
@@ -125,26 +125,16 @@ pub struct PendingUiDescriptor {
     pub root_generation: u64,
     pub prefetched: bool,
 }
-#[derive(Clone, Debug)]
-struct UiAdapterRecord {
-    loaded: bool,
-    endpoint_enabled: bool,
-    /// Stable adapter identity lets platform adapters retain a survivor's DOM
-    /// and HWND while the pure tree changes its parent.
-    identity: u64,
-}
-
 /// Host-owned lifecycle authority. Root anchors are never UI instances.
 #[derive(Resource, Debug)]
 pub struct UiLifecycleManager {
-    pub registry: UiRegistry,
+    pub(crate) registry: UiRegistry,
     lifecycle_state: UiLifecycleState,
     root_generation: u64,
     tree: roundo_lifecycle::AnchorTree<u64, Option<String>>,
     instances: BTreeMap<UiInstanceId, UiInstance>,
     live_counts: BTreeMap<String, u32>,
     pending: BTreeMap<u64, PendingUiOpen>,
-    adapters: BTreeMap<UiInstanceId, UiAdapterRecord>,
     focus_history: Vec<UiInstanceId>,
     client_bounds: UiBounds,
     next_z_order: u64,
@@ -156,6 +146,7 @@ pub enum UiLifecycleError {
     Registry(String),
     UiInstanceLimit,
     DuplicatePendingOpen,
+    UnknownImport(String),
     StaleUiInstance,
     CannotCloseUiRoot,
     NavigationFailed(String),
@@ -170,6 +161,7 @@ impl fmt::Display for UiLifecycleError {
             Self::DuplicatePendingOpen => {
                 write!(f, "the same UI open is already pending from this source")
             }
+            Self::UnknownImport(handle) => write!(f, "unknown UI import `{handle}`"),
             Self::StaleUiInstance => write!(f, "stale UI instance"),
             Self::CannotCloseUiRoot => write!(f, "cannot close UI root anchor"),
             Self::NavigationFailed(v) => write!(f, "UI navigation failed: {v}"),
@@ -190,7 +182,6 @@ impl UiLifecycleManager {
             instances: BTreeMap::new(),
             live_counts: BTreeMap::new(),
             pending: BTreeMap::new(),
-            adapters: BTreeMap::new(),
             focus_history: Vec::new(),
             client_bounds: UiBounds {
                 x: 0,
@@ -206,32 +197,32 @@ impl UiLifecycleManager {
     pub fn lifecycle_state(&self) -> UiLifecycleState {
         self.lifecycle_state
     }
-    pub fn instance(&self, id: UiInstanceId) -> Option<&UiInstance> {
-        self.instances.get(&id)
+    pub(crate) fn instance(&self, id: UiInstanceId) -> Option<&UiInstance> {
+        let instance = self.instances.get(&id);
+        instance
     }
-    pub fn parent_instance(&self, id: UiInstanceId) -> Option<UiInstanceId> {
+    #[cfg(test)]
+    pub(crate) fn parent_instance(&self, id: UiInstanceId) -> Option<UiInstanceId> {
         self.tree
             .parent(id.0)
             .filter(|parent| *parent != 0)
             .map(UiInstanceId)
     }
-    pub fn instances(&self) -> impl Iterator<Item = &UiInstance> {
+    pub(crate) fn instances(&self) -> impl Iterator<Item = &UiInstance> {
         self.instances.values()
     }
     /// Returns physical stacking from back to front. Ownership descendants
     /// always remain above their ancestors; focus z-order only chooses between
     /// sibling subtrees. This prevents a focused fullscreen parent from
     /// visually covering a concurrent windowed child.
-    pub fn stacking_order(&self) -> Vec<UiInstanceId> {
+    pub(crate) fn stacking_order(&self) -> Vec<UiInstanceId> {
         fn collect_subtree_z_orders(
             manager: &UiLifecycleManager,
             node: u64,
             output: &mut BTreeMap<u64, u64>,
         ) -> u64 {
-            let mut highest = manager
-                .instances
-                .get(&UiInstanceId(node))
-                .map_or(0, |instance| instance.z_order);
+            let instance = manager.instances.get(&UiInstanceId(node));
+            let mut highest = instance.map_or(0, |instance| instance.z_order);
             for child in manager.tree.children(node) {
                 highest = highest.max(collect_subtree_z_orders(manager, child, output));
             }
@@ -250,10 +241,8 @@ impl UiLifecycleManager {
                 .children(parent)
                 .filter(|id| manager.instances.contains_key(&UiInstanceId(*id)))
                 .map(|id| {
-                    (
-                        subtree_z_orders.get(&id).copied().unwrap_or_default(),
-                        UiInstanceId(id),
-                    )
+                    let branch_z_order = subtree_z_orders.get(&id).copied().unwrap_or_default();
+                    (branch_z_order, UiInstanceId(id))
                 })
                 .collect::<Vec<_>>();
             children.sort_by_key(|(branch_z_order, id)| (*branch_z_order, *id));
@@ -269,25 +258,11 @@ impl UiLifecycleManager {
         append_subtree(self, &subtree_z_orders, 0, &mut output);
         output
     }
-    pub fn current_instance(&self) -> Option<&UiInstance> {
-        self.focused_instance()
-            .and_then(|id| self.instances.get(&id))
-            .or_else(|| self.instances.values().next())
+    pub(crate) fn live_count(&self, definition: &str) -> u32 {
+        let count = self.live_counts.get(definition);
+        count.copied().unwrap_or(0)
     }
-    pub fn current_resource(&self) -> Option<&UiResource> {
-        self.current_instance()
-            .and_then(|instance| self.registry.resource(&instance.definition))
-    }
-    pub fn live_count(&self, definition: &str) -> u32 {
-        self.live_counts.get(definition).copied().unwrap_or(0)
-    }
-    pub fn adapter_count(&self) -> usize {
-        self.adapters.len()
-    }
-    pub fn adapter_identity(&self, id: UiInstanceId) -> Option<u64> {
-        self.adapters.get(&id).map(|adapter| adapter.identity)
-    }
-    pub fn set_client_bounds(&mut self, width: u32, height: u32) {
+    pub(crate) fn set_client_bounds(&mut self, width: u32, height: u32) {
         self.client_bounds.width = width;
         self.client_bounds.height = height;
         let fullscreen = self
@@ -308,7 +283,8 @@ impl UiLifecycleManager {
                 .bounds = self.client_bounds;
         }
     }
-    pub fn set_bounds(
+    #[cfg(test)]
+    pub(crate) fn set_bounds(
         &mut self,
         id: UiInstanceId,
         bounds: UiBounds,
@@ -330,7 +306,7 @@ impl UiLifecycleManager {
         instance.bounds = bounds;
         Ok(())
     }
-    pub fn focus(&mut self, id: UiInstanceId) -> Result<(), UiLifecycleError> {
+    pub(crate) fn focus(&mut self, id: UiInstanceId) -> Result<(), UiLifecycleError> {
         let interactive = self.instances.get(&id).is_some_and(|instance| {
             instance.visible
                 && instance.loaded
@@ -357,7 +333,8 @@ impl UiLifecycleManager {
     }
     pub fn interactive_instance_at(&self, x: f32, y: f32) -> Option<UiInstanceId> {
         self.stacking_order().into_iter().rev().find(|id| {
-            self.instances.get(id).is_some_and(|instance| {
+            let instance = self.instances.get(id);
+            instance.is_some_and(|instance| {
                 instance.visible
                     && instance.loaded
                     && instance.pointer_enabled
@@ -369,15 +346,13 @@ impl UiLifecycleManager {
         })
     }
     pub fn command_source_is_live(&self, id: UiInstanceId) -> bool {
-        self.instances.contains_key(&id)
-            && self
-                .adapters
-                .get(&id)
-                .is_some_and(|adapter| adapter.loaded && adapter.endpoint_enabled)
+        let instance = self.instances.get(&id);
+        instance.is_some_and(|instance| instance.loaded)
     }
-    pub fn focused_instance(&self) -> Option<UiInstanceId> {
+    pub(crate) fn focused_instance(&self) -> Option<UiInstanceId> {
         self.focus_history.iter().rev().copied().find(|id| {
-            self.instances.get(id).is_some_and(|instance| {
+            let instance = self.instances.get(id);
+            instance.is_some_and(|instance| {
                 instance.loaded
                     && instance.visible
                     && self
@@ -402,16 +377,39 @@ impl UiLifecycleManager {
             },
         )
     }
+    /// Resolves a source-local navigation capability. Web UIs never name a
+    /// slot, Definition, or target path directly.
+    pub fn resolve_import(
+        &self,
+        source: UiInstanceId,
+        handle: &str,
+    ) -> Result<UiOpenTarget, UiLifecycleError> {
+        if !self.command_source_is_live(source) {
+            return Err(UiLifecycleError::StaleUiInstance);
+        }
+        let source_instance = self.instances.get(&source);
+        let definition = &source_instance
+            .expect("live command source has an instance")
+            .definition;
+        let target = self
+            .registry
+            .resource(definition)
+            .and_then(|resource| {
+                let import = resource.imports.get(handle);
+                import
+            })
+            .ok_or_else(|| UiLifecycleError::UnknownImport(handle.into()))?;
+        self.resolve_resource_path(&target.resource, None)
+            .map_err(|error| UiLifecycleError::Registry(error.to_string()))
+    }
+
     pub fn resolve_slot_path(
         &self,
         slot: &str,
         path: Option<&str>,
     ) -> Result<UiOpenTarget, UiRegistryError> {
-        let name = self
-            .registry
-            .slots
-            .get(slot)
-            .ok_or_else(|| UiRegistryError::UnknownSlot(slot.into()))?;
+        let slot_definition = self.registry.slots.get(slot);
+        let name = slot_definition.ok_or_else(|| UiRegistryError::UnknownSlot(slot.into()))?;
         self.resolve_resource_path(name, path)
     }
     pub fn resolve_resource_path(
@@ -430,18 +428,8 @@ impl UiLifecycleManager {
             path: path.into(),
         })
     }
-    pub fn open_slot(
-        &mut self,
-        source: UiCommandSource,
-        slot: &str,
-        path: Option<&str>,
-    ) -> Result<UiInstanceId, UiLifecycleError> {
-        let target = self
-            .resolve_slot_path(slot, path)
-            .map_err(|e| UiLifecycleError::Registry(e.to_string()))?;
-        self.open(source, target)
-    }
-    pub fn open_resource(
+    #[cfg(test)]
+    pub(crate) fn open_resource(
         &mut self,
         source: UiCommandSource,
         resource: &str,
@@ -450,9 +438,9 @@ impl UiLifecycleManager {
         let target = self
             .resolve_resource_path(resource, path)
             .map_err(|e| UiLifecycleError::Registry(e.to_string()))?;
-        self.open(source, target)
+        self.open_immediately(source, target)
     }
-    pub fn begin_open(
+    pub(crate) fn begin_open(
         &mut self,
         source: UiCommandSource,
         target: UiOpenTarget,
@@ -460,9 +448,29 @@ impl UiLifecycleManager {
         self.begin_open_internal(source, target, false, None, false)
     }
 
+    /// Removes speculative candidates outside the current visible import graph.
+    /// Claimed Pending UI Opens are never affected.
+    pub(crate) fn retain_prefetch_targets(&mut self, desired: &BTreeSet<UiOpenTarget>) -> Vec<u64> {
+        let removed = self
+            .pending
+            .iter()
+            .filter_map(|(id, pending)| {
+                (pending.prefetched && !desired.contains(&pending.target)).then_some(*id)
+            })
+            .collect::<Vec<_>>();
+        for id in &removed {
+            let removed_pending = self.pending.remove(id);
+            debug_assert!(
+                removed_pending.is_some(),
+                "collected pending open must exist"
+            );
+        }
+        removed
+    }
+
     /// Reserves one hidden physical WebView without loading its Mod document,
     /// creating a logical UI instance, or consuming the Definition's live allowance.
-    pub fn begin_prefetch(&mut self, target: UiOpenTarget) -> Result<u64, UiLifecycleError> {
+    pub(crate) fn begin_prefetch(&mut self, target: UiOpenTarget) -> Result<u64, UiLifecycleError> {
         if let Some((id, _)) = self
             .pending
             .iter()
@@ -481,7 +489,7 @@ impl UiLifecycleManager {
     /// Converts a prepared WebView into the caller's real Pending UI Open.
     /// Its future identity is retained, while ownership is assigned only now;
     /// the Mod document may start loading after this transition.
-    pub fn claim_prefetch(
+    pub(crate) fn claim_prefetch(
         &mut self,
         source: UiCommandSource,
         target: &UiOpenTarget,
@@ -558,17 +566,16 @@ impl UiLifecycleManager {
         );
         Ok(pending_id)
     }
-    pub fn pending_descriptor(&self, pending_id: u64) -> Option<PendingUiDescriptor> {
-        self.pending
-            .get(&pending_id)
-            .map(|pending| PendingUiDescriptor {
-                id: pending_id,
-                target: pending.target.clone(),
-                root_generation: pending.root_generation,
-                prefetched: pending.prefetched,
-            })
+    pub(crate) fn pending_descriptor(&self, pending_id: u64) -> Option<PendingUiDescriptor> {
+        let pending = self.pending.get(&pending_id);
+        pending.map(|pending| PendingUiDescriptor {
+            id: pending_id,
+            target: pending.target.clone(),
+            root_generation: pending.root_generation,
+            prefetched: pending.prefetched,
+        })
     }
-    pub fn pending_descriptors(&self) -> Vec<PendingUiDescriptor> {
+    pub(crate) fn pending_descriptors(&self) -> Vec<PendingUiDescriptor> {
         self.pending
             .iter()
             .map(|(id, pending)| PendingUiDescriptor {
@@ -599,15 +606,13 @@ impl UiLifecycleManager {
         self.recovery = None;
         Ok(pending)
     }
-    pub fn fail_open(
+    pub(crate) fn fail_open(
         &mut self,
         pending_id: u64,
         message: impl Into<String>,
     ) -> Result<(), UiLifecycleError> {
-        let pending = self
-            .pending
-            .remove(&pending_id)
-            .ok_or(UiLifecycleError::StaleUiInstance)?;
+        let pending = self.pending.remove(&pending_id);
+        let pending = pending.ok_or(UiLifecycleError::StaleUiInstance)?;
         if pending.root_ui && pending.root_generation == self.root_generation {
             self.recovery = Some(RecoverySurface {
                 lifecycle: pending
@@ -619,11 +624,12 @@ impl UiLifecycleManager {
         }
         Ok(())
     }
-    pub fn commit_open(&mut self, pending_id: u64) -> Result<UiInstanceId, UiLifecycleError> {
-        let pending = self
-            .pending
-            .remove(&pending_id)
-            .ok_or(UiLifecycleError::StaleUiInstance)?;
+    pub(crate) fn commit_open(
+        &mut self,
+        pending_id: u64,
+    ) -> Result<UiInstanceId, UiLifecycleError> {
+        let pending = self.pending.remove(&pending_id);
+        let pending = pending.ok_or(UiLifecycleError::StaleUiInstance)?;
         if pending.root_generation != self.root_generation || !self.tree.contains(pending.parent) {
             return Err(UiLifecycleError::StaleUiInstance);
         }
@@ -676,14 +682,6 @@ impl UiLifecycleManager {
             },
         );
         *self.live_counts.entry(pending.target.resource).or_default() += 1;
-        self.adapters.insert(
-            id,
-            UiAdapterRecord {
-                loaded: true,
-                endpoint_enabled: true,
-                identity: id.0,
-            },
-        );
         if definition.interaction_mode == ClientInteractionMode::WebUi {
             self.focus_history.retain(|v| *v != id);
             self.focus_history.push(id);
@@ -695,10 +693,9 @@ impl UiLifecycleManager {
         Ok(id)
     }
 
-    pub fn pending_root_replacement(&self, pending_id: u64) -> Option<UiLifecycleState> {
-        self.pending
-            .get(&pending_id)
-            .and_then(|pending| pending.replacement_lifecycle)
+    pub(crate) fn pending_root_replacement(&self, pending_id: u64) -> Option<UiLifecycleState> {
+        let pending = self.pending.get(&pending_id);
+        pending.and_then(|pending| pending.replacement_lifecycle)
     }
 
     pub fn pending_root_replacement_lifecycle(&self) -> Option<UiLifecycleState> {
@@ -707,26 +704,28 @@ impl UiLifecycleManager {
             .find_map(|pending| pending.replacement_lifecycle)
     }
 
-    pub fn cancel_root_replacement(&mut self) -> Vec<u64> {
+    pub(crate) fn cancel_root_replacement(&mut self) -> Vec<u64> {
         let cancelled = self
             .pending
             .iter()
             .filter_map(|(id, pending)| pending.replacement_lifecycle.map(|_| *id))
             .collect::<Vec<_>>();
         for id in &cancelled {
-            self.pending.remove(id);
+            let removed_pending = self.pending.remove(id);
+            debug_assert!(
+                removed_pending.is_some(),
+                "collected replacement must exist"
+            );
         }
         cancelled
     }
 
-    pub fn commit_root_replacement(
+    pub(crate) fn commit_root_replacement(
         &mut self,
         pending_id: u64,
     ) -> Result<UiRootCommit, UiLifecycleError> {
-        let mut pending = self
-            .pending
-            .remove(&pending_id)
-            .ok_or(UiLifecycleError::StaleUiInstance)?;
+        let pending = self.pending.remove(&pending_id);
+        let mut pending = pending.ok_or(UiLifecycleError::StaleUiInstance)?;
         let lifecycle = pending
             .replacement_lifecycle
             .ok_or(UiLifecycleError::StaleUiInstance)?;
@@ -744,7 +743,8 @@ impl UiLifecycleManager {
         })
     }
 
-    pub fn open(
+    #[cfg_attr(target_os = "windows", allow(dead_code))]
+    pub(crate) fn open_immediately(
         &mut self,
         source: UiCommandSource,
         target: UiOpenTarget,
@@ -752,15 +752,13 @@ impl UiLifecycleManager {
         let pending = self.begin_open(source, target)?;
         self.commit_open(pending)
     }
-    pub fn navigate_same_definition(
+    pub(crate) fn navigate_same_definition(
         &mut self,
         source: UiInstanceId,
         path: &str,
     ) -> Result<(), UiLifecycleError> {
-        let instance = self
-            .instances
-            .get(&source)
-            .ok_or(UiLifecycleError::StaleUiInstance)?;
+        let instance = self.instances.get(&source);
+        let instance = instance.ok_or(UiLifecycleError::StaleUiInstance)?;
         let target = self
             .resolve_resource_path(&instance.definition, Some(path))
             .map_err(|error| UiLifecycleError::Registry(error.to_string()))?;
@@ -770,7 +768,10 @@ impl UiLifecycleManager {
             .current_path = target.path;
         Ok(())
     }
-    pub fn back(&mut self, source: UiInstanceId) -> Result<Vec<UiInstanceId>, UiLifecycleError> {
+    pub(crate) fn back(
+        &mut self,
+        source: UiInstanceId,
+    ) -> Result<Vec<UiInstanceId>, UiLifecycleError> {
         if !self.instances.contains_key(&source) {
             return Err(UiLifecycleError::StaleUiInstance);
         }
@@ -786,7 +787,7 @@ impl UiLifecycleManager {
             .map_err(|e| UiLifecycleError::InternalTree(format!("{e:?}")))?;
         let outcome = self
             .tree
-            .commit(plan)
+            .apply_plan(plan)
             .map_err(|e| UiLifecycleError::InternalTree(format!("{e:?}")))?;
         let destroyed = outcome
             .destroyed
@@ -797,7 +798,7 @@ impl UiLifecycleManager {
         self.remove_instances(&destroyed);
         Ok(destroyed)
     }
-    pub fn replace_root(
+    pub(crate) fn replace_root(
         &mut self,
         state: UiLifecycleState,
     ) -> Result<Vec<UiInstanceId>, UiLifecycleError> {
@@ -807,7 +808,7 @@ impl UiLifecycleManager {
             .map_err(|e| UiLifecycleError::InternalTree(format!("{e:?}")))?;
         let outcome = self
             .tree
-            .commit(plan)
+            .apply_plan(plan)
             .map_err(|e| UiLifecycleError::InternalTree(format!("{e:?}")))?;
         let destroyed = outcome
             .destroyed
@@ -861,7 +862,7 @@ impl UiLifecycleManager {
         self.begin_open_internal(UiCommandSource::Host, target, true, Some(lifecycle), false)
     }
 
-    pub fn begin_root_replacement(
+    pub(crate) fn begin_root_replacement(
         &mut self,
         lifecycle: UiLifecycleState,
     ) -> Result<UiRootReplacement, UiLifecycleError> {
@@ -886,21 +887,24 @@ impl UiLifecycleManager {
             .map(|id| UiRootReplacement::Pending(UiInstanceId(id)))
     }
 
-    pub fn begin_configured_root(&mut self) -> Result<Option<u64>, UiLifecycleError> {
+    pub(crate) fn begin_configured_root(&mut self) -> Result<Option<u64>, UiLifecycleError> {
         let Some(target) = self.configured_root_target_for(self.lifecycle_state)? else {
             return Ok(None);
         };
         self.begin_open_internal(UiCommandSource::Host, target, true, None, false)
             .map(Some)
     }
-    pub fn open_configured_root(&mut self) -> Result<Option<UiInstanceId>, UiLifecycleError> {
+    #[cfg_attr(target_os = "windows", allow(dead_code))]
+    pub(crate) fn open_configured_root(
+        &mut self,
+    ) -> Result<Option<UiInstanceId>, UiLifecycleError> {
         let Some(pending) = self.begin_configured_root()? else {
             return Ok(None);
         };
         self.commit_open(pending).map(Some)
     }
 
-    pub fn unload_definitions(
+    pub(crate) fn unload_definitions(
         &mut self,
         definitions: impl IntoIterator<Item = String>,
     ) -> Result<Vec<UiInstanceId>, UiLifecycleError> {
@@ -929,7 +933,7 @@ impl UiLifecycleManager {
                 .map_err(|error| UiLifecycleError::InternalTree(format!("{error:?}")))?;
             let outcome = self
                 .tree
-                .commit(plan)
+                .apply_plan(plan)
                 .map_err(|error| UiLifecycleError::InternalTree(format!("{error:?}")))?;
             let destroyed = outcome
                 .destroyed
@@ -943,10 +947,11 @@ impl UiLifecycleManager {
         self.pending.retain(|_, pending| {
             let source_removed = match pending.source {
                 UiCommandSource::Host => false,
-                UiCommandSource::WebView(source) => self
-                    .instances
-                    .get(&source)
-                    .is_none_or(|instance| definitions.contains(&instance.definition)),
+                UiCommandSource::WebView(source) => {
+                    let source_instance = self.instances.get(&source);
+                    source_instance
+                        .is_none_or(|instance| definitions.contains(&instance.definition))
+                }
             };
             !definitions.contains(&pending.target.resource) && !source_removed
         });
@@ -958,7 +963,7 @@ impl UiLifecycleManager {
             .retain(|definition, _| !definitions.contains(definition));
         for definition in &definitions {
             debug_assert_eq!(self.live_count(definition), 0);
-            self.live_counts.remove(definition);
+            let _removed_count = self.live_counts.remove(definition);
         }
         Ok(destroyed)
     }
@@ -977,7 +982,8 @@ impl UiLifecycleManager {
                 .children(parent)
                 .filter_map(|child| {
                     let id = UiInstanceId(child);
-                    self.instances.get(&id).and_then(|instance| {
+                    let instance = self.instances.get(&id);
+                    instance.and_then(|instance| {
                         self.registry
                             .resource(&instance.definition)
                             .is_some_and(|definition| {
@@ -1033,7 +1039,6 @@ impl UiLifecycleManager {
                     .get_mut(&instance.definition)
                     .expect("committed count");
                 *count -= 1;
-                self.adapters.remove(id);
             }
         }
         self.pending.retain(|_, pending| match pending.source {

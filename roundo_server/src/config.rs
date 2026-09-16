@@ -9,6 +9,7 @@ pub static COMMON_CONFIG: LazyLock<CommonConfig> =
     LazyLock::new(roundo_user_config::load_common_config);
 pub static SERVER_CONFIG: LazyLock<ServerConfig> = LazyLock::new(load_config);
 
+/// Loads server configuration and persists any required migration.
 pub fn load_config() -> ServerConfig {
     let config = roundo_user_config::load_config(CONFIG_FILE_NAME);
     let (config, migrated) = migrate_legacy_database_url(config);
@@ -20,6 +21,7 @@ pub fn load_config() -> ServerConfig {
     config
 }
 
+// Replaces only the historical placeholder URL, preserving explicit values.
 fn migrate_legacy_database_url(mut config: ServerConfig) -> (ServerConfig, bool) {
     const LEGACY_PLACEHOLDER: &str = "postgres://user:password@localhost/dbname";
     if config.database.url == LEGACY_PLACEHOLDER {

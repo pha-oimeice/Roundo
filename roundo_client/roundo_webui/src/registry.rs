@@ -3,7 +3,10 @@
 //! 此 module 拥有不可变 UI Registry、路径验证与 UI Registry Slot 裁决；
 //! 它不依赖 Wry 或 Bevy runtime。
 
-use roundo_mod_loader::{LoadedMods, ModId, ResourceCandidate, parse_mod_id, resolve_candidates};
+use roundo_mod_loader::{
+    LoadedMods, ModId, ResourceCandidate, ResourceReferenceError, resolve_candidates,
+    valid_resource_local_name,
+};
 use serde::Deserialize;
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -28,6 +31,13 @@ pub enum UiWorldVisibility {
 }
 
 #[derive(Clone, Debug)]
+pub struct UiImport {
+    pub slot: String,
+    pub resource: String,
+    pub prefetch: bool,
+}
+
+#[derive(Clone, Debug)]
 pub struct UiResource {
     pub name: String,
     pub owner: ModId,
@@ -40,9 +50,10 @@ pub struct UiResource {
     pub lifecycle_independent: bool,
     pub presentation: PresentationMode,
     pub layout: UiLayout,
-    /// UI Registry Slot 最终选中的 Definition。platform adapter 可以准备其物理视图，
-    /// 但真实 `ui.open` claim 之前不会创建 UI Instance。
-    pub prefetch: Vec<String>,
+    /// Native WebView background used before the document's first composed frame.
+    pub background_color: [u8; 4],
+    /// Source-local outbound navigation capabilities, resolved through slots.
+    pub imports: BTreeMap<String, UiImport>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -52,12 +63,12 @@ pub struct UiRegistry {
 }
 impl UiRegistry {
     pub fn resource(&self, name: &str) -> Option<&UiResource> {
-        self.resources.get(name)
+        let resource = self.resources.get(name);
+        resource
     }
     pub fn slot(&self, name: &str) -> Option<&UiResource> {
-        self.slots
-            .get(name)
-            .and_then(|resource| self.resource(resource))
+        let selected = self.slots.get(name);
+        selected.and_then(|resource| self.resource(resource))
     }
     pub fn slots(&self) -> impl Iterator<Item = (&str, &str)> {
         self.slots
@@ -88,7 +99,8 @@ impl UiRegistry {
             Some("ttf") => "font/ttf",
             _ => "application/octet-stream",
         };
-        fs::read(path)
+        let read_result = fs::read(path);
+        read_result
             .map(|bytes| (bytes, mime))
             .map_err(|error| UiRegistryError::Io(resource.project_root.clone(), error))
     }
@@ -129,7 +141,7 @@ impl UiRegistry {
     pub fn load(mods: &LoadedMods) -> Result<Self, UiRegistryError> {
         let mut resources = BTreeMap::new();
         let mut candidates = Vec::new();
-        let mut prefetch_slots = Vec::new();
+        let mut pending_imports = Vec::new();
         for loaded in mods.iter() {
             // Web UI is an optional resource type. Mods without its registry
             // do not contribute Web UI resources.
@@ -143,12 +155,11 @@ impl UiRegistry {
                 UiRegistryError::InvalidRegistry(path.clone(), error.to_string())
             })?;
             let web_root = canonical_directory(&loaded.root.join("assets/webui"))?;
-            let closure = mods
-                .dependency_closure(&loaded.id)
-                .map_err(UiRegistryError::ModLoader)?;
             let mut local = BTreeSet::new();
             for definition in manifest.resources {
-                if !valid_local_name(&definition.name) || !local.insert(definition.name.clone()) {
+                if !valid_resource_local_name(&definition.name)
+                    || !local.insert(definition.name.clone())
+                {
                     return Err(UiRegistryError::InvalidLocalName {
                         owner: loaded.id.clone(),
                         name: definition.name,
@@ -162,7 +173,16 @@ impl UiRegistry {
                     });
                 }
                 let name = format!("{}.{}", loaded.id, definition.name);
-                prefetch_slots.push((name.clone(), definition.prefetch.clone()));
+                for handle in definition.imports.keys() {
+                    if !valid_resource_local_name(handle) {
+                        return Err(UiRegistryError::InvalidImportHandle {
+                            owner: loaded.id.clone(),
+                            definition: definition.name.clone(),
+                            handle: handle.clone(),
+                        });
+                    }
+                }
+                pending_imports.push((name.clone(), definition.imports));
                 let project_root = checked_directory(&web_root, &definition.project)?;
                 let entry = checked_file(&project_root, &definition.entry)?;
                 let resource = UiResource {
@@ -184,14 +204,18 @@ impl UiRegistry {
                             name: definition.name.clone(),
                             message,
                         })?,
-                    prefetch: Vec::new(),
+                    background_color: definition.background_color,
+                    imports: BTreeMap::new(),
                 };
                 if resources.insert(name, resource).is_some() {
                     unreachable!("full names include unique Mod ID and local name")
                 }
             }
-            let resolve =
-                |reference: &str| resolve_reference(reference, &loaded.id, &closure, &local);
+            let resolve = |reference: &str| {
+                mods.resolve_resource_reference(&loaded.id, &local, reference)
+                    .map(|name| name.to_string())
+                    .map_err(UiRegistryError::from_resource_reference)
+            };
             for (slot, reference) in manifest.slots {
                 if slot.is_empty() {
                     return Err(UiRegistryError::InvalidSlot(slot));
@@ -218,20 +242,28 @@ impl UiRegistry {
             }
             slots.insert(slot, selected.value);
         }
-        for (source, requested_slots) in prefetch_slots {
-            let selected = requested_slots
+        for (source, declarations) in pending_imports {
+            let imports = declarations
                 .into_iter()
-                .map(|slot| {
-                    slots
-                        .get(&slot)
+                .map(|(handle, declaration)| {
+                    let selected = slots.get(&declaration.slot);
+                    let resource = selected
                         .cloned()
-                        .ok_or(UiRegistryError::UnknownSlot(slot))
+                        .ok_or_else(|| UiRegistryError::UnknownSlot(declaration.slot.clone()))?;
+                    Ok((
+                        handle,
+                        UiImport {
+                            slot: declaration.slot,
+                            resource,
+                            prefetch: declaration.prefetch,
+                        },
+                    ))
                 })
-                .collect::<Result<Vec<_>, _>>()?;
+                .collect::<Result<BTreeMap<_, _>, UiRegistryError>>()?;
             resources
                 .get_mut(&source)
-                .expect("prefetch source was registered in this phase")
-                .prefetch = selected;
+                .expect("UI import source was registered in this phase")
+                .imports = imports;
         }
         Ok(Self { resources, slots })
     }
@@ -253,40 +285,8 @@ fn protocol_target(authority: &str, path: &str) -> Result<(String, String, bool)
     }
 }
 
-pub(crate) fn resolve_reference(
-    reference: &str,
-    owner: &ModId,
-    closure: &BTreeSet<ModId>,
-    local: &BTreeSet<String>,
-) -> Result<String, UiRegistryError> {
-    if valid_local_name(reference) {
-        if !local.contains(reference) {
-            return Err(UiRegistryError::UnknownLocalResource {
-                owner: owner.clone(),
-                name: reference.into(),
-            });
-        }
-        return Ok(format!("{owner}.{reference}"));
-    }
-    let mut parts = reference.split('.');
-    let author = parts.next().unwrap_or_default();
-    let mod_name = parts.next().unwrap_or_default();
-    let local_name = parts.next().unwrap_or_default();
-    if parts.next().is_some() || !valid_local_name(local_name) {
-        return Err(UiRegistryError::InvalidReference(reference.into()));
-    }
-    let reference_owner =
-        parse_mod_id(&format!("{author}.{mod_name}")).map_err(UiRegistryError::ModLoader)?;
-    if !closure.contains(&reference_owner) {
-        return Err(UiRegistryError::UndeclaredDependency {
-            owner: owner.clone(),
-            reference: reference.into(),
-        });
-    }
-    Ok(reference.into())
-}
-
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct RegistryFile {
     #[serde(default, rename = "resource", alias = "ui")]
     resources: Vec<RegistryUi>,
@@ -294,6 +294,7 @@ pub(crate) struct RegistryFile {
     slots: BTreeMap<String, String>,
 }
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RegistryUi {
     name: String,
     project: String,
@@ -309,8 +310,23 @@ struct RegistryUi {
     layout: LayoutRegistration,
     initial_width: Option<u32>,
     initial_height: Option<u32>,
+    #[serde(default = "default_background_color")]
+    background_color: [u8; 4],
     #[serde(default)]
-    prefetch: Vec<String>,
+    imports: BTreeMap<String, RegistryUiImport>,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RegistryUiImport {
+    slot: String,
+    #[serde(default = "default_true")]
+    prefetch: bool,
+}
+fn default_true() -> bool {
+    true
+}
+fn default_background_color() -> [u8; 4] {
+    [0, 0, 0, 255]
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -436,14 +452,6 @@ fn checked_path(root: &Path, relative: &str, directory: bool) -> Result<PathBuf,
     }
     Ok(canonical)
 }
-fn valid_local_name(name: &str) -> bool {
-    !name.is_empty()
-        && !name.contains('.')
-        && name
-            .bytes()
-            .all(|byte| matches!(byte, b'a'..=b'z' | b'0'..=b'9' | b'_' | b'-'))
-}
-
 #[derive(Debug)]
 pub enum UiRegistryError {
     Io(PathBuf, std::io::Error),
@@ -452,6 +460,11 @@ pub enum UiRegistryError {
     InvalidLocalName {
         owner: ModId,
         name: String,
+    },
+    InvalidImportHandle {
+        owner: ModId,
+        definition: String,
+        handle: String,
     },
     InvalidUiDefinition {
         owner: ModId,
@@ -476,6 +489,22 @@ pub enum UiRegistryError {
     WebViewUnavailable,
     Navigation(String),
 }
+impl UiRegistryError {
+    fn from_resource_reference(error: ResourceReferenceError) -> Self {
+        match error {
+            ResourceReferenceError::InvalidLocalName(value)
+            | ResourceReferenceError::InvalidReference(value) => Self::InvalidReference(value),
+            ResourceReferenceError::UnknownLocal { owner, local } => {
+                Self::UnknownLocalResource { owner, name: local }
+            }
+            ResourceReferenceError::UndeclaredDependency { owner, reference } => {
+                Self::UndeclaredDependency { owner, reference }
+            }
+            ResourceReferenceError::ModLoader(error) => Self::ModLoader(error),
+        }
+    }
+}
+
 impl fmt::Display for UiRegistryError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -487,6 +516,14 @@ impl fmt::Display for UiRegistryError {
             Self::InvalidLocalName { owner, name } => {
                 write!(f, "invalid or duplicate UI resource `{name}` in `{owner}`")
             }
+            Self::InvalidImportHandle {
+                owner,
+                definition,
+                handle,
+            } => write!(
+                f,
+                "invalid UI import handle `{handle}` on definition `{definition}` in `{owner}`"
+            ),
             Self::InvalidUiDefinition {
                 owner,
                 name,

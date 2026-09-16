@@ -29,9 +29,16 @@ impl Default for ClientConfig {
     }
 }
 
+/// Persisted display name and QUIC address for one client-selectable server.
+///
+/// Deserialization accepts legacy `quic_addr` and ignores legacy `https_addr`,
+/// but serialization emits only the current `name` and `address` fields. Other
+/// unknown fields are rejected.
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
 pub struct ServerEntry {
+    /// User-facing label; uniqueness and non-emptiness are not enforced here.
     pub name: String,
+    /// Unparsed endpoint text; runtime adapters perform socket validation.
     pub address: String,
 }
 
@@ -60,6 +67,7 @@ impl<'de> Deserialize<'de> for ServerEntry {
     }
 }
 
+/// Persistent server process configuration with defaults for omitted fields.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ServerConfig {

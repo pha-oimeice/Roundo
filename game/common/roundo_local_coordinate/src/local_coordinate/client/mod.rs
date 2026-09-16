@@ -1,3 +1,5 @@
+//! Client-side coordinate lifecycle, chunk cache, and streaming IPC.
+
 mod systems;
 
 use systems::{CachedClientChunk, PendingChunkUpdate};
@@ -10,8 +12,8 @@ use crate::local_coordinate::{
     transform::LocalCoordinateTransform,
 };
 use crate::{
-    ChunkCoordinate, ChunkId, ChunkVersion, LocalCoordinateId, LocalCoordinateIdentity,
-    VoxelChunkSvo,
+    AtomicVoxelId, AtomicVoxelRegistry, ChunkCoordinate, ChunkId, ChunkVersion, EMPTY_VOXEL_ID,
+    LocalCoordinateId, LocalCoordinateIdentity, VoxelChunkSvo,
 };
 use avian3d::prelude::RigidBody;
 use bevy::prelude::{
@@ -25,6 +27,7 @@ use roundo_toolbox::{
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 
+// Per-frame budgets prevent network bursts from monopolizing the ECS update.
 const MAX_COMMANDS_INGESTED_PER_FRAME: usize = 32;
 const MAX_CHUNK_UPDATES_APPLIED_PER_FRAME: usize = 16;
 pub const MIN_CHUNK_VIEW_DISTANCE: u16 = 1;
@@ -32,9 +35,11 @@ pub const MAX_CHUNK_VIEW_DISTANCE: u16 = 512;
 pub const DEFAULT_CHUNK_VIEW_DISTANCE: u16 = 64;
 
 #[derive(Clone, Copy, Debug, Resource)]
+/// Clamped chunk radius requested from the authoritative server.
 pub struct ClientChunkViewDistance(u16);
 
 impl ClientChunkViewDistance {
+    /// Creates a distance constrained to protocol-supported bounds.
     pub fn new(chunks: u16) -> Self {
         Self(chunks.clamp(MIN_CHUNK_VIEW_DISTANCE, MAX_CHUNK_VIEW_DISTANCE))
     }
@@ -43,6 +48,7 @@ impl ClientChunkViewDistance {
         self.0
     }
 
+    /// Updates the distance while preserving protocol bounds.
     pub fn set_chunks(&mut self, chunks: u16) {
         self.0 = chunks.clamp(MIN_CHUNK_VIEW_DISTANCE, MAX_CHUNK_VIEW_DISTANCE);
     }
@@ -54,10 +60,12 @@ impl Default for ClientChunkViewDistance {
     }
 }
 
+/// Client-facing endpoint for coordinate commands and chunk requests.
 pub type LocalCoordinateClientIpc =
     CrossbeamThreadPipeEndpointA<LocalCoordinateClientCommand, LocalCoordinateClientEvent>;
 
 #[derive(Clone)]
+/// Installs coordinate ingestion, decoding, and ECS synchronization.
 pub struct LocalCoordinateClientPlugin {
     pipe: CrossbeamThreadPipe<LocalCoordinateClientCommand, LocalCoordinateClientEvent>,
 }
@@ -81,6 +89,7 @@ impl Default for LocalCoordinateClientPlugin {
 }
 
 #[derive(Clone, Debug)]
+/// Authoritative lifecycle and chunk updates consumed by the client.
 pub enum LocalCoordinateClientCommand {
     BeginSession,
     ResetRequests,
@@ -98,12 +107,14 @@ pub enum LocalCoordinateClientCommand {
 }
 
 #[derive(Clone, Debug)]
+/// Client streaming demand sent to the network bridge.
 pub enum LocalCoordinateClientEvent {
     RequestChunks(Vec<ChunkId>),
     SetChunkViewDistance { chunks: u16 },
 }
 
 #[derive(Resource)]
+/// Runtime indexes connecting server chunk versions to local ECS entities.
 pub struct LocalCoordinateClientWorld {
     coordinates: HashMap<LocalCoordinateId, Entity>,
     cached_chunks: HashMap<ChunkId, CachedClientChunk>,
@@ -127,18 +138,22 @@ impl Default for LocalCoordinateClientWorld {
 }
 
 impl LocalCoordinateClientWorld {
+    /// Resolves a coordinate identity to its live ECS entity.
     pub fn entity(&self, local_coordinate_id: LocalCoordinateId) -> Option<Entity> {
-        self.coordinates.get(&local_coordinate_id).copied()
+        return self.coordinates.get(&local_coordinate_id).copied();
     }
 
+    /// Returns the number of live coordinate roots.
     pub fn coordinate_count(&self) -> usize {
         self.coordinates.len()
     }
 
+    /// Returns chunks retained for reuse across visibility changes.
     pub fn cached_chunk_count(&self) -> usize {
         self.cached_chunks.len()
     }
 
+    /// Resolves a live ECS entity back to its coordinate identity.
     pub fn local_coordinate_id(&self, entity: Entity) -> Option<LocalCoordinateId> {
         self.coordinates
             .iter()

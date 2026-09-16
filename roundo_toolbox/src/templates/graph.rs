@@ -1,5 +1,8 @@
+//! Generic adjacency-list storage for small in-memory graphs.
+
 use std::collections::HashMap;
 
+/// Stores vertices and their typed outgoing edges.
 pub struct Graph<V, E>
 where
     V: Copy + PartialEq + Eq + std::hash::Hash,

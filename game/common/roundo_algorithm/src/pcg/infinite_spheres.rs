@@ -2,9 +2,13 @@
 
 use std::{f64::consts::TAU, sync::Arc};
 
+/// Fixed voxel count along each generated chunk axis.
 pub const CHUNK_EDGE_LENGTH: usize = 16;
+/// Material emitted outside every generated sphere.
 pub const EMPTY_MATERIAL_ID: u16 = 0;
+/// Material emitted for voxel centers inside at least one sphere.
 pub const SOLID_MATERIAL_ID: u16 = 1;
+/// Multiplier applied to each cell's deterministic sphere-radius sample.
 pub const DEFAULT_SPHERE_RADIUS_SCALE: f64 = 10.0;
 
 const SPHERE_CELL_EDGE_LENGTH: i64 = 64;
@@ -12,14 +16,19 @@ const MAXIMUM_SAMPLED_NORMAL_MAGNITUDE: f64 = 8.7;
 const MAXIMUM_SPHERE_RADIUS: f64 =
     (MAXIMUM_SAMPLED_NORMAL_MAGNITUDE + 1.0) * DEFAULT_SPHERE_RADIUS_SCALE;
 
-/// Dense algorithm output for one fixed-size chunk.
+/// Dense immutable algorithm output for one fixed-size chunk.
+///
+/// Cloning shares voxel storage through `Arc`; [`Self::into_voxels`] always
+/// materializes an independent vector.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GeneratedChunk {
+    /// Signed chunk-unit coordinate `[x, y, z]`.
     pub coordinate: [i64; 3],
     voxels: Arc<[u16]>,
 }
 
 impl GeneratedChunk {
+    /// Allocates a complete chunk initialized to [`EMPTY_MATERIAL_ID`].
     pub fn empty(coordinate: [i64; 3]) -> Self {
         Self {
             coordinate,
@@ -27,10 +36,14 @@ impl GeneratedChunk {
         }
     }
 
+    /// Returns one material at a chunk-local position, or `None` out of bounds.
     pub fn voxel(&self, local_position: [usize; 3]) -> Option<u16> {
         voxel_index(local_position).map(|index| self.voxels[index])
     }
 
+    /// Takes ownership of dense x-major voxel storage when its length is exact.
+    ///
+    /// `None` drops the supplied vector; this API does not return invalid input.
     pub fn from_voxels(coordinate: [i64; 3], voxels: Vec<u16>) -> Option<Self> {
         (voxels.len() == CHUNK_EDGE_LENGTH.pow(3)).then(|| Self {
             coordinate,
@@ -38,14 +51,17 @@ impl GeneratedChunk {
         })
     }
 
+    /// Borrows dense storage ordered with x fastest, followed by y and z.
     pub fn voxels(&self) -> &[u16] {
         &self.voxels
     }
 
+    /// Copies dense storage into an independently owned vector.
     pub fn into_voxels(self) -> Vec<u16> {
         self.voxels.as_ref().to_vec()
     }
 
+    /// Scans the complete chunk for absence of nonempty material IDs.
     pub fn is_empty(&self) -> bool {
         self.voxels
             .iter()
@@ -53,14 +69,22 @@ impl GeneratedChunk {
     }
 }
 
-/// A pure function object implementing `f(x, y, z) -> GeneratedChunk`.
+/// Pure, order-independent mapping from chunk coordinate to generated voxels.
+///
+/// One deterministic sphere is assigned to every 64-unit spatial cell. Callers
+/// should keep `radius_scale` finite and nonnegative; the public field does not
+/// enforce validity, and very large values can make generation impractically
+/// expensive by expanding the sampled cell range.
 #[derive(Clone, Copy, Debug)]
 pub struct InfiniteSphereGenerator {
+    /// Seed mixed independently with each sphere-cell coordinate.
     pub seed: u64,
+    /// Nonnegative radius multiplier; generation clamps negative values to zero.
     pub radius_scale: f64,
 }
 
 impl InfiniteSphereGenerator {
+    /// Creates a generator with [`DEFAULT_SPHERE_RADIUS_SCALE`].
     pub const fn new(seed: u64) -> Self {
         Self {
             seed,
@@ -69,6 +93,10 @@ impl InfiniteSphereGenerator {
     }
 
     /// Generates any chunk without reading or generating adjacent chunks.
+    ///
+    /// Equal generator fields and coordinates produce the same voxel sequence
+    /// regardless of prior calls. Coordinate multiplication saturates at
+    /// `i64` bounds before conversion to generation space.
     pub fn generate_chunk(&self, x: i64, y: i64, z: i64) -> GeneratedChunk {
         let coordinate = [x, y, z];
         let chunk_min =

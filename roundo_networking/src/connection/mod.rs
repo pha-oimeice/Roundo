@@ -3,6 +3,7 @@
 use crate::ProtocolError;
 use crate::frame;
 use crate::protocol::{ClientMessage, ServerMessage};
+use crate::service::{AdmissionResult, admit};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use std::marker::PhantomData;
@@ -11,12 +12,19 @@ use std::sync::atomic::{AtomicU8, Ordering};
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, ReadHalf, WriteHalf};
 use tokio::sync::{mpsc, watch};
 
+/// Shared high-level state of a typed framed connection.
+///
+/// This is an atomic observation for diagnostics and admission checks, not proof
+/// that peer I/O has completed. Split reader and writer halves share the state.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ConnectionLifecycle {
-    /// The transport stream exists; no application I/O has happened yet.
+    /// The transport stream exists; no application I/O has started yet.
     Established,
+    /// At least one framed read or write has started successfully.
     Open,
+    /// Local asynchronous-write shutdown is in progress.
     Closing,
+    /// Local shutdown completed or a framed I/O operation failed.
     Closed,
 }
 
@@ -53,10 +61,13 @@ pub struct Connection<Stream, Incoming, Outgoing> {
     marker: PhantomData<fn(Incoming) -> Outgoing>,
 }
 
+/// Client-side connection that receives server messages and sends client messages.
 pub type ClientConnection<Stream> = Connection<Stream, ServerMessage, ClientMessage>;
+/// Server-side connection that receives client messages and sends server messages.
 pub type ServerConnection<Stream> = Connection<Stream, ClientMessage, ServerMessage>;
 
 impl<Stream, Incoming, Outgoing> Connection<Stream, Incoming, Outgoing> {
+    /// Wraps an established transport without performing I/O.
     pub fn new(stream: Stream) -> Self {
         Self {
             stream,
@@ -65,10 +76,12 @@ impl<Stream, Incoming, Outgoing> Connection<Stream, Incoming, Outgoing> {
         }
     }
 
+    /// Returns a momentary observation of the shared lifecycle.
     pub fn lifecycle(&self) -> ConnectionLifecycle {
         lifecycle(&self.lifecycle)
     }
 
+    /// Removes the typed framing wrapper without shutting down the transport.
     pub fn into_inner(self) -> Stream {
         self.stream
     }
@@ -80,6 +93,14 @@ where
     Incoming: DeserializeOwned,
     Outgoing: Serialize,
 {
+    /// Reads and decodes exactly one length-prefixed message.
+    ///
+    /// Any framing, decode, or I/O error marks the shared lifecycle closed.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProtocolError::ConnectionClosed`] after closing starts, or the
+    /// framing/transport error from reading the next message.
     pub async fn receive(&mut self) -> Result<Incoming, ProtocolError> {
         ensure_open(&self.lifecycle)?;
         let result = frame::read(&mut self.stream).await;
@@ -87,17 +108,38 @@ where
         result
     }
 
-    pub async fn send(&mut self, message: &Outgoing) -> Result<(), ProtocolError> {
+    /// Encodes and writes exactly one length-prefixed message.
+    ///
+    /// Failure may leave partial frame bytes in the transport and marks the
+    /// shared lifecycle closed; callers must not retry on the same connection.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProtocolError::ConnectionClosed`] after closing starts, or an
+    /// encode/frame-size/transport error.
+    pub async fn transmit(&mut self, message: &Outgoing) -> Result<(), ProtocolError> {
         ensure_open(&self.lifecycle)?;
         let result = frame::write(&mut self.stream, message).await;
         finish_io(&self.lifecycle, &result);
         result
     }
 
-    pub async fn close(&mut self) -> Result<(), ProtocolError> {
+    /// Shuts down the asynchronous write side and marks the wrapper closed.
+    ///
+    /// Calling this after closure succeeds without touching the transport.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProtocolError::ConnectionClosed`] if another finish is already
+    /// in progress, or [`ProtocolError::Io`] if transport shutdown fails.
+    pub async fn finish(&mut self) -> Result<(), ProtocolError> {
         close_stream(&mut self.stream, &self.lifecycle).await
     }
 
+    /// Splits transport ownership into independently usable typed halves.
+    ///
+    /// Both halves share one lifecycle: an I/O failure or writer finish prevents
+    /// subsequent operations through either half.
     pub fn into_split(
         self,
     ) -> (
@@ -112,6 +154,7 @@ where
     }
 }
 
+/// Owned read half of a typed connection with shared lifecycle state.
 pub struct ConnectionReader<Reader, Incoming> {
     reader: Reader,
     lifecycle: LifecycleHandle,
@@ -127,6 +170,7 @@ impl<Reader, Incoming> ConnectionReader<Reader, Incoming> {
         }
     }
 
+    /// Returns a momentary observation shared with the writer half.
     pub fn lifecycle(&self) -> ConnectionLifecycle {
         lifecycle(&self.lifecycle)
     }
@@ -137,6 +181,7 @@ where
     Reader: AsyncRead + Unpin,
     Incoming: DeserializeOwned,
 {
+    /// Reads and decodes one frame, closing shared lifecycle state on failure.
     pub async fn receive(&mut self) -> Result<Incoming, ProtocolError> {
         ensure_open(&self.lifecycle)?;
         let result = frame::read(&mut self.reader).await;
@@ -145,6 +190,7 @@ where
     }
 }
 
+/// Owned write half of a typed connection with shared lifecycle state.
 pub struct ConnectionWriter<Writer, Outgoing> {
     writer: Writer,
     lifecycle: LifecycleHandle,
@@ -160,6 +206,7 @@ impl<Writer, Outgoing> ConnectionWriter<Writer, Outgoing> {
         }
     }
 
+    /// Returns a momentary observation shared with the reader half.
     pub fn lifecycle(&self) -> ConnectionLifecycle {
         lifecycle(&self.lifecycle)
     }
@@ -170,19 +217,28 @@ where
     Writer: AsyncWrite + Unpin,
     Outgoing: Serialize,
 {
-    pub async fn send(&mut self, message: &Outgoing) -> Result<(), ProtocolError> {
+    /// Encodes and writes one frame, closing shared lifecycle state on failure.
+    ///
+    /// A failed write may have emitted a partial frame and must not be retried on
+    /// this connection.
+    pub async fn transmit(&mut self, message: &Outgoing) -> Result<(), ProtocolError> {
         ensure_open(&self.lifecycle)?;
         let result = frame::write(&mut self.writer, message).await;
         finish_io(&self.lifecycle, &result);
         result
     }
 
-    pub async fn close(&mut self) -> Result<(), ProtocolError> {
+    /// Shuts down the write half and closes lifecycle state shared with the reader.
+    pub async fn finish(&mut self) -> Result<(), ProtocolError> {
         close_stream(&mut self.writer, &self.lifecycle).await
     }
 }
 
-/// Drain one outbound channel through the shared framed writer.
+/// Drains an unbounded outbound channel through a framed writer.
+///
+/// Messages are transmitted in channel receive order. When all senders drop,
+/// the write side is shut down. The first transmission or shutdown error stops
+/// draining; unsent queued messages are dropped with the receiver.
 pub async fn run_writer<Writer, Outgoing>(
     mut writer: ConnectionWriter<Writer, Outgoing>,
     mut outbound: mpsc::UnboundedReceiver<Outgoing>,
@@ -192,9 +248,9 @@ where
     Outgoing: Serialize,
 {
     while let Some(message) = outbound.recv().await {
-        writer.send(&message).await?;
+        writer.transmit(&message).await?;
     }
-    writer.close().await
+    writer.finish().await
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -221,7 +277,7 @@ pub(crate) enum ConnectionIoEvent<Incoming> {
 }
 
 pub(crate) struct ConnectionIo<Incoming, Outgoing> {
-    outbound: mpsc::UnboundedSender<Outgoing>,
+    outbound: mpsc::Sender<Outgoing>,
     events: mpsc::UnboundedReceiver<ConnectionIoEvent<Incoming>>,
     shutdown: watch::Sender<bool>,
 }
@@ -231,12 +287,15 @@ where
     Incoming: DeserializeOwned + Send + 'static,
     Outgoing: Serialize + Send + Sync + 'static,
 {
-    pub(crate) fn spawn<Stream>(connection: Connection<Stream, Incoming, Outgoing>) -> Self
+    pub(crate) fn spawn<Stream>(
+        connection: Connection<Stream, Incoming, Outgoing>,
+        outbound_capacity: usize,
+    ) -> Self
     where
         Stream: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     {
         let (reader, writer) = connection.into_split();
-        let (outbound, outbound_receiver) = mpsc::unbounded_channel();
+        let (outbound, outbound_receiver) = mpsc::channel(outbound_capacity.max(1));
         let (events, event_receiver) = mpsc::unbounded_channel();
         let (shutdown, shutdown_receiver) = watch::channel(false);
 
@@ -245,22 +304,34 @@ where
         let reader_shutdown_receiver = shutdown_receiver.clone();
         tokio::spawn(async move {
             let result = run_reader(reader, reader_events.clone(), reader_shutdown_receiver).await;
-            let _ = reader_events.send(ConnectionIoEvent::Stopped {
+            let event_result = reader_events.send(ConnectionIoEvent::Stopped {
                 side: ConnectionIoSide::Reader,
                 result,
             });
-            let _ = reader_shutdown.send(true);
+            if event_result.is_err() {
+                log::trace!("reader stopped after its Connection I/O owner was dropped");
+            }
+            let shutdown_result = reader_shutdown.send(true);
+            if shutdown_result.is_err() {
+                log::trace!("reader stopped after its writer shutdown receiver was dropped");
+            }
         });
 
         let writer_events = events;
         let writer_shutdown = shutdown.clone();
         tokio::spawn(async move {
             let result = run_managed_writer(writer, outbound_receiver, shutdown_receiver).await;
-            let _ = writer_events.send(ConnectionIoEvent::Stopped {
+            let event_result = writer_events.send(ConnectionIoEvent::Stopped {
                 side: ConnectionIoSide::Writer,
                 result,
             });
-            let _ = writer_shutdown.send(true);
+            if event_result.is_err() {
+                log::trace!("writer stopped after its Connection I/O owner was dropped");
+            }
+            let shutdown_result = writer_shutdown.send(true);
+            if shutdown_result.is_err() {
+                log::trace!("writer stopped after its reader shutdown receiver was dropped");
+            }
         });
 
         Self {
@@ -270,12 +341,12 @@ where
         }
     }
 
-    pub(crate) fn sender(&self) -> mpsc::UnboundedSender<Outgoing> {
+    pub(crate) fn sender(&self) -> mpsc::Sender<Outgoing> {
         self.outbound.clone()
     }
 
-    pub(crate) fn send(&self, message: Outgoing) -> bool {
-        self.outbound.send(message).is_ok()
+    pub(crate) fn admit_message(&self, message: Outgoing) -> AdmissionResult {
+        admit(&self.outbound, message)
     }
 
     pub(crate) async fn receive(&mut self) -> Option<ConnectionIoEvent<Incoming>> {
@@ -283,13 +354,19 @@ where
     }
 
     pub(crate) fn shutdown(&self) {
-        let _ = self.shutdown.send(true);
+        let shutdown_result = self.shutdown.send(true);
+        if shutdown_result.is_err() {
+            log::trace!("Connection I/O shutdown requested after both workers stopped");
+        }
     }
 }
 
 impl<Incoming, Outgoing> Drop for ConnectionIo<Incoming, Outgoing> {
     fn drop(&mut self) {
-        let _ = self.shutdown.send(true);
+        let shutdown_result = self.shutdown.send(true);
+        if shutdown_result.is_err() {
+            log::trace!("Connection I/O dropped after both workers stopped");
+        }
     }
 }
 
@@ -311,7 +388,8 @@ where
             }
             message = reader.receive() => {
                 let message = message?;
-                if events.send(ConnectionIoEvent::Message(message)).is_err() {
+                let event_result = events.send(ConnectionIoEvent::Message(message));
+                if event_result.is_err() {
                     return Ok(());
                 }
             }
@@ -321,7 +399,7 @@ where
 
 async fn run_managed_writer<Writer, Outgoing>(
     mut writer: ConnectionWriter<Writer, Outgoing>,
-    mut outbound: mpsc::UnboundedReceiver<Outgoing>,
+    mut outbound: mpsc::Receiver<Outgoing>,
     mut shutdown: watch::Receiver<bool>,
 ) -> Result<(), ProtocolError>
 where
@@ -332,7 +410,7 @@ where
         tokio::select! {
             changed = shutdown.changed() => {
                 if changed.is_err() || *shutdown.borrow() {
-                    return writer.close().await;
+                    return writer.finish().await;
                 }
             }
             message = outbound.recv() => match message {
@@ -340,13 +418,13 @@ where
                     tokio::select! {
                         changed = shutdown.changed() => {
                             if changed.is_err() || *shutdown.borrow() {
-                                return writer.close().await;
+                                return writer.finish().await;
                             }
                         }
-                        result = writer.send(&message) => result?,
+                        result = writer.transmit(&message) => result?,
                     }
                 }
-                None => return writer.close().await,
+                None => return writer.finish().await,
             }
         }
     }
@@ -394,7 +472,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{ClientConnection, ConnectionIo, ConnectionIoEvent};
+    use super::{AdmissionResult, ClientConnection, ConnectionIo, ConnectionIoEvent};
     use crate::frame;
     use crate::protocol::{
         ClientGameMessage, ClientMessage, ControllerCommand, Movement3DAction,
@@ -408,7 +486,7 @@ mod tests {
     #[tokio::test]
     async fn outbound_message_does_not_cancel_a_partial_inbound_frame() {
         let (client_stream, server_stream) = tokio::io::duplex(8);
-        let mut connection = ConnectionIo::spawn(ClientConnection::new(client_stream));
+        let mut connection = ConnectionIo::spawn(ClientConnection::new(client_stream), 8);
         let (mut server_reader, mut server_writer) = split(server_stream);
 
         let inbound = ServerMessage::Game(ServerGameMessage::PlayerState {
@@ -434,16 +512,19 @@ mod tests {
             command: PlayerControllerCommand::Movement3D(ControllerCommand {
                 sequence: 1,
                 action: Movement3DAction {
-                    translation_delta: [0.0, 0.0, 1.0],
+                    direction: [0.0, 0.0, 1.0],
                 },
             }),
         });
-        assert!(connection.send(outbound.clone()));
-        let received_outbound: ClientMessage =
-            timeout(TEST_TIMEOUT, frame::read(&mut server_reader))
-                .await
-                .expect("client message should arrive")
-                .expect("client message should decode");
+        assert_eq!(
+            connection.admit_message(outbound.clone()),
+            AdmissionResult::Queued
+        );
+        let frame_read = frame::read(&mut server_reader);
+        let received_outbound: ClientMessage = timeout(TEST_TIMEOUT, frame_read)
+            .await
+            .expect("client message should arrive")
+            .expect("client message should decode");
         assert_eq!(received_outbound, outbound);
 
         server_writer

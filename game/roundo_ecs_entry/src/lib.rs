@@ -1,7 +1,7 @@
+//! Feature-gated constructors and IPC accessors for the game ECS runtime.
+
 #[cfg(feature = "client")]
 mod client;
-#[cfg(any(feature = "client", feature = "server"))]
-mod mod_assets;
 #[cfg(feature = "server")]
 mod server;
 #[cfg(feature = "server")]
@@ -12,6 +12,7 @@ pub use client::{
     client_local_coordinate_ipc, client_marionette_ipc, client_presence_ipc, create_ecs_client_app,
     run_ecs_client,
 };
+/// Server runtime assembly and its domain IPC endpoints.
 #[cfg(feature = "server")]
 pub use server::{
     configure_server_presence_radius, configure_server_tick_rate, create_ecs_server_app,

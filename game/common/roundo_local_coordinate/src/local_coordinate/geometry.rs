@@ -1,6 +1,6 @@
 use crate::local_coordinate::data::{
-    CHUNK_EDGE_LENGTH, Chunk, LocalCoordinate, LocalCoordinateChunkView, PositionedAtomicVoxel,
-    SOLID_VOXEL_ID,
+    CHUNK_EDGE_LENGTH, Chunk, EMPTY_VOXEL_ID, LocalCoordinate, LocalCoordinateChunkView,
+    PositionedAtomicVoxel,
 };
 use bevy::prelude::{IVec3, Vec3};
 
@@ -8,7 +8,8 @@ impl LocalCoordinate {
     /// Reads one voxel in local-coordinate space without exposing Chunk storage.
     pub fn voxel(&self, position: IVec3) -> Option<crate::AtomicVoxel> {
         let (chunk_position, local_position) = split_position(position);
-        self.chunks.get(&chunk_position)?.voxel(local_position)
+        let chunk = self.chunks.get(&chunk_position)?;
+        chunk.voxel(local_position)
     }
 
     /// Observes renderable loaded Chunks without exposing the backing map or Chunk layout.
@@ -33,7 +34,7 @@ impl LocalCoordinate {
 
     fn apply_voxel_without_center_of_mass(&mut self, voxel: PositionedAtomicVoxel) -> bool {
         let (chunk_position, local_position) = split_position(voxel.position);
-        let changed = if voxel.voxel == SOLID_VOXEL_ID {
+        let changed = if voxel.voxel != EMPTY_VOXEL_ID {
             self.mark_chunk_loaded(chunk_position);
             self.chunks
                 .get_mut(&chunk_position)
@@ -107,10 +108,9 @@ impl LocalCoordinate {
     }
 
     pub(crate) fn replace_chunk(&mut self, chunk_position: IVec3, mut chunk: Chunk) {
-        let next_chunk_revision = self
-            .chunks
-            .get(&chunk_position)
-            .map_or(1, |current| current.content_revision.wrapping_add(1));
+        let current_chunk = self.chunks.get(&chunk_position);
+        let next_chunk_revision =
+            current_chunk.map_or(1, |current| current.content_revision.wrapping_add(1));
         chunk.content_revision = next_chunk_revision;
         self.chunks.insert(chunk_position, chunk);
         self.changed_chunks.insert(chunk_position);

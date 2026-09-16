@@ -187,16 +187,14 @@ impl<T> BreadthFirstLosslessSvo<T> {
         if octant >= 8 {
             return None;
         }
-        let node = self.nodes.get(usize::try_from(node_index).ok()?)?;
+        let node = slice_item(&self.nodes, usize::try_from(node_index).ok()?)?;
         let octant_bit = 1_u8 << octant;
         if node.child_mask & octant_bit == 0 {
             return None;
         }
         let preceding_children = (node.child_mask & (octant_bit - 1)).count_ones();
         let child_index = node.first_child.checked_add(preceding_children)?;
-        self.nodes
-            .get(usize::try_from(child_index).ok()?)
-            .map(|_| child_index)
+        slice_item(&self.nodes, usize::try_from(child_index).ok()?).map(|_| child_index)
     }
 
     /// Returns an explicitly stored node. Missing inherited regions return `None`.
@@ -208,7 +206,7 @@ impl<T> BreadthFirstLosslessSvo<T> {
         for &octant in path {
             node_index = self.child_index(node_index, octant)?;
         }
-        self.nodes.get(usize::try_from(node_index).ok()?)
+        slice_item(&self.nodes, usize::try_from(node_index).ok()?)
     }
 
     /// Returns the value of a spatial path, including values inherited from a
@@ -223,16 +221,12 @@ impl<T> BreadthFirstLosslessSvo<T> {
                 return None;
             }
             let Some(child_index) = self.child_index(node_index, octant) else {
-                return self
-                    .nodes
-                    .get(usize::try_from(node_index).ok()?)
+                return slice_item(&self.nodes, usize::try_from(node_index).ok()?)
                     .map(|node| &node.data);
             };
             node_index = child_index;
         }
-        self.nodes
-            .get(usize::try_from(node_index).ok()?)
-            .map(|node| &node.data)
+        slice_item(&self.nodes, usize::try_from(node_index).ok()?).map(|node| &node.data)
     }
 
     /// Queries a finest-level coordinate without allocating an octant path.
@@ -251,17 +245,18 @@ impl<T> BreadthFirstLosslessSvo<T> {
                 | (((coordinates[1] >> bit) & 1) << 1)
                 | (((coordinates[2] >> bit) & 1) << 2);
             let Some(child_index) = self.child_index(node_index, octant as u8) else {
-                return self
-                    .nodes
-                    .get(usize::try_from(node_index).ok()?)
+                return slice_item(&self.nodes, usize::try_from(node_index).ok()?)
                     .map(|node| &node.data);
             };
             node_index = child_index;
         }
-        self.nodes
-            .get(usize::try_from(node_index).ok()?)
-            .map(|node| &node.data)
+        slice_item(&self.nodes, usize::try_from(node_index).ok()?).map(|node| &node.data)
     }
+}
+
+fn slice_item<T>(items: &[T], index: usize) -> Option<&T> {
+    let item = items.get(index);
+    item
 }
 
 struct LosslessRegion<T> {
@@ -490,7 +485,7 @@ impl<T> OptimizedOctree<T> {
             return None;
         }
 
-        let node = self.nodes.get(usize::try_from(node_index).ok()?)?;
+        let node = slice_item(&self.nodes, usize::try_from(node_index).ok()?)?;
         let octant_bit = 1_u8 << octant;
         if node.child_mask & octant_bit == 0 {
             return None;
@@ -499,9 +494,7 @@ impl<T> OptimizedOctree<T> {
         let preceding_children = u32::from((node.child_mask & (octant_bit - 1)).count_ones());
         let child_index = node.first_child.checked_add(preceding_children)?;
 
-        self.nodes
-            .get(usize::try_from(child_index).ok()?)
-            .map(|_| child_index)
+        slice_item(&self.nodes, usize::try_from(child_index).ok()?).map(|_| child_index)
     }
 
     /// Resolves an octant path from the root without allocating traversal state.
@@ -512,7 +505,7 @@ impl<T> OptimizedOctree<T> {
             node_index = self.child_index(node_index, octant)?;
         }
 
-        self.nodes.get(usize::try_from(node_index).ok()?)
+        slice_item(&self.nodes, usize::try_from(node_index).ok()?)
     }
 }
 

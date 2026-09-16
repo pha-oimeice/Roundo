@@ -8,19 +8,26 @@
 use roundo_toolbox::{UpdateVersion, macros::identifier};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
-pub const GAME_PROTOCOL_VERSION: u16 = 14;
+/// Exact stream-0 application version required during session setup.
+pub const GAME_PROTOCOL_VERSION: u16 = 15;
+/// Exact stream-1 application version required during session setup.
 pub const RESOURCE_PROTOCOL_VERSION: u16 = 2;
 
+/// Logical QUIC stream role encoded as one wire byte during stream pairing.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 #[repr(u8)]
 pub enum StreamId {
+    /// Session negotiation and latency-sensitive game traffic.
     Stream0 = 0,
+    /// Chunk versions and resource payload traffic.
     Stream1 = 1,
 }
 
 impl StreamId {
+    /// Both logical stream roles in wire-ID order.
     pub const ALL: [Self; 2] = [Self::Stream0, Self::Stream1];
 
+    /// Decodes a wire role, returning `None` for unknown values.
     pub const fn from_wire(value: u8) -> Option<Self> {
         match value {
             0 => Some(Self::Stream0),
@@ -41,6 +48,7 @@ pub struct UserId(pub i32);
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 pub struct SessionId(pub i32);
 
+/// Server-confirmed pairing of a user identity and game-session identity.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 pub struct UserSession {
     pub user_id: UserId,
@@ -52,6 +60,7 @@ pub enum ProtocolErrorCode {
     SessionRejected,
     UnexpectedMessage,
     UnsupportedProtocolVersion,
+    IncompatibleResources,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -59,9 +68,20 @@ pub struct SessionInfo {
     pub user_session: UserSession,
 }
 
+/// Digest of the immutable Mod resources whose compact identities cross the
+/// network. Session establishment rejects peers with a different digest.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, Hash, PartialEq, Serialize)]
+pub struct ResourceCatalogFingerprint(pub [u8; 32]);
+
+/// Top-level client-to-server envelope shared by both logical streams.
+///
+/// Session layers constrain negotiation variants to their linear phase; service
+/// routing accepts `Game` only on stream 0 and `Resource` only on stream 1.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub enum ClientMessage {
-    JoinPublicSession,
+    JoinPublicSession {
+        resource_fingerprint: ResourceCatalogFingerprint,
+    },
     Ready {
         stream: StreamId,
         protocol_version: u16,
@@ -70,6 +90,10 @@ pub enum ClientMessage {
     Resource(ClientResourceMessage),
 }
 
+/// Top-level server-to-client envelope shared by both logical streams.
+///
+/// `SessionEstablished` and `Error` are negotiation messages. Service routing
+/// accepts `Game` only on stream 0 and `Resource` only on stream 1.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub enum ServerMessage {
     SessionEstablished { info: SessionInfo },
@@ -78,17 +102,26 @@ pub enum ServerMessage {
     Resource(ServerResourceMessage),
 }
 
+/// Sequenced controller action; each action domain validates its own sequence.
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
 pub struct ControllerCommand<Action> {
+    /// Wrapping client-issued sequence compared by the receiving action domain.
     pub sequence: u64,
     pub action: Action,
 }
 
+/// Requested normalized world-space movement direction.
+///
+/// The authoritative server owns movement speed and displacement. The wire
+/// type does not enforce finite components or unit length.
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
 pub struct Movement3DAction {
-    pub translation_delta: [f32; 3],
+    pub direction: [f32; 3],
 }
 
+/// Requested player orientation in quaternion `[x, y, z, w]` order.
+///
+/// The wire type does not enforce finiteness, nonzero length, or normalization.
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Serialize)]
 pub struct RotationSync {
     pub rotation: [f32; 4],
@@ -97,6 +130,10 @@ pub struct RotationSync {
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct DestroyBlockControllerAction;
 
+/// Placement request carrying a compact voxel-registry ID.
+///
+/// Registration and placeability are validated by the authoritative server,
+/// not by this wire type.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct PlaceBlockControllerAction {
     pub voxel_id: u32,
@@ -119,6 +156,10 @@ pub enum SceneId {
     S1,
 }
 
+/// Authoritative player identity, scene, and world-space pose snapshot.
+///
+/// Rotation uses quaternion `[x, y, z, w]` order. Serialization itself does not
+/// validate finite pose components.
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Serialize)]
 pub struct PlayerState {
     pub player_id: PlayerId,
@@ -141,6 +182,11 @@ pub struct NearbyJoinableWorld {
     pub translation: [f32; 3],
 }
 
+/// Complete client projection of currently nearby players and joinable worlds.
+///
+/// Consumers reconcile their prior projection against the vectors; omission
+/// means the corresponding marker is no longer present. Vector ordering is a
+/// server publication choice and should not be used as identity.
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 pub struct PresenceSnapshot {
     pub own_player_id: PlayerId,
@@ -148,12 +194,15 @@ pub struct PresenceSnapshot {
     pub joinable_worlds: Vec<NearbyJoinableWorld>,
 }
 
+/// Chunk identity scoped by owning local coordinate.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 pub struct ChunkId {
     pub local_coordinate_id: LocalCoordinateId,
+    /// Signed chunk-unit coordinate `[x, y, z]`, not a voxel position.
     pub coordinate: [i64; 3],
 }
 
+/// Server-issued content version for one [`ChunkId`].
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 pub struct ChunkVersion {
     pub local_coordinate_id: LocalCoordinateId,
@@ -162,6 +211,7 @@ pub struct ChunkVersion {
 }
 
 impl ChunkVersion {
+    /// Drops version information while preserving coordinate identity.
     pub const fn id(self) -> ChunkId {
         ChunkId {
             local_coordinate_id: self.local_coordinate_id,
@@ -170,10 +220,15 @@ impl ChunkVersion {
     }
 }
 
+/// Opaque owned postcard bytes embedded inside a typed outer message.
+///
+/// This type imposes no size limit; transport framing applies its independent
+/// frame limit to the complete outer message.
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct SerializedPayload(Vec<u8>);
 
 impl SerializedPayload {
+    /// Serializes a value into an owned postcard payload.
     pub fn encode<Value>(value: &Value) -> Result<Self, postcard::Error>
     where
         Value: Serialize,
@@ -181,6 +236,7 @@ impl SerializedPayload {
         postcard::to_allocvec(value).map(Self)
     }
 
+    /// Deserializes the complete stored payload as `Value`.
     pub fn decode<Value>(&self) -> Result<Value, postcard::Error>
     where
         Value: DeserializeOwned,

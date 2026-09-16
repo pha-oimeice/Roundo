@@ -1,3 +1,5 @@
+//! Immediate local camera rotation with rate-limited server synchronization.
+
 use super::{ROTATION_SYNC_INTERVAL_SECS, RotationSync};
 use crate::character_controller::client::{
     AuthoritativePlayerState, ClientMarionetteEvent, ClientPipeResource, ClientPlayerController,
@@ -9,6 +11,7 @@ use bevy::{
 use roundo_contracts::PlayerControllerCommand;
 
 #[derive(Resource, Clone, Copy, Debug)]
+/// Tracks whether a changed camera rotation still needs transmission.
 pub(crate) struct ClientRotationSyncState {
     elapsed_secs: f32,
     pending: bool,
@@ -24,11 +27,13 @@ impl Default for ClientRotationSyncState {
 }
 
 impl ClientRotationSyncState {
+    /// Restores an immediately eligible, non-pending synchronization state.
     pub(crate) fn reset(&mut self) {
         *self = Self::default();
     }
 }
 
+/// Applies accumulated mouse motion and marks authoritative rotation dirty.
 pub(crate) fn rotate_camera(
     mouse_motion: Res<AccumulatedMouseMotion>,
     settings: Res<crate::character_controller::client::ClientMarionetteInputSettings>,
@@ -50,11 +55,13 @@ pub(crate) fn rotate_camera(
     if !apply_camera_rotation(&mut transform, yaw_delta, pitch_delta) {
         return;
     }
+    // Spirit rotation is local-only and must not alter the controlled player.
     if !controller.spirit_walking {
         rotation_sync.pending = true;
     }
 }
 
+/// Sends the latest pending rotation at the configured maximum frequency.
 pub(crate) fn synchronize_rotation(
     time: Res<Time>,
     controller: Res<ClientPlayerController>,
@@ -76,15 +83,24 @@ pub(crate) fn synchronize_rotation(
     let Ok(transform) = cameras.get(camera) else {
         return;
     };
-    let _ = pipe.0.try_send(ClientMarionetteEvent::UsePlayerController(
-        PlayerControllerCommand::SyncRotation(RotationSync {
-            rotation: transform.rotation.to_array(),
-        }),
-    ));
+    let sent = pipe
+        .0
+        .try_send(ClientMarionetteEvent::UsePlayerController(
+            PlayerControllerCommand::SyncRotation(RotationSync {
+                rotation: transform.rotation.to_array(),
+            }),
+        ))
+        .is_ok();
+    // Failed delivery remains pending for the next interval.
     rotation_sync.elapsed_secs = 0.0;
-    rotation_sync.pending = false;
+    if sent {
+        rotation_sync.pending = false;
+    } else {
+        log::warn!("cannot synchronize player rotation: reason=client_bridge_closed");
+    }
 }
 
+/// Applies finite yaw/pitch deltas while preventing vertical singularities.
 pub(crate) fn apply_camera_rotation(
     transform: &mut Transform,
     yaw_delta: f32,

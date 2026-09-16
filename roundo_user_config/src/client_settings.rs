@@ -1,8 +1,12 @@
+//! Serializable client controls, camera, world, and input-binding settings.
+
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
 
 pub const MIN_MOUSE_SENSITIVITY: f32 = 0.0005;
 pub const MAX_MOUSE_SENSITIVITY: f32 = 0.01;
 pub const DEFAULT_MOUSE_SENSITIVITY: f32 = 0.002;
+pub const DEFAULT_PLAYER_MOVEMENT_PREDICTION: bool = false;
 pub const MIN_CAMERA_MOVE_SPEED: f32 = 1.0;
 pub const MAX_CAMERA_MOVE_SPEED: f32 = 50.0;
 pub const DEFAULT_CAMERA_MOVE_SPEED: f32 = 5.0;
@@ -22,7 +26,8 @@ pub struct ClientSettingsConfig {
     pub controls: ClientControlSettingsConfig,
     pub camera: ClientCameraSettingsConfig,
     pub world: ClientWorldSettingsConfig,
-    pub key_bindings: Vec<ClientKeyBindingConfig>,
+    /// Many-to-many edges between Mod-provided semantic slots and physical inputs.
+    pub input_bindings: Vec<ClientInputBindingConfig>,
 }
 
 impl ClientSettingsConfig {
@@ -58,6 +63,9 @@ impl ClientSettingsConfig {
             MAX_CHUNK_VIEW_DISTANCE,
         )
         .round();
+        let mut seen = BTreeSet::new();
+        self.input_bindings
+            .retain(|binding| seen.insert((binding.slot.clone(), binding.key)));
     }
 }
 
@@ -67,19 +75,16 @@ impl Default for ClientSettingsConfig {
             controls: ClientControlSettingsConfig::default(),
             camera: ClientCameraSettingsConfig::default(),
             world: ClientWorldSettingsConfig::default(),
-            key_bindings: vec![
-                ClientKeyBindingConfig::new(ClientKeyCode::Space, ClientMovementAction::MoveUp),
-                ClientKeyBindingConfig::new(
-                    ClientKeyCode::ShiftLeft,
-                    ClientMovementAction::MoveDown,
-                ),
-                ClientKeyBindingConfig::new(ClientKeyCode::KeyA, ClientMovementAction::MoveLeft),
-                ClientKeyBindingConfig::new(ClientKeyCode::KeyD, ClientMovementAction::MoveRight),
-                ClientKeyBindingConfig::new(ClientKeyCode::KeyW, ClientMovementAction::MoveForward),
-                ClientKeyBindingConfig::new(
-                    ClientKeyCode::KeyS,
-                    ClientMovementAction::MoveBackward,
-                ),
+            input_bindings: vec![
+                ClientInputBindingConfig::new("roundo.move-up", ClientInputKey::Space),
+                ClientInputBindingConfig::new("roundo.move-down", ClientInputKey::ShiftLeft),
+                ClientInputBindingConfig::new("roundo.move-left", ClientInputKey::KeyA),
+                ClientInputBindingConfig::new("roundo.move-right", ClientInputKey::KeyD),
+                ClientInputBindingConfig::new("roundo.move-forward", ClientInputKey::KeyW),
+                ClientInputBindingConfig::new("roundo.move-backward", ClientInputKey::KeyS),
+                ClientInputBindingConfig::new("roundo.spirit-camera", ClientInputKey::F1),
+                ClientInputBindingConfig::new("roundo.destroy-block", ClientInputKey::MouseLeft),
+                ClientInputBindingConfig::new("roundo.place-block", ClientInputKey::MouseRight),
             ],
         }
     }
@@ -89,10 +94,8 @@ impl Default for ClientSettingsConfig {
 #[serde(default)]
 pub struct ClientWorldSettingsConfig {
     pub joinable_world_radius: f32,
-    /// Chunk-radius requested from the authoritative world streamer.
     pub chunk_view_distance: f32,
 }
-
 impl Default for ClientWorldSettingsConfig {
     fn default() -> Self {
         Self {
@@ -106,12 +109,13 @@ impl Default for ClientWorldSettingsConfig {
 #[serde(default)]
 pub struct ClientControlSettingsConfig {
     pub mouse_sensitivity: f32,
+    pub player_movement_prediction: bool,
 }
-
 impl Default for ClientControlSettingsConfig {
     fn default() -> Self {
         Self {
             mouse_sensitivity: DEFAULT_MOUSE_SENSITIVITY,
+            player_movement_prediction: DEFAULT_PLAYER_MOVEMENT_PREDICTION,
         }
     }
 }
@@ -119,10 +123,10 @@ impl Default for ClientControlSettingsConfig {
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ClientCameraSettingsConfig {
+    /// Movement speed of the detached F1 client camera only.
     pub move_speed: f32,
     pub voxel_raycast_distance: f32,
 }
-
 impl Default for ClientCameraSettingsConfig {
     fn default() -> Self {
         Self {
@@ -133,35 +137,24 @@ impl Default for ClientCameraSettingsConfig {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct ClientKeyBindingConfig {
-    pub key: ClientKeyCode,
-    pub actions: Vec<ClientMovementAction>,
+pub struct ClientInputBindingConfig {
+    pub slot: String,
+    pub key: ClientInputKey,
 }
-
-impl ClientKeyBindingConfig {
-    pub fn new(key: ClientKeyCode, action: ClientMovementAction) -> Self {
+impl ClientInputBindingConfig {
+    pub fn new(slot: impl Into<String>, key: ClientInputKey) -> Self {
         Self {
+            slot: slot.into(),
             key,
-            actions: vec![action],
         }
     }
 }
 
+/// Stable serialized physical inputs. Escape is deliberately absent and cannot
+/// be configured because the client host owns it as the pause/back key.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum ClientMovementAction {
-    MoveUp,
-    MoveDown,
-    MoveLeft,
-    MoveRight,
-    MoveForward,
-    MoveBackward,
-}
-
-#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ClientKeyCode {
-    Escape,
+pub enum ClientInputKey {
     Digit0,
     Digit1,
     Digit2,
@@ -213,6 +206,10 @@ pub enum ClientKeyCode {
     ArrowUp,
     ArrowDown,
     ArrowRight,
+    F1,
+    MouseLeft,
+    MouseRight,
+    MouseMiddle,
 }
 
 fn finite_clamped(value: f32, default: f32, minimum: f32, maximum: f32) -> f32 {
@@ -228,16 +225,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn normalizes_every_numeric_client_setting() {
+    fn normalizes_numeric_settings_and_duplicate_binding_edges() {
         let mut settings = ClientSettingsConfig::default();
         settings.controls.mouse_sensitivity = f32::NAN;
         settings.camera.move_speed = -10.0;
         settings.camera.voxel_raycast_distance = 100.0;
         settings.world.joinable_world_radius = f32::INFINITY;
         settings.world.chunk_view_distance = 63.6;
-
+        settings
+            .input_bindings
+            .push(settings.input_bindings[0].clone());
         settings.normalize();
-
         assert_eq!(
             settings.controls.mouse_sensitivity,
             DEFAULT_MOUSE_SENSITIVITY
@@ -252,5 +250,18 @@ mod tests {
             DEFAULT_JOINABLE_WORLD_RADIUS
         );
         assert_eq!(settings.world.chunk_view_distance, 64.0);
+        assert_eq!(settings.input_bindings.len(), 9);
+    }
+
+    #[test]
+    fn defaults_cover_every_builtin_slot_without_escape() {
+        let settings = ClientSettingsConfig::default();
+        assert_eq!(settings.input_bindings.len(), 9);
+        assert!(
+            settings
+                .input_bindings
+                .iter()
+                .any(|binding| binding.key == ClientInputKey::F1)
+        );
     }
 }

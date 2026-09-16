@@ -1,3 +1,5 @@
+//! Physics integration points shared by local-coordinate plugins.
+
 use bevy::app::PluginGroupBuilder;
 use bevy::prelude::PluginGroup;
 

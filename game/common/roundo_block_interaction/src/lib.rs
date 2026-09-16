@@ -8,18 +8,28 @@ use bevy::prelude::{
     App, FixedUpdate, IntoScheduleConfigs, MessageReader, MessageWriter, Plugin, Query, Transform,
 };
 use roundo_local_coordinate::{
-    EMPTY_VOXEL_ID, LocalCoordinateCRUDMessage, LocalCoordinateCRUDMessageEnum, LocalCoordinateSet,
-    PositionedAtomicVoxel, VoxelRaycaster,
+    AtomicVoxelId, AtomicVoxelRegistry, EMPTY_VOXEL_ID, LocalCoordinateCRUDMessage,
+    LocalCoordinateCRUDMessageEnum, LocalCoordinateSet, PositionedAtomicVoxel, VoxelRaycaster,
 };
 use roundo_marionette::{BlockInteraction, BlockInteractionMessage, MarionetteServerSet};
 
+/// Fallback maximum ray distance in world units.
 pub const DEFAULT_BLOCK_INTERACTION_DISTANCE: f32 = 8.0;
 
+/// Applies validated controller interactions to authoritative voxel state.
+///
+/// Each interaction casts from the controlled entity's Bevy `Transform` using
+/// its translation and forward axis. A destroy writes the empty ID at the first
+/// hit; a placement writes a registry-approved ID at the preceding voxel. The
+/// resulting CRUD message is applied later in the same fixed schedule.
 pub struct BlockInteractionPlugin {
     maximum_distance: f32,
 }
 
 impl BlockInteractionPlugin {
+    /// Creates policy with a finite positive maximum world-space distance.
+    ///
+    /// Invalid values are replaced by [`DEFAULT_BLOCK_INTERACTION_DISTANCE`].
     pub fn new(maximum_distance: f32) -> Self {
         Self {
             maximum_distance: if maximum_distance.is_finite() && maximum_distance > 0.0 {
@@ -44,26 +54,32 @@ struct BlockInteractionSettings {
 
 impl Plugin for BlockInteractionPlugin {
     fn build(&self, app: &mut App) {
-        app.insert_resource(BlockInteractionSettings {
-            maximum_distance: self.maximum_distance,
-        })
-        .add_systems(
-            FixedUpdate,
-            apply_block_interactions
-                .in_set(MarionetteServerSet::BlockInteractions)
-                .before(LocalCoordinateSet::ApplyCrud),
-        );
+        app.init_resource::<AtomicVoxelRegistry>()
+            .insert_resource(BlockInteractionSettings {
+                maximum_distance: self.maximum_distance,
+            })
+            .add_systems(
+                FixedUpdate,
+                apply_block_interactions
+                    .in_set(MarionetteServerSet::BlockInteractions)
+                    .before(LocalCoordinateSet::ApplyCrud),
+            );
     }
 }
 
+// Silently rejects missing transforms, ray misses, and unregistered/unplaceable IDs.
+// Accepted interactions enqueue one voxel replacement; they do not mutate the
+// coordinate immediately or report completion to the controller domain.
 fn apply_block_interactions(
     settings: bevy::prelude::Res<BlockInteractionSettings>,
+    voxels: bevy::prelude::Res<AtomicVoxelRegistry>,
     mut messages: MessageReader<BlockInteractionMessage>,
     transforms: Query<&Transform>,
     raycaster: VoxelRaycaster,
     mut voxel_updates: MessageWriter<LocalCoordinateCRUDMessage>,
 ) {
-    for message in messages.read() {
+    let interactions = messages.read();
+    for message in interactions {
         let Ok(transform) = transforms.get(message.entity) else {
             continue;
         };
@@ -75,12 +91,15 @@ fn apply_block_interactions(
         };
         let (position, voxel) = match message.interaction {
             BlockInteraction::Destroy => (hit.voxel_position(), EMPTY_VOXEL_ID),
-            BlockInteraction::Place { voxel_id } => (
-                hit.previous_voxel_position,
-                roundo_local_coordinate::AtomicVoxelId(voxel_id),
-            ),
+            BlockInteraction::Place { voxel_id } => {
+                let voxel = AtomicVoxelId(voxel_id);
+                if !voxels.permits_placement(voxel) {
+                    continue;
+                }
+                (hit.previous_voxel_position, voxel)
+            }
         };
-        voxel_updates.write(LocalCoordinateCRUDMessage(
+        let _update_message = voxel_updates.write(LocalCoordinateCRUDMessage(
             LocalCoordinateCRUDMessageEnum::Update {
                 key: hit.chunk.local_coordinate_entity(),
                 value: vec![PositionedAtomicVoxel { position, voxel }],
@@ -177,6 +196,28 @@ mod tests {
                 .unwrap()
                 .voxel(IVec3::Z),
             Some(roundo_local_coordinate::AtomicVoxelId(1))
+        );
+    }
+
+    #[test]
+    fn unknown_voxel_id_cannot_mutate_authoritative_state() {
+        let (mut app, ipc, coordinate) = interaction_app();
+        ipc.try_send(ServerMarionetteCommand::UsePlayerController {
+            connection_id: ConnectionId(3),
+            command: PlayerControllerCommand::PlaceBlock(ControllerCommand {
+                sequence: 1,
+                action: PlaceBlockControllerAction { voxel_id: 99 },
+            }),
+        })
+        .unwrap();
+        app.world_mut().run_schedule(FixedUpdate);
+
+        assert_eq!(
+            app.world()
+                .get::<LocalCoordinate>(coordinate)
+                .unwrap()
+                .voxel(IVec3::Z),
+            None
         );
     }
 }

@@ -31,11 +31,11 @@ fn supports_crud_operations() {
     tree.insert(1, 7, 2, "grandchild").unwrap();
 
     assert_eq!(tree.len(), 3);
-    assert_eq!(tree.get(2), Some(&"grandchild"));
+    assert_eq!(tree.data(2), Some(&"grandchild"));
     assert_eq!(tree.update(2, "updated").unwrap(), "grandchild");
-    assert_eq!(tree.get(2), Some(&"updated"));
+    assert_eq!(tree.data(2), Some(&"updated"));
 
-    assert_eq!(tree.remove(1).unwrap(), "child");
+    assert_eq!(tree.remove_value(1).unwrap(), "child");
     assert_eq!(tree.len(), 1);
     assert!(!tree.contains(1));
     assert!(!tree.contains(2));
@@ -67,7 +67,7 @@ fn reports_invalid_mutations() {
         tree.update(99, ()),
         Err(OctreeError::NodeNotFound { id: 99 })
     );
-    assert_eq!(tree.remove(0), Err(OctreeError::CannotRemoveRoot));
+    assert_eq!(tree.remove_value(0), Err(OctreeError::CannotRemoveRoot));
 }
 
 #[test]

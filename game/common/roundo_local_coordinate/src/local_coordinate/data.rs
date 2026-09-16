@@ -2,10 +2,11 @@ use crate::local_coordinate::transform::LocalCoordinateTransform;
 use bevy::prelude::{Component, Entity, IVec3, Message, Vec3};
 use roundo_algorithm::tree::{BreadthFirstLosslessSvo, Octree};
 use roundo_contracts::LocalCoordinateId;
+use roundo_mod_loader::ResourceName;
 use roundo_toolbox::{CRUDRequest, macros::identifier};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, LazyLock};
+use std::sync::Arc;
 
 /// Chunk edges are powers of two so local positions map directly to octree paths.
 pub const CHUNK_EDGE_LENGTH: i32 = 16;
@@ -15,22 +16,18 @@ pub type AtomicVoxel = AtomicVoxelId;
 pub const EMPTY_VOXEL_ID: AtomicVoxelId = AtomicVoxelId(0);
 pub const SOLID_VOXEL_ID: AtomicVoxelId = AtomicVoxelId(1);
 
-/// Shared immutable definition for one atomic voxel identifier.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct GlobalAtomicVoxelData;
+/// Immutable Mod Resource definition bound to one compact wire/storage ID.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GlobalAtomicVoxelData {
+    pub name: ResourceName,
+    pub placeable: bool,
+}
 
 /// Chunk-owned persistent data associated with one atomic voxel identifier.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct LocalAtomicVoxelData;
-
-/// Process-wide atomic voxel definitions shared by every local coordinate.
-pub static GLOBAL_ATOMIC_VOXEL_DATA: LazyLock<HashMap<AtomicVoxelId, GlobalAtomicVoxelData>> =
-    LazyLock::new(|| {
-        HashMap::from([
-            (EMPTY_VOXEL_ID, GlobalAtomicVoxelData),
-            (SOLID_VOXEL_ID, GlobalAtomicVoxelData),
-        ])
-    });
+pub struct LocalAtomicVoxelData {
+    pub(crate) occurrences: usize,
+}
 
 /// A voxel change expressed in local-coordinate space.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

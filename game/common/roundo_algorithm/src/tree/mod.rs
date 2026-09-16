@@ -1,3 +1,5 @@
+//! Octree representations and lossless sparse-voxel compression.
+
 mod error;
 mod octree;
 mod optimized;
@@ -11,6 +13,7 @@ pub use optimized::{
     DensityAggregationContext, NO_CHILDREN, OctreeDensity, OptimizedNode, OptimizedOctree,
     PackedSvo, PackedSvoNode, ReadOnlyBuffer,
 };
+/// Mutable reference representation used before compact encoding.
 pub use unoptimized::{Node, UnoptimizedOctree};
 
 #[cfg(test)]

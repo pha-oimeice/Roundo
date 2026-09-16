@@ -16,8 +16,8 @@ pub use lifecycle::{
 };
 pub use platform::UiNavigationExecutor;
 pub use registry::{
-    CONNECTED_ROOT_SLOT, ClientInteractionMode, DISCONNECTED_ROOT_SLOT, PresentationMode, UiLayout,
-    UiRegistry, UiRegistryError, UiResource, UiWorldVisibility,
+    CONNECTED_ROOT_SLOT, ClientInteractionMode, DISCONNECTED_ROOT_SLOT, PresentationMode, UiImport,
+    UiLayout, UiRegistry, UiRegistryError, UiResource, UiWorldVisibility,
 };
 
 #[cfg(all(test, target_os = "windows"))]

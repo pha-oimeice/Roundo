@@ -1,5 +1,15 @@
+//! Main-world capability adapter for the complete client command catalog.
+//!
+//! The dispatcher is rebuilt over short-lived borrows for each request. This
+//! keeps command definitions source-neutral while allowing handlers to mutate
+//! non-`Send` Bevy/WebView state only on the owning thread.
+
 use super::*;
 
+/// All host capabilities available during one synchronous command dispatch.
+///
+/// Consuming this value bounds every borrowed capability to one request and
+/// prevents handlers from retaining main-world references.
 pub(super) struct ClientCommandApplication<'a> {
     pub(super) config: &'a mut ClientConfigStore,
     pub(super) network: &'a mut crate::client_network::ClientNetworkManager,
@@ -9,6 +19,7 @@ pub(super) struct ClientCommandApplication<'a> {
     pub(super) webui: Option<&'a mut roundo_webui::UiLifecycleManager>,
     pub(super) navigation: Option<&'a mut roundo_webui::UiNavigationExecutor>,
     pub(super) hud: &'a HudCache,
+    pub(super) input_registry: Option<&'a roundo_marionette::InputRegistry>,
 }
 
 impl ClientCommandApplication<'_> {
@@ -29,6 +40,7 @@ impl ClientCommandApplication<'_> {
             webui,
             navigation,
             hud,
+            input_registry,
         } = self;
 
         // Admission is deliberately outside individual handlers: every command
@@ -50,6 +62,9 @@ impl ClientCommandApplication<'_> {
         let webui = RefCell::new(webui);
         let navigation = RefCell::new(navigation);
         let mut registry = crate::json_command::CommandRegistry::default();
+
+        // Connection handlers delegate ownership and status transitions to the
+        // network manager; successful start is asynchronous, not peer admission.
         registry.register_typed::<ServerConnectDefinition>(|input, _| {
             let config = config.borrow();
             let mut network = network.borrow_mut();
@@ -59,7 +74,8 @@ impl ClientCommandApplication<'_> {
                     "server index does not exist",
                 )
             })?;
-            network.connect(server).map_err(|error| {
+            let connection = network.start_connection(server);
+            connection.map_err(|error| {
                 crate::json_command::CommandError::new("connection_failed", error)
             })?;
             Ok(server_status_output(network.status()))
@@ -79,6 +95,7 @@ impl ClientCommandApplication<'_> {
         registry.register_typed::<ServerStatusDefinition>(|_, _| {
             Ok(server_status_output(network.borrow().status()))
         });
+        // Discovery probes replace a cache batch and return before network I/O completes.
         registry.register_typed::<ServerRefreshDefinition>(|_, _| {
             let config = config.borrow();
             let revision = probes.refresh(&config.0.servers, &config.0.network);
@@ -90,6 +107,8 @@ impl ClientCommandApplication<'_> {
         registry.register_typed::<ServerListDefinition>(|_, _| {
             Ok(server_list_output(&config.borrow(), probes))
         });
+        // These mutations update in-memory configuration before saving. A save
+        // error is reported but does not roll back the in-memory server list.
         registry.register_typed::<ServerAddDefinition>(|input, _| {
             let server = ServerEntry::from(input);
             if server.name.trim().is_empty() || server.address.trim().is_empty() {
@@ -138,13 +157,15 @@ impl ClientCommandApplication<'_> {
                     "server index does not exist",
                 ));
             }
-            config.0.servers.remove(input.index);
+            let _removed_server = config.0.servers.remove(input.index);
             config.save().map_err(|error| {
                 crate::json_command::CommandError::new("config_save_failed", error)
             })?;
             probes.invalidate();
             Ok(EmptyOutput {})
         });
+        // Settings mutation follows the same write-through, non-rollback model:
+        // normalize memory first, then attempt persistence.
         registry.register_typed::<SettingsShowDefinition>(|_, _| {
             Ok(settings_show_output(&config.borrow()))
         });
@@ -177,85 +198,57 @@ impl ClientCommandApplication<'_> {
             })?;
             Ok(EmptyOutput {})
         });
+        // Incremental bind/unbind handlers mutate memory before persistence.
+        // Replacement instead stages a cloned document and publishes it in memory
+        // only after the file write succeeds.
         registry.register_typed::<BindingsListDefinition>(|_, _| {
-            Ok(bindings_list_output(&config.borrow()))
+            Ok(bindings_list_output(&config.borrow(), input_registry))
         });
         registry.register_typed::<BindingsBindDefinition>(|input, _| {
-            let binding = ClientKeyBindingConfig::try_from(input)?;
+            let binding = ClientInputBindingConfig::try_from(input)?;
+            validate_binding_slot(&binding, input_registry)?;
             let mut config = config.borrow_mut();
-            match config
-                .0
-                .settings
-                .key_bindings
-                .iter_mut()
-                .find(|existing| existing.key == binding.key)
-            {
-                Some(existing) => {
-                    if binding
-                        .actions
-                        .iter()
-                        .all(|action| existing.actions.contains(action))
-                    {
-                        return Err(crate::json_command::CommandError::new(
-                            "binding_exists",
-                            "binding already exists",
-                        ));
-                    }
-                    let additions = binding
-                        .actions
-                        .into_iter()
-                        .filter(|action| !existing.actions.contains(action))
-                        .collect::<Vec<_>>();
-                    existing.actions.extend(additions);
-                }
-                None => config.0.settings.key_bindings.push(binding),
+            if config.0.settings.input_bindings.contains(&binding) {
+                return Err(crate::json_command::CommandError::new(
+                    "binding_exists",
+                    "binding already exists",
+                ));
             }
+            config.0.settings.input_bindings.push(binding);
             config.save().map_err(|error| {
                 crate::json_command::CommandError::new("config_save_failed", error)
             })?;
             Ok(EmptyOutput {})
         });
         registry.register_typed::<BindingsUnbindDefinition>(|input, _| {
-            let binding = ClientKeyBindingConfig::try_from(input)?;
+            let binding = ClientInputBindingConfig::try_from(input)?;
             let mut config = config.borrow_mut();
             let Some(index) = config
                 .0
                 .settings
-                .key_bindings
+                .input_bindings
                 .iter()
-                .position(|existing| existing.key == binding.key)
+                .position(|existing| *existing == binding)
             else {
                 return Err(crate::json_command::CommandError::new(
                     "binding_not_found",
                     "binding does not exist",
                 ));
             };
-            let existing = &mut config.0.settings.key_bindings[index];
-            let before = existing.actions.len();
-            existing
-                .actions
-                .retain(|action| !binding.actions.contains(action));
-            if before == existing.actions.len() {
-                return Err(crate::json_command::CommandError::new(
-                    "binding_not_found",
-                    "binding does not exist",
-                ));
-            }
-            if existing.actions.is_empty() {
-                config.0.settings.key_bindings.remove(index);
-            }
+            config.0.settings.input_bindings.remove(index);
             config.save().map_err(|error| {
                 crate::json_command::CommandError::new("config_save_failed", error)
             })?;
             Ok(EmptyOutput {})
         });
         registry.register_typed::<BindingsReplaceDefinition>(|input, _| {
-            let old_binding = ClientKeyBindingConfig::try_from(input.old_binding)?;
-            let replacement = ClientKeyBindingConfig::try_from(input.binding)?;
+            let old_binding = ClientInputBindingConfig::try_from(input.old_binding)?;
+            let replacement = ClientInputBindingConfig::try_from(input.binding)?;
+            validate_binding_slot(&replacement, input_registry)?;
             let mut config = config.borrow_mut();
             let mut updated_config = config.0.clone();
             replace_binding(
-                &mut updated_config.settings.key_bindings,
+                &mut updated_config.settings.input_bindings,
                 old_binding,
                 replacement,
             )?;
@@ -265,16 +258,17 @@ impl ClientCommandApplication<'_> {
             config.0 = updated_config;
             Ok(BindingMutationOutput {})
         });
+        // Catalog metadata is generated from the same typed definitions used by dispatch.
         registry.register_typed::<CommandSchemaDefinition>(|input, _| {
-            client_command_schema(&input.command).map(|schema| {
+            CLIENT_COMMAND_CATALOG.schema(&input.command).map(|schema| {
                 CommandSchemaOutput(schema.as_object().cloned().expect("schema is an object"))
             })
         });
         registry.register_typed::<CommandHelpDefinition>(|input, _| match input.command {
             None => Ok(CommandHelpOutput::Commands {
-                commands: visible_commands(dev_level.borrow().0),
+                commands: CLIENT_COMMAND_CATALOG.visible(dev_level.borrow().0),
             }),
-            Some(command) => match command_dev_level(&command) {
+            Some(command) => match CLIENT_COMMAND_CATALOG.dev_level(&command) {
                 Some(required_level) => Ok(CommandHelpOutput::Command {
                     command,
                     dev_level: required_level,
@@ -298,6 +292,7 @@ impl ClientCommandApplication<'_> {
             }
             Ok(DevOutput { level: dev_level.0 })
         });
+        // Diagnostics consume snapshots captured before dispatch and never borrow ECS here.
         registry.register_typed::<HudShowDefinition>(|_, _| {
             hud_show_output(hud).map_err(|error| {
                 crate::json_command::CommandError::new("internal_command_error", error.to_string())
@@ -317,6 +312,7 @@ impl ClientCommandApplication<'_> {
                 status: "accepted".into(),
             })
         });
+        // External navigation validates scheme/shape before crossing the OS adapter seam.
         registry.register_typed::<OpenExternalUrlDefinition>(|input, _| {
             let url = validate_external_url(&input.url)?;
             open_external_url(url).map_err(|error| {
@@ -329,6 +325,8 @@ impl ClientCommandApplication<'_> {
                 status: "accepted".into(),
             })
         });
+        // Web UI navigation requires the already-admitted live source and both
+        // logical lifecycle and platform navigation capabilities.
         registry.register_typed::<UiBackDefinition>(|_, _| {
             let source = ui_source.ok_or_else(|| {
                 crate::json_command::CommandError::new(
@@ -353,6 +351,12 @@ impl ClientCommandApplication<'_> {
             Ok(EmptyOutput {})
         });
         registry.register_typed::<UiOpenDefinition>(|input, _| {
+            let source = ui_source.ok_or_else(|| {
+                crate::json_command::CommandError::new(
+                    "stale_ui_instance",
+                    "ui.open requires a live WebView source",
+                )
+            })?;
             let mut webui = webui.borrow_mut();
             let state = webui.as_deref_mut().ok_or_else(|| {
                 crate::json_command::CommandError::new(
@@ -360,18 +364,9 @@ impl ClientCommandApplication<'_> {
                     "Web UI is unavailable",
                 )
             })?;
-            let target = match (input.slot, input.resource) {
-                (Some(slot), None) => state.resolve_slot_path(&slot, input.path.as_deref()),
-                (None, Some(resource)) => {
-                    state.resolve_resource_path(&resource, input.path.as_deref())
-                }
-                _ => Err(roundo_webui::UiRegistryError::InvalidReference(
-                    "ui.open requires exactly one slot or resource".into(),
-                )),
-            }
-            .map_err(|error| {
-                crate::json_command::CommandError::new("invalid_ui_resource", error.to_string())
-            })?;
+            let target = state
+                .resolve_import(source, &input.import)
+                .map_err(map_ui_lifecycle_error)?;
             let resource = target.resource().to_owned();
             log::debug!("Resolved Web UI navigation target `{resource}`");
             let mut navigation = navigation.borrow_mut();
@@ -381,17 +376,20 @@ impl ClientCommandApplication<'_> {
                     "Web UI navigation is unavailable",
                 )
             })?;
-            let source = ui_source
-                .map(roundo_webui::UiCommandSource::WebView)
-                .unwrap_or(roundo_webui::UiCommandSource::Host);
-            navigation.open(state, source, target).map_err(|error| {
+            let opened = navigation.navigate(
+                state,
+                roundo_webui::UiCommandSource::WebView(source),
+                target,
+            );
+            opened.map_err(|error| {
                 log::error!("Web UI navigation to `{resource}` failed: {error}");
                 map_ui_lifecycle_error(error)
             })?;
             log::info!("Web UI navigated to `{resource}`");
             Ok(UiOpenOutput { resource })
         });
-        assert_catalog_matches_registry(&registry);
+        // Fail fast if declaration/catalog and executable registration drift.
+        CLIENT_COMMAND_CATALOG.assert_complete(&registry);
         registry.dispatch_value(request, &mut ())
     }
 }

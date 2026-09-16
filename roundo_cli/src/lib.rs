@@ -1,3 +1,8 @@
+//! Typed JSON command definitions with Web UI and optional Unix-terminal adapters.
+//!
+//! Client WebViews submit bounded request/response calls; terminal input is a
+//! separate text projection into the same canonical command envelopes.
+
 extern crate self as roundo_cli;
 
 use bevy::prelude::{App, Plugin, Resource};
@@ -29,20 +34,31 @@ pub use roundo_proc_macros::UnixCommand;
 #[cfg(feature = "server")]
 mod server;
 
+// Prevents an unbounded terminal backlog from monopolizing one ECS update.
 const MAX_COMMANDS_PER_UPDATE: usize = 32;
+/// Maximum queued JSON commands dispatched during one client ECS update.
 pub const MAX_JSON_COMMANDS_PER_UPDATE: usize = 64;
 
+/// ECS-owned consumer side of the bounded client command queue.
 #[cfg(feature = "client")]
 #[derive(Resource)]
 pub struct ClientCommandPipe(RequestResponsePipe<CommandTransport<UiCommandSource>, Value>);
 #[cfg(feature = "client")]
 impl ClientCommandPipe {
+    /// Creates a shared request queue with exactly `capacity` slots.
+    ///
+    /// A zero capacity is a rendezvous queue; non-blocking submission then
+    /// succeeds only while a receiver is waiting.
     pub fn bounded(capacity: usize) -> Self {
         Self(RequestResponsePipe::bounded(capacity))
     }
+    /// Returns a producer sharing this pipe's bounded queue.
     pub fn io(&self) -> ClientCommandIo {
         ContextualJsonRequestResponseIo::new(self.0.io())
     }
+    /// Attempts to dequeue one command and its private response sender.
+    ///
+    /// `None` means either currently empty or all producers disconnected.
     pub fn try_receive(
         &self,
     ) -> Option<(
@@ -58,11 +74,16 @@ impl ClientCommandPipe {
 #[cfg(feature = "client")]
 pub type ClientCommandIo = ContextualJsonRequestResponseIo<UiCommandSource, Value>;
 
+/// Feature-selected CLI composition for either client or server process.
+///
+/// Installation also starts one detached stdin reader. The reader may remain
+/// blocked in OS input after the Bevy app exits; there is no cancellation API.
 pub struct RoundoCliPlugin {
     configure: fn(&mut App),
 }
 
 impl RoundoCliPlugin {
+    /// Creates the client command plugin with typed JSON/Web UI dispatch.
     #[cfg(feature = "client")]
     pub const fn client() -> Self {
         Self {
@@ -70,6 +91,7 @@ impl RoundoCliPlugin {
         }
     }
 
+    /// Creates the server-console command plugin.
     #[cfg(feature = "server")]
     pub const fn server() -> Self {
         Self {
@@ -103,6 +125,7 @@ impl TerminalInput {
         Self { lines }
     }
 
+    /// Removes at most the per-update budget in stdin arrival order.
     fn drain(&self) -> Vec<String> {
         let mut lines = self
             .lines
@@ -120,6 +143,7 @@ impl TerminalInput {
     }
 }
 
+// Blocks on stdin and appends complete lines until EOF or the first read error.
 fn read_terminal_lines(lines: Arc<Mutex<VecDeque<String>>>) {
     for line in io::stdin().lock().lines() {
         match line {

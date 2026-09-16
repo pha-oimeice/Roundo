@@ -1,3 +1,5 @@
+//! Persistent client, server, network, database, and gameplay configuration.
+
 mod client_settings;
 mod my_default_configurations;
 mod my_impls;
@@ -13,10 +15,12 @@ use serde::{Deserialize, Serialize};
 
 pub const COMMON_CONFIG_FILE_NAME: &str = "roundo-common-config.toml";
 
+/// Loads the shared configuration file from the executable root.
 pub fn load_common_config() -> CommonConfig {
     load_config(COMMON_CONFIG_FILE_NAME)
 }
 
+/// Loads or creates a typed TOML configuration file.
 pub fn load_config<T>(config_file_name: &str) -> T
 where
     T: Serialize + DeserializeOwned + Default,
@@ -31,6 +35,7 @@ where
     })
 }
 
+/// Loads client configuration and migrates legacy settings when required.
 pub fn load_client_config(config_file_name: &str) -> ClientConfig {
     let config = load_config::<ClientConfig>(config_file_name);
     let path = get_exe_root_path().join(config_file_name);
@@ -44,6 +49,7 @@ pub fn load_client_config(config_file_name: &str) -> ClientConfig {
     config
 }
 
+// Migration is selected from document shape rather than a stored version.
 fn client_config_requires_migration(text: &str) -> bool {
     [
         "quic_addr",
@@ -60,14 +66,19 @@ fn client_config_requires_migration(text: &str) -> bool {
     })
 }
 
+/// Serializes and overwrites a configuration file under the executable root.
+///
+/// Serialization completes before the file is opened. The filesystem write is
+/// not transactional: an I/O failure may leave an existing file truncated or
+/// partially written.
 pub fn save_config<T: Serialize>(config_file_name: &str, config: &T) -> Result<(), String> {
     let content = toml::to_string_pretty(config)
         .map_err(|error| format!("cannot serialize config: {error}"))?;
-    std::fs::write(get_exe_root_path().join(config_file_name), content)
-        .map_err(|error| format!("cannot save config: {error}"))
+    return std::fs::write(get_exe_root_path().join(config_file_name), content)
+        .map_err(|error| format!("cannot save config: {error}"));
 }
 
-/// Parameters shared by client and server process configurations.
+/// Configuration shared by client and server processes.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct CommonConfig {
@@ -88,12 +99,14 @@ impl CommonConfig {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
+/// Client endpoint and certificate-verification settings.
 pub struct ClientNetworkConfig {
     pub endpoint: EndpointConfig,
     pub ca_verification: bool,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
+/// Server endpoint and certificate-generation settings.
 pub struct ServerNetworkConfig {
     pub endpoint: EndpointConfig,
     pub certificate_path: String,
@@ -101,6 +114,7 @@ pub struct ServerNetworkConfig {
     pub generate_self_signed_certificate: bool,
 }
 #[derive(Clone, Debug, Serialize)]
+/// Host and QUIC port of one network endpoint.
 pub struct EndpointConfig {
     pub host: String,
     pub quic_port: u16,
@@ -135,12 +149,14 @@ impl<'de> Deserialize<'de> for EndpointConfig {
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
+/// PostgreSQL connection and pool-size settings.
 pub struct DatabaseConfig {
     pub url: String,
     pub pool_size: u32,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
+/// Server simulation frequency and presence radius.
 pub struct GameplayConfig {
     pub tick_rate: u32,
     pub presence_radius: f32,

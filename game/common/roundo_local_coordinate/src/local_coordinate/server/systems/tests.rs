@@ -2,24 +2,17 @@ use super::*;
 use crate::VoxelChunkSvo;
 use crate::local_coordinate::data::{Chunk, PositionedAtomicVoxel, SOLID_VOXEL_ID};
 use bevy::prelude::{FixedUpdate, IVec3, Schedule, Update, Vec3, World};
-const TEST_S0_ROOM_SIZE: [f32; 3] = [32.0; 3];
-const TEST_S1_SIZE: [f32; 3] = [16_384.0; 3];
-
 fn observation_input(
     player_id: PlayerId,
     scene_id: SceneId,
     position: Vec3,
-    scene_extent: [f32; 3],
 ) -> LocalCoordinateObservationInput {
     let mut input = LocalCoordinateObservationInput::default();
-    input.replace(
-        [LocalCoordinateObserver {
-            player_id,
-            scene_id,
-            position: position.as_dvec3().to_array(),
-        }],
-        [(scene_id, scene_extent)],
-    );
+    input.replace([LocalCoordinateObserver {
+        player_id,
+        scene_id,
+        position: position.as_dvec3().to_array(),
+    }]);
     input
 }
 
@@ -30,13 +23,8 @@ fn core_fixed_tick_does_not_run_world_streaming() {
     let connection_id = ConnectionId(99);
     let player_id = PlayerId(99);
     let mut app = App::new();
-    app.insert_resource(observation_input(
-        player_id,
-        SceneId::S1,
-        Vec3::ZERO,
-        TEST_S1_SIZE,
-    ))
-    .add_plugins(plugin);
+    app.insert_resource(observation_input(player_id, SceneId::S1, Vec3::ZERO))
+        .add_plugins(plugin);
     app.world_mut().run_schedule(Startup);
     commands
         .try_send(LocalCoordinateServerCommand::SubscribePlayer {
@@ -90,30 +78,49 @@ fn chunk_view_distance_is_clamped_and_retained_before_subscription() {
 }
 
 #[test]
-fn torus_streaming_wraps_the_chunk_radius_across_scene_edges() {
-    let chunks = superflat_chunks_intersecting_torus_radius(
-        [0.0, 2.0, 0.0],
-        CHUNK_EDGE_LENGTH as f64,
-        0,
-        TEST_S1_SIZE,
-    );
-    let last = i64::from((TEST_S1_SIZE[0] / CHUNK_EDGE_LENGTH as f32) as i32 - 1);
+fn streaming_crosses_the_coordinate_origin_without_wrapping() {
+    let chunks = superflat_chunks_intersecting_radius([0.0, 2.0, 0.0], CHUNK_EDGE_LENGTH as f64, 0);
 
     assert!(chunks.contains(&[0, 0, 0]));
-    assert!(chunks.contains(&[last, 0, 0]));
-    assert!(chunks.contains(&[0, 0, last]));
+    assert!(chunks.contains(&[-1, 0, 0]));
+    assert!(chunks.contains(&[0, 0, -1]));
 }
 
 #[test]
-fn torus_streaming_keeps_ground_near_the_vertical_seam() {
-    let chunks = superflat_chunks_intersecting_torus_radius(
-        [0.0, f64::from(TEST_S1_SIZE[1]) - 1.0, 0.0],
-        CHUNK_EDGE_LENGTH as f64,
-        0,
-        TEST_S1_SIZE,
-    );
+fn streaming_chunk_hysteresis_suppresses_boundary_jitter() {
+    let initial = stabilized_streaming_chunk([15.9, 0.0, 0.0], None);
+    assert_eq!(initial, [0, 0, 0]);
 
-    assert!(chunks.contains(&[0, 0, 0]));
+    // Merely crossing x=16 does not replace the streaming frontier.
+    let just_across = stabilized_streaming_chunk([16.1, 0.0, 0.0], Some(initial));
+    assert_eq!(just_across, initial);
+    let committed =
+        stabilized_streaming_chunk([16.0 + STREAMING_CHUNK_HYSTERESIS, 0.0, 0.0], Some(initial));
+    assert_eq!(committed, [1, 0, 0]);
+
+    // Returning across x=16 also requires penetration through the opposite
+    // half of the dead band, so noise around the boundary cannot oscillate.
+    let just_back = stabilized_streaming_chunk([15.9, 0.0, 0.0], Some(committed));
+    assert_eq!(just_back, committed);
+    let returned = stabilized_streaming_chunk(
+        [16.0 - STREAMING_CHUNK_HYSTERESIS - 1.0e-9, 0.0, 0.0],
+        Some(committed),
+    );
+    assert_eq!(returned, [0, 0, 0]);
+}
+
+#[test]
+fn streaming_chunk_hysteresis_handles_negative_boundaries_and_teleports() {
+    let negative = stabilized_streaming_chunk([-0.1, 0.0, 0.0], None);
+    assert_eq!(negative, [-1, 0, 0]);
+    assert_eq!(
+        stabilized_streaming_chunk([STREAMING_CHUNK_HYSTERESIS, 0.0, 0.0], Some(negative)),
+        [0, 0, 0]
+    );
+    assert_eq!(
+        stabilized_streaming_chunk([160.0, -160.0, 32.0], Some([0, 0, 0])),
+        [9, -10, 1]
+    );
 }
 
 #[test]
@@ -124,12 +131,7 @@ fn moving_observation_does_not_accumulate_pristine_generated_chunks() {
     let player_id = PlayerId(12);
     let mut app = App::new();
     app.insert_resource(LocalCoordinateServerPipe(transport.endpoint_b()))
-        .insert_resource(observation_input(
-            player_id,
-            SceneId::S1,
-            Vec3::ZERO,
-            TEST_S1_SIZE,
-        ))
+        .insert_resource(observation_input(player_id, SceneId::S1, Vec3::ZERO))
         .init_resource::<LocalCoordinateServerWorld>()
         .init_resource::<LocalCoordinatePhysicsInterests>()
         .add_systems(
@@ -178,23 +180,17 @@ fn moving_observation_does_not_accumulate_pristine_generated_chunks() {
 
     app.world_mut()
         .resource_mut::<LocalCoordinateObservationInput>()
-        .replace(
-            [LocalCoordinateObserver {
-                player_id,
-                scene_id: SceneId::S1,
-                position: [160.0, 0.0, 0.0],
-            }],
-            [(SceneId::S1, TEST_S1_SIZE)],
-        );
+        .replace([LocalCoordinateObserver {
+            player_id,
+            scene_id: SceneId::S1,
+            position: [160.0, 0.0, 0.0],
+        }]);
     for _ in 0..100 {
         app.update();
-        if app
-            .world()
-            .resource::<LocalCoordinateServerWorld>()
-            .loaded_chunks
-            .get(&DEFAULT_PCG_LOCAL_COORDINATE_ID)
-            .is_some_and(|chunks| chunks.contains_key(&[10, 0, 0]))
-        {
+        let server_world = app.world().resource::<LocalCoordinateServerWorld>();
+        let chunk_sets = &server_world.loaded_chunks;
+        let loaded_chunks = chunk_sets.get(&DEFAULT_PCG_LOCAL_COORDINATE_ID);
+        if loaded_chunks.is_some_and(|chunks| chunks.contains_key(&[10, 0, 0])) {
             break;
         }
         std::thread::sleep(std::time::Duration::from_millis(1));
@@ -217,64 +213,6 @@ fn moving_observation_does_not_accumulate_pristine_generated_chunks() {
         "pristine generated chunks accumulated from {initial_count} to {}",
         loaded.len()
     );
-}
-
-#[test]
-fn player_chunk_generation_stays_inside_scene_bounds() {
-    let transport = CrossbeamThreadPipe::new();
-    let commands = transport.endpoint_a();
-    let connection_id = ConnectionId(1);
-    let player_id = PlayerId(1);
-    let scene_id = SceneId::S0 { room_id: 7 };
-    let mut app = App::new();
-    app.insert_resource(LocalCoordinateServerPipe(transport.endpoint_b()))
-        .insert_resource(observation_input(
-            player_id,
-            scene_id,
-            Vec3::ZERO,
-            TEST_S0_ROOM_SIZE,
-        ))
-        .init_resource::<LocalCoordinateServerWorld>()
-        .init_resource::<LocalCoordinatePhysicsInterests>()
-        .add_systems(
-            Update,
-            (prepare_player_chunks, commit_generated_chunks).chain(),
-        );
-    app.world_mut().spawn((
-        PcgLocalCoordinate::new(DEFAULT_PCG_LOCAL_COORDINATE_ID, SuperflatGenerator::new(0))
-            .in_scene(scene_id),
-        GlobalTransform::default(),
-        LocalCoordinate::default(),
-    ));
-    commands
-        .try_send(LocalCoordinateServerCommand::SubscribePlayer {
-            connection_id,
-            player_id,
-        })
-        .unwrap();
-
-    let chunks_per_axis = (TEST_S0_ROOM_SIZE[0] / CHUNK_EDGE_LENGTH as f32) as i64;
-    for _ in 0..100 {
-        app.update();
-        if app
-            .world()
-            .resource::<LocalCoordinateServerWorld>()
-            .loaded_chunk_count(DEFAULT_PCG_LOCAL_COORDINATE_ID)
-            == chunks_per_axis.pow(2) as usize
-        {
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(1));
-    }
-
-    let world = app.world().resource::<LocalCoordinateServerWorld>();
-    let chunks = &world.loaded_chunks[&DEFAULT_PCG_LOCAL_COORDINATE_ID];
-    assert_eq!(chunks.len(), chunks_per_axis.pow(2) as usize);
-    assert!(chunks.keys().all(|coordinate| {
-        coordinate[1] == 0
-            && (0..chunks_per_axis).contains(&coordinate[0])
-            && (0..chunks_per_axis).contains(&coordinate[2])
-    }));
 }
 
 #[test]
@@ -392,10 +330,8 @@ fn subscription_snapshot_drops_chunks_outside_the_latest_observation() {
     );
 
     assert!(!subscription.advertised_chunks.contains_key(&removed));
-    assert_eq!(
-        subscription.advertised_chunks.get(&added),
-        Some(&UpdateVersion::new(2))
-    );
+    let advertised = subscription.advertised_chunks.get(&added);
+    assert_eq!(advertised, Some(&UpdateVersion::new(2)));
     assert_eq!(subscription.pending_requests, VecDeque::from([added]));
 }
 
@@ -452,14 +388,19 @@ fn derived_chunk_responses_keep_the_requested_server_version() {
         coordinate: requested.coordinate,
         version: server_version,
     };
-    worker.submit(DerivedSvoJob::Encode {
-        connection_id: ConnectionId(3),
-        chunk: response,
-        source: chunk.svo_source(),
-    });
+    assert!(
+        worker
+            .submit(DerivedSvoJob::Encode {
+                connection_id: ConnectionId(3),
+                chunk: response,
+                source: chunk.svo_source(),
+            })
+            .is_ok()
+    );
     for _ in 0..100 {
         if let Some(DerivedSvoResult::Encoded { chunk, payload, .. }) = worker.try_receive() {
-            let _: VoxelChunkSvo = payload.decode().unwrap();
+            let decoded: Result<VoxelChunkSvo, _> = payload.decode();
+            decoded.unwrap();
             assert_eq!(chunk.id(), requested);
             assert_eq!(chunk.version, server_version);
             return;
@@ -491,13 +432,9 @@ fn server_advances_each_changed_chunk_version_once_per_update() {
     let entity = app.world_mut().spawn((generated, coordinate)).id();
 
     app.update();
-    assert_eq!(
-        app.world()
-            .resource::<LocalCoordinateServerWorld>()
-            .chunk_versions
-            .get(&chunk_id),
-        Some(&UpdateVersion::INITIAL)
-    );
+    let server_world = app.world().resource::<LocalCoordinateServerWorld>();
+    let version = server_world.chunk_versions.get(&chunk_id);
+    assert_eq!(version, Some(&UpdateVersion::INITIAL));
 
     assert!(
         app.world_mut()
@@ -509,11 +446,7 @@ fn server_advances_each_changed_chunk_version_once_per_update() {
             })
     );
     app.update();
-    assert_eq!(
-        app.world()
-            .resource::<LocalCoordinateServerWorld>()
-            .chunk_versions
-            .get(&chunk_id),
-        Some(&UpdateVersion::new(1))
-    );
+    let server_world = app.world().resource::<LocalCoordinateServerWorld>();
+    let version = server_world.chunk_versions.get(&chunk_id);
+    assert_eq!(version, Some(&UpdateVersion::new(1)));
 }

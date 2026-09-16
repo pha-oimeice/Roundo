@@ -8,6 +8,7 @@ struct ChunkUniform {
     world_from_chunk: mat4x4<f32>,
     svo: vec4<u32>,
     chunk_coordinate: vec4<i32>,
+    neighbor_svo: array<vec4<u32>, 6>,
 }
 
 @group(0) @binding(0) var<uniform> view: View;

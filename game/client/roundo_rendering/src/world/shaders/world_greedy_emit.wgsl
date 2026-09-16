@@ -1,10 +1,3 @@
-struct PackedSvoNode {
-    first_child: u32,
-    child_mask: u32,
-    data: u32,
-    reserved: u32,
-}
-
 struct GeneratedVertex {
     position_and_face: vec4<f32>,
 }
@@ -21,32 +14,30 @@ struct ChunkUniform {
     // root index, maximum depth, vertex capacity, material seed
     svo: vec4<u32>,
     chunk_coordinate: vec4<i32>,
-    // root index, maximum depth, available, reserved; order is +x,-x,+y,-y,+z,-z.
+    // root, depth, available, desired LOD; order is +x,-x,+y,-y,+z,-z.
     neighbor_svo: array<vec4<u32>, 6>,
 }
 
-@group(0) @binding(0) var<storage, read> nodes: array<PackedSvoNode>;
+// Each occupancy buffer contains the complete bit-packed cubic mip chain
+// 16³ → 8³ → 4³ → 2³ → 1³. Offsets are measured in bits.
+@group(0) @binding(0) var<storage, read> occupancy_mip: array<u32>;
 @group(0) @binding(1) var<storage, read_write> vertices: array<GeneratedVertex>;
 @group(0) @binding(2) var<storage, read_write> draw: DrawIndirect;
 @group(0) @binding(3) var<uniform> chunk: ChunkUniform;
-@group(0) @binding(4) var<storage, read> neighbor_chunks_pos_x: array<PackedSvoNode>;
-@group(0) @binding(5) var<storage, read> neighbor_chunks_neg_x: array<PackedSvoNode>;
-@group(0) @binding(6) var<storage, read> neighbor_chunks_pos_y: array<PackedSvoNode>;
-@group(0) @binding(7) var<storage, read> neighbor_chunks_neg_y: array<PackedSvoNode>;
-@group(0) @binding(8) var<storage, read> neighbor_chunks_pos_z: array<PackedSvoNode>;
-@group(0) @binding(9) var<storage, read> neighbor_chunks_neg_z: array<PackedSvoNode>;
+@group(0) @binding(4) var<storage, read> neighbor_chunks_pos_x: array<u32>;
+@group(0) @binding(5) var<storage, read> neighbor_chunks_neg_x: array<u32>;
+@group(0) @binding(6) var<storage, read> neighbor_chunks_pos_y: array<u32>;
+@group(0) @binding(7) var<storage, read> neighbor_chunks_neg_y: array<u32>;
+@group(0) @binding(8) var<storage, read> neighbor_chunks_pos_z: array<u32>;
+@group(0) @binding(9) var<storage, read> neighbor_chunks_neg_z: array<u32>;
+
+const OCCUPANCY_MIP_OFFSETS: array<u32, 5> = array<u32, 5>(0u, 4096u, 4608u, 4672u, 4680u);
 
 var<workgroup> visible_rows: array<u32, 16>;
 
-fn child_index(node: PackedSvoNode, octant: u32) -> u32 {
-    let octant_bit = 1u << octant;
-    let preceding = countOneBits(node.child_mask & (octant_bit - 1u));
-    return node.first_child + preceding;
-}
-
-fn svo_node(source: u32, index: u32) -> PackedSvoNode {
+fn occupancy_word(source: u32, index: u32) -> u32 {
     switch source {
-        case 0u: { return nodes[index]; }
+        case 0u: { return occupancy_mip[index]; }
         case 1u: { return neighbor_chunks_pos_x[index]; }
         case 2u: { return neighbor_chunks_neg_x[index]; }
         case 3u: { return neighbor_chunks_pos_y[index]; }
@@ -56,40 +47,23 @@ fn svo_node(source: u32, index: u32) -> PackedSvoNode {
     }
 }
 
-fn occupied_in_svo(
-    source: u32,
-    coordinate: vec3<u32>,
-    lod: u32,
-    metadata: vec4<u32>,
-) -> bool {
-    let target_depth = metadata.y - lod;
-    var node_index = metadata.x;
-    for (var depth = 0u; depth < target_depth; depth += 1u) {
-        let node = svo_node(source, node_index);
-        let bit = target_depth - depth - 1u;
-        let octant = ((coordinate.x >> bit) & 1u)
-            | (((coordinate.y >> bit) & 1u) << 1u)
-            | (((coordinate.z >> bit) & 1u) << 2u);
-        let octant_bit = 1u << octant;
-        if ((node.child_mask & octant_bit) == 0u) {
-            return node.data != 0u;
-        }
-        node_index = child_index(node, octant);
-    }
-    // Packed bit zero conservatively preserves any occupied descendant surface.
-    return ((svo_node(source, node_index).reserved & 1u) != 0u);
+fn occupied_cell(source: u32, cell: vec3<u32>, lod: u32) -> bool {
+    let edge = 16u >> lod;
+    let bit_index = OCCUPANCY_MIP_OFFSETS[lod]
+        + (cell.z * edge + cell.y) * edge
+        + cell.x;
+    return (occupancy_word(source, bit_index >> 5u) & (1u << (bit_index & 31u))) != 0u;
 }
 
-fn occupied_at_lod(coordinate: vec3<u32>, lod: u32) -> bool {
-    return occupied_in_svo(0u, coordinate, lod, chunk.svo);
+fn grid_size(lod: u32) -> vec3<u32> {
+    return vec3(16u >> lod);
 }
 
 fn neighbor_occupied(face: u32, coordinate: vec3<u32>, lod: u32) -> bool {
-    let metadata = chunk.neighbor_svo[face];
-    if (metadata.z == 0u) {
+    if (chunk.neighbor_svo[face].z == 0u) {
         return false;
     }
-    return occupied_in_svo(face + 1u, coordinate, lod, metadata);
+    return occupied_cell(face + 1u, coordinate, lod);
 }
 
 fn face_cell(face: u32, slice: u32, u: u32, v: u32) -> vec3<u32> {
@@ -100,6 +74,17 @@ fn face_cell(face: u32, slice: u32, u: u32, v: u32) -> vec3<u32> {
         return vec3(u, slice, v);
     }
     return vec3(u, v, slice);
+}
+
+// x = slice axis, y = row bit axis, z = row array axis.
+fn face_plane_size(face: u32, sizes: vec3<u32>) -> vec3<u32> {
+    if (face < 2u) {
+        return vec3(sizes.x, sizes.y, sizes.z);
+    }
+    if (face < 4u) {
+        return vec3(sizes.y, sizes.x, sizes.z);
+    }
+    return vec3(sizes.z, sizes.x, sizes.y);
 }
 
 fn face_offset(face: u32) -> vec3<i32> {
@@ -113,35 +98,38 @@ fn face_offset(face: u32) -> vec3<i32> {
     }
 }
 
-fn face_visible(face: u32, cell: vec3<u32>, grid_size: u32, lod: u32) -> bool {
-    if (!occupied_at_lod(cell, lod)) {
+fn face_visible(face: u32, cell: vec3<u32>, sizes: vec3<u32>, lod: u32) -> bool {
+    if (!occupied_cell(0u, cell, lod)) {
         return false;
     }
     let neighbor = vec3<i32>(cell) + face_offset(face);
-    if (any(neighbor < vec3(0)) || any(neighbor >= vec3<i32>(i32(grid_size)))) {
-        var wrapped = neighbor;
+    if (any(neighbor < vec3(0)) || any(neighbor >= vec3<i32>(sizes))) {
+        var neighbor_cell = neighbor;
         for (var axis = 0u; axis < 3u; axis += 1u) {
-            if (wrapped[axis] < 0) {
-                wrapped[axis] = i32(grid_size) - 1;
-            } else if (wrapped[axis] >= i32(grid_size)) {
-                wrapped[axis] = 0;
+            if (neighbor_cell[axis] < 0) {
+                neighbor_cell[axis] = i32(sizes[axis]) - 1;
+            } else if (neighbor_cell[axis] >= i32(sizes[axis])) {
+                neighbor_cell[axis] = 0;
             }
         }
-        return !neighbor_occupied(face, vec3<u32>(wrapped), lod);
+        return !neighbor_occupied(face, vec3<u32>(neighbor_cell), lod);
     }
-    return !occupied_at_lod(vec3<u32>(neighbor), lod);
+    return !occupied_cell(0u, vec3<u32>(neighbor), lod);
 }
 
-fn face_corner(face: u32, slice: u32, u: f32, v: f32, cell_size: f32) -> vec3<f32> {
+fn face_corner(face: u32, slice: u32, u: f32, v: f32, lod: u32) -> vec3<f32> {
     let s = f32(slice);
+    let cell_size = f32(1u << lod);
+    var corner: vec3<f32>;
     switch face {
-        case 0u: { return vec3(s + 1.0, u, v) * cell_size; }
-        case 1u: { return vec3(s, u, v) * cell_size; }
-        case 2u: { return vec3(u, s + 1.0, v) * cell_size; }
-        case 3u: { return vec3(u, s, v) * cell_size; }
-        case 4u: { return vec3(u, v, s + 1.0) * cell_size; }
-        default: { return vec3(u, v, s) * cell_size; }
+        case 0u: { corner = vec3(s + 1.0, u, v); }
+        case 1u: { corner = vec3(s, u, v); }
+        case 2u: { corner = vec3(u, s + 1.0, v); }
+        case 3u: { corner = vec3(u, s, v); }
+        case 4u: { corner = vec3(u, v, s + 1.0); }
+        default: { corner = vec3(u, v, s); }
     }
+    return corner * cell_size;
 }
 
 fn write_vertex(index: u32, position: vec3<f32>, face: u32, lod: u32) {
@@ -157,11 +145,10 @@ fn emit_quad(face: u32, slice: u32, u: u32, v: u32, width: u32, height: u32, lod
     let v0 = f32(v);
     let u1 = f32(u + width);
     let v1 = f32(v + height);
-    let cell_size = f32(1u << lod);
-    let a = face_corner(face, slice, u0, v0, cell_size);
-    let b = face_corner(face, slice, u1, v0, cell_size);
-    let c = face_corner(face, slice, u1, v1, cell_size);
-    let d = face_corner(face, slice, u0, v1, cell_size);
+    let a = face_corner(face, slice, u0, v0, lod);
+    let b = face_corner(face, slice, u1, v0, lod);
+    let c = face_corner(face, slice, u1, v1, lod);
+    let d = face_corner(face, slice, u0, v1, lod);
 
     if (face == 0u || face == 3u || face == 4u) {
         write_vertex(first + 0u, a, face, lod);
@@ -180,30 +167,41 @@ fn emit_quad(face: u32, slice: u32, u: u32, v: u32, width: u32, height: u32, lod
     }
 }
 
+fn is_positive_face(face: u32) -> bool {
+    return face == 0u || face == 2u || face == 4u;
+}
+
 @compute @workgroup_size(1)
 fn mesh_chunk(@builtin(workgroup_id) workgroup: vec3<u32>) {
-    atomicStore(&draw.instance_count, 1u);
-    let lod = u32(chunk.chunk_coordinate.w);
-    let grid_size = 16u >> lod;
+    let self_lod = u32(chunk.chunk_coordinate.w);
+    let self_plane_size = face_plane_size(workgroup.x / 16u, grid_size(self_lod));
     let face = workgroup.x / 16u;
-    let slice = workgroup.x % 16u;
-    if (slice >= grid_size) {
+    let self_slice = workgroup.x % 16u;
+    if (self_slice >= self_plane_size.x) {
         return;
     }
 
-    for (var v = 0u; v < grid_size; v += 1u) {
+    // Only an outer face changes resolution. Interior planes remain at this
+    // Chunk's selected LOD. Both sides choose min(self, neighbor), so the
+    // boundary masks have identical Cell footprints even if one mesh is queued.
+    let outer = select(self_slice == 0u, self_slice + 1u == self_plane_size.x, is_positive_face(face));
+    let lod = select(self_lod, min(self_lod, chunk.neighbor_svo[face].w), outer && chunk.neighbor_svo[face].z != 0u);
+    let plane_size = face_plane_size(face, grid_size(lod));
+    let slice = select(self_slice, select(0u, plane_size.x - 1u, is_positive_face(face)), outer);
+
+    for (var v = 0u; v < plane_size.z; v += 1u) {
         var row = 0u;
-        for (var u = 0u; u < grid_size; u += 1u) {
-            if (face_visible(face, face_cell(face, slice, u, v), grid_size, lod)) {
+        for (var u = 0u; u < plane_size.y; u += 1u) {
+            if (face_visible(face, face_cell(face, slice, u, v), grid_size(lod), lod)) {
                 row |= 1u << u;
             }
         }
         visible_rows[v] = row;
     }
 
-    for (var v = 0u; v < grid_size; v += 1u) {
+    for (var v = 0u; v < plane_size.z; v += 1u) {
         var u = 0u;
-        while (u < grid_size) {
+        while (u < plane_size.y) {
             let bit = 1u << u;
             if ((visible_rows[v] & bit) == 0u) {
                 u += 1u;
@@ -211,12 +209,12 @@ fn mesh_chunk(@builtin(workgroup_id) workgroup: vec3<u32>) {
             }
 
             var width = 1u;
-            while (u + width < grid_size && (visible_rows[v] & (1u << (u + width))) != 0u) {
+            while (u + width < plane_size.y && (visible_rows[v] & (1u << (u + width))) != 0u) {
                 width += 1u;
             }
             let run_mask = ((1u << width) - 1u) << u;
             var height = 1u;
-            while (v + height < grid_size && (visible_rows[v + height] & run_mask) == run_mask) {
+            while (v + height < plane_size.z && (visible_rows[v + height] & run_mask) == run_mask) {
                 height += 1u;
             }
             for (var clear_v = v; clear_v < v + height; clear_v += 1u) {

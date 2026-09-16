@@ -5,6 +5,5 @@ edition.workspace = true
 
 [dependencies]
 bevy.workspace = true
-roundo_algorithm.workspace = true
 roundo_local_coordinate.workspace = true
 roundo_presence.workspace = true

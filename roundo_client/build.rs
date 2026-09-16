@@ -1,7 +1,10 @@
+//! Deploys bundled Mods beside the development client executable.
+
 use std::fs;
 use std::io;
 use std::path::Path;
 
+// Cargo reruns deployment whenever the source Mod tree changes.
 fn main() {
     println!("cargo:rerun-if-changed=../mods");
 
@@ -16,6 +19,7 @@ fn main() {
     copy_directory(&source, &out_dir).expect("failed to deploy Mods beside the client executable");
 }
 
+/// Recursively mirrors files while preserving the source directory layout.
 fn copy_directory(source: &Path, destination: &Path) -> io::Result<()> {
     fs::create_dir_all(destination)?;
     for entry in fs::read_dir(source)? {

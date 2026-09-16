@@ -1,3 +1,5 @@
+//! Conservative defaults for local development and first-run configuration.
+
 use crate::{
     ClientNetworkConfig, CommonConfig, DatabaseConfig, EndpointConfig, GameplayConfig,
     ServerNetworkConfig,
@@ -12,6 +14,7 @@ impl Default for CommonConfig {
     }
 }
 
+// Client defaults permit local self-signed development endpoints.
 impl Default for ClientNetworkConfig {
     fn default() -> Self {
         ClientNetworkConfig {
@@ -20,6 +23,7 @@ impl Default for ClientNetworkConfig {
         }
     }
 }
+// Server certificates are generated beside the executable by default.
 impl Default for ServerNetworkConfig {
     fn default() -> Self {
         ServerNetworkConfig {
@@ -34,6 +38,7 @@ impl Default for ServerNetworkConfig {
         }
     }
 }
+// Loopback avoids exposing a new installation on external interfaces.
 impl Default for EndpointConfig {
     fn default() -> Self {
         EndpointConfig {
@@ -42,6 +47,7 @@ impl Default for EndpointConfig {
         }
     }
 }
+// The development database keeps a bounded connection pool.
 impl Default for DatabaseConfig {
     fn default() -> Self {
         DatabaseConfig {
@@ -50,6 +56,7 @@ impl Default for DatabaseConfig {
         }
     }
 }
+// Gameplay defaults balance simulation frequency and presence scope.
 impl Default for GameplayConfig {
     fn default() -> Self {
         GameplayConfig {

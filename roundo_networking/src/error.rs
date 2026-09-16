@@ -1,8 +1,12 @@
-use crate::frame::MAX_FRAME_SIZE;
-use crate::protocol::ProtocolErrorCode;
+//! Protocol failures with frame, serialization, and connection context.
+
+use crate::{frame::MAX_FRAME_SIZE, protocol::ProtocolErrorCode};
 use std::fmt::{Display, Formatter};
 
-/// A recoverable transport or protocol failure.
+/// Failure encountered while framing or transporting a protocol message.
+///
+/// The error describes the failed operation; it does not guarantee that a
+/// stream remains at a frame boundary or can be reused after failure.
 #[derive(Debug)]
 pub enum ProtocolError {
     Io(std::io::Error),
@@ -25,10 +29,12 @@ pub enum ProtocolError {
 }
 
 impl ProtocolError {
+    /// Reports a decoded message variant that is invalid at the current protocol step.
     pub fn unexpected(expected: &'static str, received: &'static str) -> Self {
         Self::UnexpectedMessage { expected, received }
     }
 
+    /// Reports a payload length above [`MAX_FRAME_SIZE`].
     pub fn frame_too_large(length: usize) -> Self {
         Self::FrameTooLarge {
             length,
@@ -36,6 +42,9 @@ impl ProtocolError {
         }
     }
 
+    /// Returns whether the wrapped I/O kind conventionally indicates peer disconnection.
+    ///
+    /// Explicit [`Self::ConnectionClosed`] and non-I/O variants return `false`.
     pub fn is_peer_disconnect(&self) -> bool {
         matches!(
             self,
@@ -81,6 +90,7 @@ impl Display for ProtocolError {
     }
 }
 
+// Only wrapped I/O failures expose an underlying source.
 impl std::error::Error for ProtocolError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {

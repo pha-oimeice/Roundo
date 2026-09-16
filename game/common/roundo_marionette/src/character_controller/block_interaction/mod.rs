@@ -1,3 +1,5 @@
+//! Sequenced block-destruction and placement controller events.
+
 mod client;
 mod server;
 
@@ -9,7 +11,9 @@ pub use roundo_contracts::{DestroyBlockControllerAction, PlaceBlockControllerAct
 pub(super) use self::client::route_block_interactions;
 pub(super) use self::server::accept_block_interactions;
 
+/// Rejects duplicate or stale destruction commands by sequence.
 pub type DestroyBlockController = EventController<DestroyBlockControllerAction>;
+/// Rejects invalid, duplicate, or stale placement commands.
 pub type PlaceBlockController = EventController<PlaceBlockControllerAction>;
 
 impl ControllerAction for DestroyBlockControllerAction {
@@ -25,12 +29,14 @@ impl ControllerAction for PlaceBlockControllerAction {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+/// Validated world-edit intent emitted by a player controller.
 pub enum BlockInteraction {
     Destroy,
     Place { voxel_id: u32 },
 }
 
 #[derive(Message, Clone, Copy, Debug, Eq, PartialEq)]
+/// Routes a validated interaction to the target player entity.
 pub struct BlockInteractionMessage {
     pub entity: Entity,
     pub interaction: BlockInteraction,

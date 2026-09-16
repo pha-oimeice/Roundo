@@ -1,8 +1,16 @@
+//! Server-side observation, procedural generation, version advertisement, and SVO delivery.
+//!
+//! The update pipeline first consumes subscription state and commits bounded PCG
+//! results, then rebuilds spatial indexes, advances authoritative chunk versions,
+//! advertises desired versions, and serves explicit payload requests. Generation
+//! and SVO conversion run on workers; their results are revalidated before commit.
+
 use super::*;
 
 impl Plugin for LocalCoordinateServerPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins((LocalCoordinateBasePlugin, LocalCoordinatePhysicsPlugin))
+            .init_resource::<crate::AtomicVoxelRegistry>()
             .insert_resource(GeneratedLocalCoordinates(
                 self.generated_coordinates.clone(),
             ))
@@ -51,6 +59,7 @@ struct LocalCoordinateServerPipe(
     CrossbeamThreadPipeEndpointB<LocalCoordinateServerCommand, LocalCoordinateServerEvent>,
 );
 
+/// Per-connection view and the exact state last advertised to that connection.
 pub(super) struct PlayerSubscription {
     player_id: PlayerId,
     view_distance_chunks: u16,
@@ -59,13 +68,22 @@ pub(super) struct PlayerSubscription {
     pending_requests: VecDeque<ChunkId>,
 }
 
+/// Spherical observation region expressed in absolute or coordinate-local units.
 #[derive(Clone, Copy)]
 pub(super) struct ObservationRegion {
+    /// Exact observer position, retained for physics and nearest-first ordering.
     center: [f64; 3],
+    /// Center of the hysteresis-stabilized Chunk used by streaming membership.
+    streaming_center: [f64; 3],
     radius: f64,
     scene_id: SceneId,
 }
 
+/// Incremental generation/eviction plan for one procedural coordinate.
+///
+/// `signature` suppresses replanning while snapped observer chunks and radii are
+/// unchanged. Pending work is nearest-first at plan creation; later queue order
+/// is retained until the signature changes.
 #[derive(Default)]
 pub(super) struct GenerationPlan {
     signature: Vec<([i64; 3], u16)>,
@@ -74,6 +92,7 @@ pub(super) struct GenerationPlan {
     evicting: VecDeque<ChunkCoordinate>,
 }
 
+// Creates one static authoritative coordinate root per configured generator.
 fn spawn_generated_local_coordinates(
     mut commands: Commands,
     coordinates: Res<GeneratedLocalCoordinates>,
@@ -89,6 +108,7 @@ fn spawn_generated_local_coordinates(
     }
 }
 
+// Reconciles commands and observations, then admits bounded nearest-first PCG work.
 fn prepare_player_chunks(
     pipe: Res<LocalCoordinateServerPipe>,
     observation_input: Res<LocalCoordinateObservationInput>,
@@ -102,9 +122,8 @@ fn prepare_player_chunks(
                 connection_id,
                 player_id,
             } => {
-                let view_distance_chunks = world
-                    .requested_view_distances
-                    .get(&connection_id)
+                let requested_distance = world.requested_view_distances.get(&connection_id);
+                let view_distance_chunks = requested_distance
                     .copied()
                     .unwrap_or(DEFAULT_CHUNK_VIEW_DISTANCE);
                 world.subscriptions.insert(
@@ -119,8 +138,15 @@ fn prepare_player_chunks(
                 );
             }
             LocalCoordinateServerCommand::UnsubscribePlayer { connection_id } => {
-                world.subscriptions.remove(&connection_id);
-                world.requested_view_distances.remove(&connection_id);
+                let removed_subscription = world.subscriptions.remove(&connection_id);
+                let removed_distance = world.requested_view_distances.remove(&connection_id);
+                if removed_subscription.is_none() {
+                    log::debug!(
+                        "ignored unsubscribe for unknown Local Coordinate subscription: connection_id={}, had_view_distance={}",
+                        connection_id.0,
+                        removed_distance.is_some()
+                    );
+                }
                 world
                     .derived_svo_jobs
                     .retain(|(candidate, _), _| *candidate != connection_id);
@@ -160,18 +186,32 @@ fn prepare_player_chunks(
         },
     );
     world.observation_by_player.clear();
+    let mut observed_players = HashSet::new();
     for observer in observation_input.observers() {
         if let Some(&view_distance_chunks) = subscribed_players.get(&observer.player_id) {
+            observed_players.insert(observer.player_id);
+            let previous = world
+                .observer_streaming_chunks
+                .get(&observer.player_id)
+                .copied();
+            let streaming_chunk = stabilized_streaming_chunk(observer.position, previous);
+            world
+                .observer_streaming_chunks
+                .insert(observer.player_id, streaming_chunk);
             world.observation_by_player.insert(
                 observer.player_id,
                 ObservationRegion {
                     center: observer.position,
+                    streaming_center: chunk_center(streaming_chunk),
                     radius: f64::from(view_distance_chunks) * CHUNK_EDGE_LENGTH as f64,
                     scene_id: observer.scene_id,
                 },
             );
         }
     }
+    world
+        .observer_streaming_chunks
+        .retain(|player_id, _| observed_players.contains(player_id));
 
     let mut active_coordinates = HashSet::new();
     let mut desired_physics = HashMap::new();
@@ -181,9 +221,6 @@ fn prepare_player_chunks(
 
     for (generated, coordinate_transform, mut local_coordinate) in &mut local_coordinates {
         active_coordinates.insert(generated.id);
-        let Some(scene_extent) = observation_input.scene_extent(generated.scene_id) else {
-            continue;
-        };
         let observations = world
             .observation_by_player
             .values()
@@ -195,14 +232,12 @@ fn prepare_player_chunks(
             observations
                 .iter()
                 .flat_map(|observation| {
-                    superflat_chunks_intersecting_torus_radius(
+                    superflat_chunks_intersecting_radius(
                         observation.center,
                         PHYSICS_CHUNK_RADIUS * CHUNK_EDGE_LENGTH as f64,
                         generated.generator.height,
-                        scene_extent,
                     )
                 })
-                .filter(|coordinate| chunk_intersects_space(*coordinate, scene_extent))
                 .filter_map(crate::local_coordinate::pcg::local_chunk_position)
                 .collect(),
         );
@@ -211,7 +246,7 @@ fn prepare_player_chunks(
             .map(|observation| {
                 (
                     observation
-                        .center
+                        .streaming_center
                         .map(|axis| (axis / CHUNK_EDGE_LENGTH as f64).floor() as i64),
                     (observation.radius / CHUNK_EDGE_LENGTH as f64).round() as u16,
                 )
@@ -232,6 +267,8 @@ fn prepare_player_chunks(
                 .iter()
                 .map(|(center, distance)| ObservationRegion {
                     center: center.map(|axis| (axis as f64 + 0.5) * CHUNK_EDGE_LENGTH as f64),
+                    streaming_center: center
+                        .map(|axis| (axis as f64 + 0.5) * CHUNK_EDGE_LENGTH as f64),
                     radius: f64::from(*distance) * CHUNK_EDGE_LENGTH as f64,
                     scene_id: generated.scene_id,
                 })
@@ -239,14 +276,12 @@ fn prepare_player_chunks(
             let desired_chunks = snapped_observations
                 .iter()
                 .flat_map(|observation| {
-                    superflat_chunks_intersecting_torus_radius(
+                    superflat_chunks_intersecting_radius(
                         observation.center,
                         observation.radius,
                         generated.generator.height,
-                        scene_extent,
                     )
                 })
-                .filter(|coordinate| chunk_intersects_space(*coordinate, scene_extent))
                 .collect::<HashSet<_>>();
             let evictable = loaded_chunks
                 .keys()
@@ -272,11 +307,10 @@ fn prepare_player_chunks(
                 .copied()
                 .collect::<Vec<_>>();
             missing.sort_by(|left, right| {
-                nearest_chunk_distance_squared(*left, &snapped_observations, scene_extent)
+                nearest_chunk_distance_squared(*left, &snapped_observations)
                     .total_cmp(&nearest_chunk_distance_squared(
                         *right,
                         &snapped_observations,
-                        scene_extent,
                     ))
                     .then_with(|| left.cmp(right))
             });
@@ -288,7 +322,11 @@ fn prepare_player_chunks(
             .evicting
             .drain(..plan.evicting.len().min(MAX_CHUNKS_EVICTED_PER_TICK))
         {
-            loaded_chunks.remove(&coordinate);
+            let removed_chunk = loaded_chunks.remove(&coordinate);
+            debug_assert!(
+                removed_chunk.is_some(),
+                "planned Chunk eviction must be loaded"
+            );
             remove_generated_chunk(&mut local_coordinate, coordinate);
         }
         while generation_budget > 0 {
@@ -302,11 +340,23 @@ fn prepare_player_chunks(
             if !generation_jobs.insert(id) {
                 continue;
             }
-            generation_worker.submit(ChunkGenerationJob {
-                local_coordinate_id: generated.id,
-                coordinate,
-                generator: generated.generator,
-            });
+            if generation_worker
+                .submit(ChunkGenerationJob {
+                    local_coordinate_id: generated.id,
+                    coordinate,
+                    generator: generated.generator,
+                })
+                .is_err()
+            {
+                let removed_job = generation_jobs.remove(&id);
+                debug_assert!(removed_job);
+                plan.pending.push_front(coordinate);
+                log::error!(
+                    "cannot queue Chunk generation: local_coordinate_id={}, coordinate={coordinate:?}, reason=generation_worker_closed",
+                    generated.id.0
+                );
+                break;
+            }
             generation_budget -= 1;
         }
     }
@@ -325,7 +375,9 @@ fn prepare_player_chunks(
     }
 }
 
+// Publishes only results that still correspond to a pending and desired chunk.
 fn commit_generated_chunks(
+    voxels: Option<Res<crate::AtomicVoxelRegistry>>,
     mut world: ResMut<LocalCoordinateServerWorld>,
     mut local_coordinates: Query<(&PcgLocalCoordinate, &mut LocalCoordinate)>,
 ) {
@@ -338,16 +390,14 @@ fn commit_generated_chunks(
             local_coordinate_id: result.local_coordinate_id,
             coordinate: result.chunk.coordinate,
         };
-        if !world.generation_jobs.remove(&id)
-            || !world
-                .generation_plans
-                .get(&id.local_coordinate_id)
-                .is_some_and(|plan| plan.desired.contains(&id.coordinate))
-            || world
-                .loaded_chunks
-                .get(&id.local_coordinate_id)
-                .is_some_and(|chunks| chunks.contains_key(&id.coordinate))
-        {
+        let was_pending = world.generation_jobs.remove(&id);
+        let generation_plan = world.generation_plans.get(&id.local_coordinate_id);
+        let still_desired =
+            generation_plan.is_some_and(|plan| plan.desired.contains(&id.coordinate));
+        let loaded_chunks = world.loaded_chunks.get(&id.local_coordinate_id);
+        let already_loaded =
+            loaded_chunks.is_some_and(|chunks| chunks.contains_key(&id.coordinate));
+        if !was_pending || !still_desired || already_loaded {
             continue;
         }
         let Some((_, mut local_coordinate)) = local_coordinates
@@ -356,7 +406,14 @@ fn commit_generated_chunks(
         else {
             continue;
         };
-        replace_generated_chunk(&mut local_coordinate, &result.chunk);
+        let builtin;
+        let voxels = if let Some(voxels) = voxels.as_deref() {
+            voxels
+        } else {
+            builtin = crate::AtomicVoxelRegistry::builtin();
+            &builtin
+        };
+        replace_generated_chunk(&mut local_coordinate, &result.chunk, voxels);
         world
             .loaded_chunks
             .entry(id.local_coordinate_id)
@@ -365,6 +422,9 @@ fn commit_generated_chunks(
     }
 }
 
+/// Queues advertised chunks once, preserving request order.
+///
+/// Unknown/unadvertised chunks and duplicate pending requests are ignored.
 fn enqueue_chunk_requests(
     subscription: &mut PlayerSubscription,
     chunks: impl IntoIterator<Item = ChunkId>,
@@ -379,6 +439,7 @@ fn enqueue_chunk_requests(
     }
 }
 
+// Consumes dirty chunk positions and advances only currently loaded versions.
 fn update_authoritative_chunk_versions(
     mut world: ResMut<LocalCoordinateServerWorld>,
     mut local_coordinates: Query<(&PcgLocalCoordinate, &mut LocalCoordinate)>,
@@ -401,12 +462,19 @@ fn update_authoritative_chunk_versions(
                     .and_modify(|version| *version = version.next())
                     .or_insert(UpdateVersion::INITIAL);
             } else {
-                world.chunk_versions.remove(&chunk_id);
+                let removed_version = world.chunk_versions.remove(&chunk_id);
+                if removed_version.is_none() {
+                    log::trace!("removed unloaded Chunk without a tracked version: {chunk_id:?}");
+                }
             }
         }
     }
 }
 
+/// Returns new or changed versions in canonical coordinate order.
+///
+/// Chunks absent from `current` are not represented; unload publication is a
+/// separate step.
 fn changed_chunk_versions(
     advertised: &HashMap<ChunkId, UpdateVersion>,
     current: &HashMap<ChunkId, UpdateVersion>,
@@ -431,10 +499,11 @@ fn changed_chunk_versions(
     chunks
 }
 
+// Advertises spawn/version/unload deltas, then replaces each connection snapshot.
+// A closed bridge is logged but does not retain deltas for retry.
 fn publish_subscription_changes(
     pipe: Res<LocalCoordinateServerPipe>,
     virtual_chunks: Res<VirtualChunkIndex>,
-    observation_input: Res<LocalCoordinateObservationInput>,
     mut world: ResMut<LocalCoordinateServerWorld>,
     generated_coordinates: Query<(&PcgLocalCoordinate, &LocalCoordinate)>,
 ) {
@@ -451,11 +520,13 @@ fn publish_subscription_changes(
         };
         let observation = world.observation_by_player.get(&player_id).copied();
         let desired_chunks = observation.map_or_else(HashMap::new, |observation| {
-            let Some(scene_extent) = observation_input.scene_extent(observation.scene_id) else {
-                return HashMap::new();
-            };
             virtual_chunks
-                .chunks_in_torus_radius(observation.center, observation.radius, scene_extent)
+                .chunks_in_radius(
+                    observation.streaming_center[0],
+                    observation.streaming_center[1],
+                    observation.streaming_center[2],
+                    observation.radius,
+                )
                 .into_iter()
                 .filter_map(|chunk_reference| {
                     streamed_chunk(
@@ -474,23 +545,29 @@ fn publish_subscription_changes(
             .collect::<HashSet<_>>();
 
         for local_coordinate_id in desired_coordinates.difference(&spawned_coordinates) {
-            let _ = pipe.0.try_send(LocalCoordinateServerEvent::Spawned {
-                connection_id,
-                local_coordinate_id: *local_coordinate_id,
-            });
+            if pipe
+                .0
+                .try_send(LocalCoordinateServerEvent::Spawned {
+                    connection_id,
+                    local_coordinate_id: *local_coordinate_id,
+                })
+                .is_err()
+            {
+                log::error!(
+                    "cannot publish Local Coordinate spawn: connection_id={}, local_coordinate_id={}, reason=server_bridge_closed",
+                    connection_id.0,
+                    local_coordinate_id.0
+                );
+            }
         }
 
         let mut chunks = changed_chunk_versions(&advertised_chunks, &desired_chunks);
         if let Some(observation) = observation {
-            let scene_extent = observation_input
-                .scene_extent(observation.scene_id)
-                .expect("an observed scene has a validated extent");
             chunks.sort_by(|left, right| {
-                nearest_chunk_distance_squared(left.coordinate, &[observation], scene_extent)
+                nearest_chunk_distance_squared(left.coordinate, &[observation])
                     .total_cmp(&nearest_chunk_distance_squared(
                         right.coordinate,
                         &[observation],
-                        scene_extent,
                     ))
                     .then_with(|| {
                         (left.local_coordinate_id.0, left.coordinate)
@@ -499,10 +576,20 @@ fn publish_subscription_changes(
             });
         }
         if !chunks.is_empty() {
-            let _ = pipe.0.try_send(LocalCoordinateServerEvent::ChunkVersions {
-                connection_id,
-                chunks,
-            });
+            let chunk_count = chunks.len();
+            if pipe
+                .0
+                .try_send(LocalCoordinateServerEvent::ChunkVersions {
+                    connection_id,
+                    chunks,
+                })
+                .is_err()
+            {
+                log::error!(
+                    "cannot publish Chunk versions: connection_id={}, chunk_count={chunk_count}, reason=server_bridge_closed",
+                    connection_id.0
+                );
+            }
         }
         let mut unloaded = advertised_chunks
             .keys()
@@ -511,11 +598,22 @@ fn publish_subscription_changes(
             .collect::<Vec<_>>();
         unloaded.sort_unstable_by_key(|chunk| (chunk.local_coordinate_id.0, chunk.coordinate));
         for unloaded in unloaded {
-            let _ = pipe.0.try_send(LocalCoordinateServerEvent::ChunkUnloaded {
-                connection_id,
-                local_coordinate_id: unloaded.local_coordinate_id,
-                coordinate: unloaded.coordinate,
-            });
+            if pipe
+                .0
+                .try_send(LocalCoordinateServerEvent::ChunkUnloaded {
+                    connection_id,
+                    local_coordinate_id: unloaded.local_coordinate_id,
+                    coordinate: unloaded.coordinate,
+                })
+                .is_err()
+            {
+                log::error!(
+                    "cannot publish Chunk unload: connection_id={}, local_coordinate_id={}, coordinate={:?}, reason=server_bridge_closed",
+                    connection_id.0,
+                    unloaded.local_coordinate_id.0,
+                    unloaded.coordinate
+                );
+            }
         }
 
         if let Some(subscription) = world.subscriptions.get_mut(&connection_id) {
@@ -536,6 +634,7 @@ fn update_subscription_snapshot(
     subscription.advertised_chunks = desired_chunks;
 }
 
+// Admits bounded per-connection encodes while respecting the global in-flight cap.
 fn serve_requested_chunks(
     mut world: ResMut<LocalCoordinateServerWorld>,
     mut generated_coordinates: Query<(&PcgLocalCoordinate, &mut LocalCoordinate)>,
@@ -592,15 +691,34 @@ fn serve_requested_chunks(
                 version,
             };
             world.derived_svo_jobs.insert(job_key, version);
-            world.derived_svo.submit(DerivedSvoJob::Encode {
-                connection_id,
-                chunk: chunk_version,
-                source: chunk.svo_source(),
-            });
+            if world
+                .derived_svo
+                .submit(DerivedSvoJob::Encode {
+                    connection_id,
+                    chunk: chunk_version,
+                    source: chunk.svo_source(),
+                })
+                .is_err()
+            {
+                let removed_job = world.derived_svo_jobs.remove(&job_key);
+                debug_assert!(removed_job.is_some());
+                if let Some(subscription) = world.subscriptions.get_mut(&connection_id) {
+                    subscription.pending_requests.push_front(requested);
+                }
+                log::error!(
+                    "cannot queue server Chunk encoding: connection_id={}, local_coordinate_id={}, coordinate={:?}, version={}, reason=derived_svo_worker_closed",
+                    connection_id.0,
+                    requested.local_coordinate_id.0,
+                    requested.coordinate,
+                    version.value()
+                );
+                break;
+            }
         }
     }
 }
 
+// Emits only encoded results whose version remains both current and requested.
 fn publish_derived_svo_results(
     pipe: Res<LocalCoordinateServerPipe>,
     mut world: ResMut<LocalCoordinateServerWorld>,
@@ -615,12 +733,23 @@ fn publish_derived_svo_results(
                 chunk,
                 payload,
             } => {
-                if complete_svo_job(&mut world, connection_id, chunk) {
-                    let _ = pipe.0.try_send(LocalCoordinateServerEvent::ChunkLoaded {
-                        connection_id,
-                        chunk,
-                        payload,
-                    });
+                if complete_svo_job(&mut world, connection_id, chunk)
+                    && pipe
+                        .0
+                        .try_send(LocalCoordinateServerEvent::ChunkLoaded {
+                            connection_id,
+                            chunk,
+                            payload,
+                        })
+                        .is_err()
+                {
+                    log::error!(
+                        "cannot publish loaded Chunk: connection_id={}, local_coordinate_id={}, coordinate={:?}, version={}, reason=server_bridge_closed",
+                        connection_id.0,
+                        chunk.local_coordinate_id.0,
+                        chunk.coordinate,
+                        chunk.version.value()
+                    );
                 }
             }
             DerivedSvoResult::Failed {
@@ -628,7 +757,14 @@ fn publish_derived_svo_results(
                 chunk,
                 error,
             } => {
-                world.derived_svo_jobs.remove(&(connection_id, chunk.id()));
+                let removed_job = world.derived_svo_jobs.remove(&(connection_id, chunk.id()));
+                if removed_job.is_none() {
+                    log::debug!(
+                        "received failure for an inactive server Chunk derivation: connection_id={}, chunk={:?}",
+                        connection_id.0,
+                        chunk.id()
+                    );
+                }
                 log::warn!(
                     "failed to derive server chunk SVO: connection_id={}, local_coordinate_id={}, coordinate={:?}, error={error}",
                     connection_id.0,
@@ -645,21 +781,26 @@ fn publish_derived_svo_results(
     }
 }
 
+/// Retires one in-flight job and reports whether its exact version is still advertised.
 fn complete_svo_job(
     world: &mut LocalCoordinateServerWorld,
     connection_id: ConnectionId,
     chunk: ChunkVersion,
 ) -> bool {
     let job_key = (connection_id, chunk.id());
-    let was_current_job = world.derived_svo_jobs.remove(&job_key) == Some(chunk.version);
-    let is_still_requested = world
-        .subscriptions
-        .get(&connection_id)
-        .and_then(|subscription| subscription.advertised_chunks.get(&chunk.id()))
-        == Some(&chunk.version);
+    let completed_job = world.derived_svo_jobs.remove(&job_key);
+    let was_current_job = completed_job == Some(chunk.version);
+    let subscription = world.subscriptions.get(&connection_id);
+    let advertised_version =
+        subscription.and_then(|subscription| subscription.advertised_chunks.get(&chunk.id()));
+    let is_still_requested = advertised_version == Some(&chunk.version);
     was_current_job && is_still_requested
 }
 
+/// Converts an absolute observation sphere into conservative coordinate-local bounds.
+///
+/// Radius is divided by the smallest absolute axis scale so anisotropic scaling
+/// cannot exclude visible chunks. Degenerate transforms return `None`.
 fn local_observation_region(
     coordinate_transform: &GlobalTransform,
     observation: ObservationRegion,
@@ -674,17 +815,24 @@ fn local_observation_region(
         observation.center[1] as f32,
         observation.center[2] as f32,
     );
-    let local_center = coordinate_transform
-        .affine()
-        .inverse()
-        .transform_point3(absolute_center);
+    let inverse = coordinate_transform.affine().inverse();
+    let local_center = inverse.transform_point3(absolute_center);
+    let absolute_streaming_center = bevy::prelude::Vec3::new(
+        observation.streaming_center[0] as f32,
+        observation.streaming_center[1] as f32,
+        observation.streaming_center[2] as f32,
+    );
+    let local_streaming_center = inverse.transform_point3(absolute_streaming_center);
     Some(ObservationRegion {
         center: local_center.as_dvec3().to_array(),
+        streaming_center: local_streaming_center.as_dvec3().to_array(),
         radius: observation.radius / f64::from(minimum_scale),
         scene_id: observation.scene_id,
     })
 }
 
+/// Resolves a spatial-index reference only if its scene, generated backing, ECS
+/// chunk, and authoritative version are all still live.
 fn streamed_chunk(
     chunk_reference: crate::ChunkReference,
     generated_coordinates: &Query<(&PcgLocalCoordinate, &LocalCoordinate)>,
@@ -692,9 +840,9 @@ fn streamed_chunk(
     chunk_versions: &HashMap<ChunkId, UpdateVersion>,
     scene_id: SceneId,
 ) -> Option<(ChunkId, UpdateVersion)> {
-    let (generated, local_coordinate) = generated_coordinates
-        .get(chunk_reference.local_coordinate_entity())
-        .ok()?;
+    let entity = chunk_reference.local_coordinate_entity();
+    let coordinate_result = generated_coordinates.get(entity);
+    let (generated, local_coordinate) = coordinate_result.ok()?;
     if generated.scene_id != scene_id {
         return None;
     }
@@ -704,21 +852,23 @@ fn streamed_chunk(
         i64::from(local_position.y),
         i64::from(local_position.z),
     ];
-    if !loaded_chunks.get(&generated.id)?.contains_key(&coordinate) {
+    let generated_chunks = loaded_chunks.get(&generated.id)?;
+    if !generated_chunks.contains_key(&coordinate) {
         return None;
     }
-    local_coordinate.chunks.get(&local_position)?;
+    let _loaded_chunk = local_coordinate.chunks.get(&local_position)?;
     let chunk_id = ChunkId {
         local_coordinate_id: generated.id,
         coordinate,
     };
-    Some((chunk_id, *chunk_versions.get(&chunk_id)?))
+    let version = chunk_versions.get(&chunk_id)?;
+    Some((chunk_id, *version))
 }
 
+/// Returns squared center distance to the nearest observation, or infinity when empty.
 fn nearest_chunk_distance_squared(
     coordinate: ChunkCoordinate,
     observations: &[ObservationRegion],
-    scene_extent: [f32; 3],
 ) -> f64 {
     let edge = CHUNK_EDGE_LENGTH as f64;
     observations
@@ -727,12 +877,7 @@ fn nearest_chunk_distance_squared(
             (0..3)
                 .map(|axis| {
                     let chunk_center = coordinate[axis] as f64 * edge + edge * 0.5;
-                    periodic_delta(
-                        chunk_center,
-                        observation.center[axis],
-                        f64::from(scene_extent[axis]),
-                    )
-                    .powi(2)
+                    (chunk_center - observation.center[axis]).powi(2)
                 })
                 .sum::<f64>()
         })
@@ -740,9 +885,35 @@ fn nearest_chunk_distance_squared(
         .unwrap_or(f64::INFINITY)
 }
 
-fn periodic_delta(first: f64, second: f64, extent: f64) -> f64 {
-    let difference = (first - second).abs().rem_euclid(extent);
-    difference.min(extent - difference)
+/// Applies a Schmitt-trigger dead band around the previously committed Chunk.
+///
+/// Crossing one boundary does not commit the adjacent Chunk until the observer
+/// is `STREAMING_CHUNK_HYSTERESIS` units inside it. Large teleports still select
+/// the destination directly, and Euclidean floor semantics cover negatives.
+fn stabilized_streaming_chunk(
+    position: [f64; 3],
+    previous: Option<ChunkCoordinate>,
+) -> ChunkCoordinate {
+    let edge = CHUNK_EDGE_LENGTH as f64;
+    std::array::from_fn(|axis| {
+        let value = position[axis];
+        let Some(previous) = previous.map(|chunk| chunk[axis]) else {
+            return (value / edge).floor() as i64;
+        };
+        let minimum = previous as f64 * edge;
+        let maximum = minimum + edge;
+        if value < minimum - STREAMING_CHUNK_HYSTERESIS {
+            ((value + STREAMING_CHUNK_HYSTERESIS) / edge).floor() as i64
+        } else if value >= maximum + STREAMING_CHUNK_HYSTERESIS {
+            ((value - STREAMING_CHUNK_HYSTERESIS) / edge).floor() as i64
+        } else {
+            previous
+        }
+    })
+}
+
+fn chunk_center(chunk: ChunkCoordinate) -> [f64; 3] {
+    chunk.map(|axis| (axis as f64 + 0.5) * CHUNK_EDGE_LENGTH as f64)
 }
 
 fn distance_to_interval(value: f64, minimum: f64, maximum: f64) -> f64 {
@@ -755,75 +926,43 @@ fn distance_to_interval(value: f64, minimum: f64, maximum: f64) -> f64 {
     }
 }
 
-fn periodic_distance_to_interval(value: f64, minimum: f64, maximum: f64, extent: f64) -> f64 {
-    [-extent, 0.0, extent]
-        .into_iter()
-        .map(|offset| distance_to_interval(value, minimum + offset, maximum + offset))
-        .reduce(f64::min)
-        .unwrap_or(f64::INFINITY)
-}
-
-fn superflat_chunks_intersecting_torus_radius(
+/// Collects superflat chunks whose closed axis-aligned bounds intersect a sphere.
+///
+/// The returned set has no iteration-order guarantee.
+fn superflat_chunks_intersecting_radius(
     center: [f64; 3],
     radius: f64,
     height: i64,
-    scene_extent: [f32; 3],
 ) -> HashSet<ChunkCoordinate> {
     let edge = CHUNK_EDGE_LENGTH as f64;
-    let chunk_counts = scene_extent.map(|extent| (f64::from(extent) / edge).floor() as i64);
-    if chunk_counts.into_iter().any(|count| count <= 0) {
-        return HashSet::new();
-    }
     let minimum_x = ((center[0] - radius) / edge).floor() as i64;
     let maximum_x = ((center[0] + radius) / edge).floor() as i64;
     let minimum_z = ((center[2] - radius) / edge).floor() as i64;
     let maximum_z = ((center[2] + radius) / edge).floor() as i64;
     let y = height.div_euclid(CHUNK_EDGE_LENGTH as i64);
-    let canonical_y = y.rem_euclid(chunk_counts[1]);
-    let y_minimum = canonical_y as f64 * edge;
-    let y_distance = periodic_distance_to_interval(
-        center[1],
-        y_minimum,
-        y_minimum + edge,
-        f64::from(scene_extent[1]),
-    );
+    let y_minimum = y as f64 * edge;
+    let y_distance = distance_to_interval(center[1], y_minimum, y_minimum + edge);
     if y_distance > radius {
         return HashSet::new();
     }
     let radius_squared = radius * radius;
     let mut chunks = HashSet::new();
 
-    for image_x in minimum_x..=maximum_x {
-        for image_z in minimum_z..=maximum_z {
-            let x_minimum = image_x as f64 * edge;
-            let z_minimum = image_z as f64 * edge;
+    for x in minimum_x..=maximum_x {
+        for z in minimum_z..=maximum_z {
+            let x_minimum = x as f64 * edge;
+            let z_minimum = z as f64 * edge;
             let distance_squared = distance_to_interval(center[0], x_minimum, x_minimum + edge)
                 .powi(2)
                 + y_distance.powi(2)
                 + distance_to_interval(center[2], z_minimum, z_minimum + edge).powi(2);
             if distance_squared <= radius_squared {
-                chunks.insert([
-                    image_x.rem_euclid(chunk_counts[0]),
-                    canonical_y,
-                    image_z.rem_euclid(chunk_counts[2]),
-                ]);
+                chunks.insert([x, y, z]);
             }
         }
     }
 
     chunks
-}
-
-fn chunk_intersects_space(coordinate: ChunkCoordinate, scene_extent: [f32; 3]) -> bool {
-    let edge = CHUNK_EDGE_LENGTH as f64;
-    coordinate
-        .iter()
-        .zip(scene_extent)
-        .all(|(coordinate, extent)| {
-            let minimum = *coordinate as f64 * edge;
-            let maximum = minimum + edge;
-            maximum > 0.0 && minimum < f64::from(extent)
-        })
 }
 
 #[cfg(test)]

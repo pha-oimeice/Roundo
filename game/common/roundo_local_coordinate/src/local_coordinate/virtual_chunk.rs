@@ -1,11 +1,24 @@
+//! Derived broad-phase index from absolute virtual cells to local-coordinate chunks.
+//!
+//! Each transformed chunk is inserted into every virtual cell overlapped by its
+//! absolute axis-aligned bounding box. Radius queries operate on those cells and
+//! intentionally return broad-phase candidates rather than exact chunk/sphere
+//! intersections.
+
 use crate::local_coordinate::data::{CHUNK_EDGE_LENGTH, LocalCoordinate};
 use bevy::prelude::{Entity, GlobalTransform, IVec3, Query, ResMut, Resource, Vec3};
 use std::collections::{HashMap, HashSet};
 
+/// Virtual broad-phase cell edge in absolute-space units.
 pub const VIRTUAL_CHUNK_EDGE_LENGTH: i64 = CHUNK_EDGE_LENGTH as i64;
+/// Signed absolute-space virtual-cell coordinate `[x, y, z]`.
 pub type VirtualChunkCoordinate = [i64; 3];
 
-/// An opaque reference from an absolute-space virtual chunk to one local chunk.
+/// Logical reference from an absolute-space virtual cell to one local chunk.
+///
+/// Identity is the pair of owner entity and owner-local chunk position. It is
+/// valid only while that entity and chunk remain indexed; rebuilding the index
+/// removes stale references but does not turn copied values into live handles.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct ChunkReference {
     local_coordinate_entity: Entity,
@@ -31,7 +44,10 @@ impl ChunkReference {
     }
 }
 
-/// Derived absolute-space lookup for chunks owned by every local coordinate.
+/// Derived absolute-space broad-phase lookup for all local-coordinate chunks.
+///
+/// The index owns no chunk data. It is incrementally rebuilt from ECS state and
+/// may lag mutations until its rebuild system runs.
 #[derive(Resource, Default)]
 pub struct VirtualChunkIndex {
     chunks: HashMap<VirtualChunkCoordinate, HashSet<ChunkReference>>,
@@ -40,11 +56,13 @@ pub struct VirtualChunkIndex {
 }
 
 impl VirtualChunkIndex {
-    /// Returns all known chunks stored in virtual chunks intersecting the sphere.
+    /// Returns deduplicated broad-phase candidates for an absolute-space sphere.
     ///
-    /// Callers only provide an absolute-space `f(x, y, z, radius)` query. Ownership
-    /// by a local coordinate remains an implementation detail of the returned
-    /// references.
+    /// A candidate's indexed virtual cell intersects the sphere; the chunk's
+    /// transformed bounds or voxel content may not. Non-finite centers/radii and
+    /// negative radii return an empty set. Result iteration order is unspecified.
+    /// The query scans either relevant cells or all occupied cells, whichever is
+    /// estimated cheaper.
     pub fn chunks_in_radius(&self, x: f64, y: f64, z: f64, radius: f64) -> HashSet<ChunkReference> {
         let center = [x, y, z];
         if !radius.is_finite()
@@ -68,30 +86,11 @@ impl VirtualChunkIndex {
         }
         virtual_chunks_intersecting_radius(center, radius)
             .into_iter()
-            .filter_map(|coordinate| self.chunks.get(&coordinate))
-            .flat_map(|chunks| chunks.iter().copied())
-            .collect()
-    }
-
-    /// Returns known chunks within a periodic scene-space radius.
-    ///
-    /// Queries the nearest image on each side of every torus seam and deduplicates
-    /// canonical Chunk references.
-    pub fn chunks_in_torus_radius(
-        &self,
-        center: [f64; 3],
-        radius: f64,
-        extent: [f32; 3],
-    ) -> HashSet<ChunkReference> {
-        if extent.iter().any(|axis| !axis.is_finite() || *axis <= 0.0) {
-            return HashSet::new();
-        }
-        self.chunks
-            .iter()
-            .filter(|(coordinate, _)| {
-                virtual_chunk_intersects_torus_radius(**coordinate, center, radius, extent)
+            .filter_map(|coordinate| {
+                let chunks = self.chunks.get(&coordinate);
+                chunks
             })
-            .flat_map(|(_, chunks)| chunks.iter().copied())
+            .flat_map(|chunks| chunks.iter().copied())
             .collect()
     }
 
@@ -99,7 +98,8 @@ impl VirtualChunkIndex {
         &self,
         coordinate: VirtualChunkCoordinate,
     ) -> Option<&HashSet<ChunkReference>> {
-        self.chunks.get(&coordinate)
+        let chunks = self.chunks.get(&coordinate);
+        chunks
     }
 
     fn remove_reference(&mut self, chunk_reference: ChunkReference) {
@@ -108,9 +108,11 @@ impl VirtualChunkIndex {
         };
         for coordinate in coordinates {
             if let Some(chunks) = self.chunks.get_mut(&coordinate) {
-                chunks.remove(&chunk_reference);
+                let removed = chunks.remove(&chunk_reference);
+                debug_assert!(removed, "reverse Virtual Chunk reference must exist");
                 if chunks.is_empty() {
-                    self.chunks.remove(&coordinate);
+                    let removed_bucket = self.chunks.remove(&coordinate);
+                    debug_assert!(removed_bucket.is_some());
                 }
             }
         }
@@ -123,10 +125,16 @@ impl VirtualChunkIndex {
             .filter(|reference| reference.local_coordinate_entity == entity)
             .copied()
             .collect::<Vec<_>>();
+        let had_references = !references.is_empty();
         for reference in references {
             self.remove_reference(reference);
         }
-        self.entity_transforms.remove(&entity);
+        let removed_transform = self.entity_transforms.remove(&entity);
+        if removed_transform.is_none() && had_references {
+            log::warn!(
+                "Virtual Chunk index removed references without a tracked transform: entity={entity:?}"
+            );
+        }
     }
 
     pub(crate) fn insert(
@@ -148,6 +156,11 @@ impl VirtualChunkIndex {
     }
 }
 
+/// Reconciles stale entities, transform changes, and dirty chunks into the index.
+///
+/// A transform change rebuilds every chunk reference owned by that entity;
+/// otherwise only positions listed in `LocalCoordinate::changed_chunks` are
+/// revisited. This system observes but does not clear that dirty set.
 pub(crate) fn rebuild_virtual_chunk_index(
     mut index: ResMut<VirtualChunkIndex>,
     local_coordinates: Query<(Entity, &LocalCoordinate, &GlobalTransform)>,
@@ -186,6 +199,7 @@ pub(crate) fn rebuild_virtual_chunk_index(
     }
 }
 
+// Maps the transformed eight-corner AABB to every half-open virtual cell it spans.
 fn virtual_coordinates_for_chunk(
     local_chunk_position: IVec3,
     transform: &GlobalTransform,
@@ -255,43 +269,7 @@ fn virtual_chunk_intersects_radius(
     distance_squared <= radius * radius
 }
 
-fn virtual_chunk_intersects_torus_radius(
-    coordinate: VirtualChunkCoordinate,
-    center: [f64; 3],
-    radius: f64,
-    extent: [f32; 3],
-) -> bool {
-    if !radius.is_finite()
-        || radius < 0.0
-        || center.iter().any(|coordinate| !coordinate.is_finite())
-    {
-        return false;
-    }
-    let edge = VIRTUAL_CHUNK_EDGE_LENGTH as f64;
-    let distance_squared = (0..3)
-        .map(|axis| {
-            let minimum = coordinate[axis] as f64 * edge;
-            let maximum = minimum + edge;
-            let axis_extent = f64::from(extent[axis]);
-            [-axis_extent, 0.0, axis_extent]
-                .into_iter()
-                .map(|offset| {
-                    if center[axis] < minimum + offset {
-                        minimum + offset - center[axis]
-                    } else if center[axis] > maximum + offset {
-                        center[axis] - maximum - offset
-                    } else {
-                        0.0
-                    }
-                })
-                .reduce(f64::min)
-                .unwrap_or(f64::INFINITY)
-                .powi(2)
-        })
-        .sum::<f64>();
-    distance_squared <= radius * radius
-}
-
+// Enumerates virtual AABBs whose closed bounds intersect the query sphere.
 fn virtual_chunks_intersecting_radius(
     center: [f64; 3],
     radius: f64,
@@ -386,24 +364,6 @@ mod tests {
                 ChunkReference::new(second, IVec3::X),
             ])
         );
-    }
-
-    #[test]
-    fn torus_radius_query_crosses_the_scene_seam() {
-        let mut world = bevy::prelude::World::new();
-        let near_zero = world.spawn_empty().id();
-        let near_end = world.spawn_empty().id();
-        let mut index = VirtualChunkIndex::default();
-        index.insert(near_zero, IVec3::ZERO, &GlobalTransform::default());
-        index.insert(
-            near_end,
-            IVec3::new(1023, 0, 0),
-            &GlobalTransform::default(),
-        );
-
-        let chunks = index.chunks_in_torus_radius([0.0, 8.0, 8.0], 16.0, [16_384.0; 3]);
-        assert!(chunks.contains(&ChunkReference::new(near_zero, IVec3::ZERO)));
-        assert!(chunks.contains(&ChunkReference::new(near_end, IVec3::new(1023, 0, 0))));
     }
 
     #[test]

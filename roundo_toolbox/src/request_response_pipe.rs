@@ -1,6 +1,7 @@
 use crossbeam::channel::{self, Receiver, Sender, TryRecvError, TrySendError};
 use serde_json::Value;
 
+/// Maximum serialized JSON command size admitted to a request queue.
 pub const MAX_JSON_REQUEST_BYTES: usize = 64 * 1024;
 
 /// A typed JSON command plus adapter-owned transport context. `command` is
@@ -20,11 +21,19 @@ pub struct RequestResponsePipe<Request, Response> {
     receiver: Receiver<(Request, Sender<Response>)>,
 }
 
+/// Clonable producer for one shared bounded request queue.
+///
+/// Clones do not create independent queues. [`submit`](Self::submit) is
+/// non-blocking and each accepted call receives its own one-shot response.
 #[derive(Clone)]
 pub struct RequestResponseIo<Request, Response> {
     sender: Sender<(Request, Sender<Response>)>,
 }
 
+/// Handle for the response to exactly one accepted request.
+///
+/// Dropping it disconnects that response path; it does not cancel work already
+/// dequeued by the consumer.
 pub struct RequestCall<Response>(Receiver<Response>);
 
 /// Source-neutral JSON request adapter which limits serialized input before it
@@ -43,6 +52,7 @@ pub struct ContextualJsonRequestResponseIo<Context, Response> {
     inner: RequestResponseIo<CommandTransport<Context>, Response>,
 }
 
+/// Failure to admit a JSON request; no request is queued on any variant.
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum JsonSubmitError {
     Full,
@@ -50,6 +60,7 @@ pub enum JsonSubmitError {
     InputTooLarge { command: String },
 }
 
+/// Failure to admit a typed request; no request is queued on either variant.
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum SubmitError {
     Full,
@@ -57,17 +68,27 @@ pub enum SubmitError {
 }
 
 impl<Request, Response> RequestResponsePipe<Request, Response> {
+    /// Creates a pipe whose shared request queue holds at most `capacity` items.
+    ///
+    /// A zero capacity creates a rendezvous channel: non-blocking submission
+    /// succeeds only while a receiver is ready.
     pub fn bounded(capacity: usize) -> Self {
         let (sender, receiver) = channel::bounded(capacity);
         Self { sender, receiver }
     }
 
+    /// Clones a producer connected to this pipe's request queue.
     pub fn io(&self) -> RequestResponseIo<Request, Response> {
         RequestResponseIo {
             sender: self.sender.clone(),
         }
     }
 
+    /// Attempts to dequeue one request without blocking.
+    ///
+    /// `None` means either that the queue is currently empty or that all
+    /// producers are disconnected; this API intentionally does not distinguish
+    /// those states. Accepted requests are returned in channel FIFO order.
     pub fn try_receive(&self) -> Option<(Request, ResponseSender<Response>)> {
         self.receiver
             .try_recv()
@@ -76,14 +97,20 @@ impl<Request, Response> RequestResponsePipe<Request, Response> {
     }
 }
 
+/// Consuming sender for one request's private response channel.
 pub struct ResponseSender<Response>(Sender<Response>);
 impl<Response> ResponseSender<Response> {
+    /// Delivers the response, returning ownership when the caller disappeared.
     pub fn respond(self, response: Response) -> Result<(), Response> {
-        self.0.send(response).map_err(|error| error.0)
+        return self.0.send(response).map_err(|error| error.0);
     }
 }
 
 impl<Request, Response> RequestResponseIo<Request, Response> {
+    /// Attempts non-blocking admission to the shared request queue.
+    ///
+    /// Success transfers ownership of `request` to the consumer. Failure drops
+    /// the request because [`SubmitError`] does not carry it back.
     pub fn submit(&self, request: Request) -> Result<RequestCall<Response>, SubmitError> {
         let (sender, receiver) = channel::bounded(1);
         match self.sender.try_send((request, sender)) {
@@ -100,8 +127,8 @@ impl<Response> JsonRequestResponseIo<Response> {
     }
 
     pub fn submit(&self, request: Value) -> Result<RequestCall<Response>, JsonSubmitError> {
-        let command = request
-            .get("command")
+        let command_value = request.get("command");
+        let command = command_value
             .and_then(Value::as_str)
             .unwrap_or_default()
             .to_owned();
@@ -129,8 +156,8 @@ impl<Context, Response> ContextualJsonRequestResponseIo<Context, Response> {
         command: Value,
         context: Context,
     ) -> Result<RequestCall<Response>, JsonSubmitError> {
-        let command_name = command
-            .get("command")
+        let command_value = command.get("command");
+        let command_name = command_value
             .and_then(Value::as_str)
             .unwrap_or_default()
             .to_owned();
@@ -153,12 +180,17 @@ impl<Context, Response> ContextualJsonRequestResponseIo<Context, Response> {
 }
 
 impl<Response> RequestCall<Response> {
+    /// Attempts to receive the response without blocking.
+    ///
+    /// `None` means either pending or disconnected; call sites needing that
+    /// distinction require a richer protocol.
     pub fn try_result(&self) -> Option<Response> {
         match self.0.try_recv() {
             Ok(value) => Some(value),
             Err(TryRecvError::Empty | TryRecvError::Disconnected) => None,
         }
     }
+    /// Blocks the current OS thread until a response arrives or its sender drops.
     pub fn wait(self) -> Option<Response> {
         self.0.recv().ok()
     }

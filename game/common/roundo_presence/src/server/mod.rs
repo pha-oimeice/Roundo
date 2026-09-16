@@ -1,3 +1,5 @@
+//! Server presence plugin, IPC contracts, and ECS marker components.
+
 mod systems;
 
 use crate::{NearbyPlayer, Player, PlayerId, PlayerState, PresenceSnapshot, SceneId};
@@ -12,14 +14,14 @@ use roundo_toolbox::{
 use std::collections::HashMap;
 
 pub const DEFAULT_PRESENCE_RADIUS: f32 = 128.0;
-pub const DEFAULT_S0_ROOM_SIZE: [f32; 3] = [32.0; 3];
-pub const DEFAULT_S1_EDGE_LENGTH: f32 = 16_384.0;
 const S1_SPAWN_TRANSLATION: Vec3 = Vec3::new(0.0, 2.0, 0.0);
 
+/// Network-facing endpoint for presence commands and events.
 pub type PresenceServerIpc =
     CrossbeamThreadPipeEndpointA<PresenceServerCommand, PresenceServerEvent>;
 
 #[derive(Clone)]
+/// Installs authoritative presence systems on the fixed schedule.
 pub struct RoundoPresenceServerPlugin {
     pipe: CrossbeamThreadPipe<PresenceServerCommand, PresenceServerEvent>,
 }
@@ -43,14 +45,15 @@ impl Default for RoundoPresenceServerPlugin {
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, SystemSet)]
+/// Fixed-update ordering boundaries for presence publication.
 pub enum PresenceServerSet {
     Commands,
-    SceneConstraints,
     PlayerStates,
     Snapshots,
 }
 
 #[derive(Resource, Clone, Copy, Debug)]
+/// Runtime bounds for nearby-player and world discovery.
 pub struct PresenceServerSettings {
     pub radius: f32,
 }
@@ -77,92 +80,15 @@ fn valid_positive(value: f32, fallback: f32) -> f32 {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct TorusSpace {
-    size: [f32; 3],
-}
-
-impl TorusSpace {
-    pub fn new(size: [f32; 3]) -> Option<Self> {
-        size.iter()
-            .all(|extent| extent.is_finite() && *extent > 0.0)
-            .then_some(Self { size })
-    }
-
-    pub const fn size(self) -> [f32; 3] {
-        self.size
-    }
-
-    pub fn wrap(self, translation: Vec3) -> Vec3 {
-        Vec3::new(
-            translation.x.rem_euclid(self.size[0]),
-            translation.y.rem_euclid(self.size[1]),
-            translation.z.rem_euclid(self.size[2]),
-        )
-    }
-
-    fn distance_squared(self, first: Vec3, second: Vec3) -> f32 {
-        (0..3)
-            .map(|axis| {
-                let difference = (first[axis] - second[axis]).abs();
-                difference.min(self.size[axis] - difference).powi(2)
-            })
-            .sum()
-    }
-}
-
-#[derive(Resource)]
-pub struct ServerSceneWorlds {
-    s0_rooms: HashMap<u64, TorusSpace>,
-    s1: TorusSpace,
-}
-
-impl ServerSceneWorlds {
-    pub fn resize_s0_room(&mut self, room_id: u64, size: [f32; 3]) -> bool {
-        let Some(space) = TorusSpace::new(size) else {
-            return false;
-        };
-        self.s0_rooms.insert(room_id, space);
-        true
-    }
-
-    pub fn remove_s0_room(&mut self, room_id: u64) -> bool {
-        self.s0_rooms.remove(&room_id).is_some()
-    }
-
-    pub fn space(&self, scene_id: SceneId) -> Option<TorusSpace> {
-        match scene_id {
-            SceneId::S0 { room_id } => self.s0_rooms.get(&room_id).copied(),
-            SceneId::S1 => Some(self.s1),
-        }
-    }
-
-    pub fn spaces(&self) -> impl Iterator<Item = (SceneId, TorusSpace)> + '_ {
-        std::iter::once((SceneId::S1, self.s1)).chain(
-            self.s0_rooms
-                .iter()
-                .map(|(room_id, space)| (SceneId::S0 { room_id: *room_id }, *space)),
-        )
-    }
-}
-
-impl Default for ServerSceneWorlds {
-    fn default() -> Self {
-        Self {
-            s0_rooms: HashMap::new(),
-            s1: TorusSpace::new([DEFAULT_S1_EDGE_LENGTH; 3])
-                .expect("the default S1 dimensions are valid"),
-        }
-    }
-}
-
 #[derive(Clone, Debug)]
+/// Connection lifecycle changes consumed by the presence domain.
 pub enum PresenceServerCommand {
     Connect { connection_id: ConnectionId },
     Disconnect { connection_id: ConnectionId },
 }
 
 #[derive(Clone, Debug)]
+/// Identity, transform, and snapshot updates returned to networking.
 pub enum PresenceServerEvent {
     PlayerJoined {
         connection_id: ConnectionId,
@@ -179,6 +105,7 @@ pub enum PresenceServerEvent {
 }
 
 #[derive(Component, Clone, Copy, Debug, Default)]
+/// Marks entities owned by the authoritative presence server.
 pub struct ServerPlayer;
 
 /// Transport identity associated with a server-side Presence Player.

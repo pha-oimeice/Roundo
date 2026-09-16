@@ -1,3 +1,5 @@
+//! QUIC endpoint setup and deterministic pairing of prioritized streams.
+
 use super::NetworkError;
 use crate::protocol::StreamId;
 use quinn::crypto::rustls::{QuicClientConfig, QuicServerConfig};
@@ -8,13 +10,16 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 
+// ALPN prevents negotiation with unrelated QUIC applications.
 const ALPN_PROTOCOL: &[u8] = b"roundo-quic-v1";
 
+/// Paired bidirectional adapters for the two protocol priorities.
 pub(super) struct StreamPairs {
     pub(super) stream0: PairedStream,
     pub(super) stream1: PairedStream,
 }
 
+/// Combines independently opened QUIC send and receive streams.
 pub(super) struct PairedStream {
     receiver: RecvStream,
     sender: SendStream,
@@ -54,6 +59,7 @@ impl AsyncWrite for PairedStream {
     }
 }
 
+/// Builds a server endpoint from certificate and transport settings.
 pub(super) fn server_endpoint(
     address: SocketAddr,
     tls_config: Arc<rustls::ServerConfig>,
@@ -66,6 +72,7 @@ pub(super) fn server_endpoint(
     Endpoint::server(config, address).map_err(NetworkError::from_display)
 }
 
+/// Builds a client endpoint with the configured trust policy.
 pub(super) fn client_endpoint(
     remote_address: SocketAddr,
     tls_config: Arc<rustls::ClientConfig>,
@@ -85,18 +92,26 @@ pub(super) fn client_endpoint(
     Ok(endpoint)
 }
 
-pub(super) async fn connect(
+/// Completes a remote QUIC handshake.
+pub(super) async fn dial(
     endpoint: &Endpoint,
     address: SocketAddr,
     server_name: &str,
 ) -> Result<Connection, NetworkError> {
-    endpoint
-        .connect(address, server_name)
-        .map_err(NetworkError::from_display)?
-        .await
-        .map_err(NetworkError::from_display)
+    let connection_attempt = endpoint.connect(address, server_name);
+    let connecting = connection_attempt.map_err(|error| {
+        NetworkError::new(format!(
+            "cannot begin QUIC connection to {server_name} at {address}: {error}"
+        ))
+    })?;
+    connecting.await.map_err(|error| {
+        NetworkError::new(format!(
+            "QUIC connection to {server_name} at {address} failed: {error}"
+        ))
+    })
 }
 
+/// Opens and accepts both priorities, then pairs them by stream ID.
 pub(super) async fn establish_streams(
     connection: &Connection,
 ) -> Result<StreamPairs, NetworkError> {
@@ -114,22 +129,26 @@ pub(super) async fn establish_streams(
     })
 }
 
+/// Locally opened send halves keyed by protocol stream.
 struct Senders {
     stream0: SendStream,
     stream1: SendStream,
 }
 
+/// Remotely opened receive halves keyed by protocol stream.
 struct Receivers {
     stream0: RecvStream,
     stream1: RecvStream,
 }
 
+// Streams are opened sequentially to assign explicit priorities.
 async fn open_senders(connection: &Connection) -> Result<Senders, NetworkError> {
     let stream0 = open_sender(connection, StreamId::Stream0).await?;
     let stream1 = open_sender(connection, StreamId::Stream1).await?;
     Ok(Senders { stream0, stream1 })
 }
 
+// The stream ID prefix precedes framed application data.
 async fn open_sender(
     connection: &Connection,
     stream_id: StreamId,
@@ -148,6 +167,7 @@ async fn open_sender(
     Ok(sender)
 }
 
+// Quinn assigns larger values greater scheduling priority.
 const fn quinn_priority(stream_id: StreamId) -> i32 {
     match stream_id {
         StreamId::Stream0 => 1,
@@ -155,6 +175,7 @@ const fn quinn_priority(stream_id: StreamId) -> i32 {
     }
 }
 
+// Pairing rejects duplicate and unknown stream identifiers.
 async fn accept_receivers(connection: &Connection) -> Result<Receivers, NetworkError> {
     let mut stream0 = None;
     let mut stream1 = None;
@@ -188,6 +209,7 @@ async fn accept_receivers(connection: &Connection) -> Result<Receivers, NetworkE
     })
 }
 
+// Shared limits bound idle lifetime and concurrent streams.
 fn transport_config() -> Arc<quinn::TransportConfig> {
     let mut config = quinn::TransportConfig::default();
     config

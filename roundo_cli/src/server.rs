@@ -1,3 +1,9 @@
+//! Server-console projection into the shared typed JSON command dispatcher.
+//!
+//! Terminal text is tokenized and projected into versioned JSON envelopes before
+//! execution against the Bevy main world. Unix aliases never create independent
+//! command identities or schemas.
+
 use crate::{
     TerminalInput,
     json_command::{
@@ -9,11 +15,13 @@ use bevy::{
     app::AppExit,
     prelude::{App, MessageWriter, Query, Res, ResMut, Resource, Transform, Update, Vec3, With},
 };
-use roundo_presence::{Player, PlayerScene, SceneId, ServerPlayer, ServerSceneWorlds};
+use roundo_presence::{Player, PlayerScene, SceneId, ServerPlayer};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
 
+// Discovery metadata in deterministic display order. Dev level controls catalog
+// visibility only; it is not an authorization boundary for direct dispatch.
 const SERVER_COMMANDS: &[(&str, u8)] = &[
     ("app.quit", 0),
     ("command.help", 0),
@@ -24,9 +32,11 @@ const SERVER_COMMANDS: &[(&str, u8)] = &[
     ("command.schema", 1),
 ];
 
+/// Console-local command discovery level, restricted by the `dev` handler to 0..=3.
 #[derive(Resource, Default)]
 struct ServerDevLevel(u8);
 
+/// Canonical Unix paths and adapter-only aliases for server commands.
 #[derive(Resource)]
 struct ServerUnixAdapter {
     registry: UnixCommandRegistry,
@@ -133,6 +143,7 @@ struct DevOutput {
     level: u8,
 }
 
+// Keeps each canonical JSON name, input, output, and discovery level co-located.
 macro_rules! definition {
     ($name:ident, $input:ty, $output:ty, $command:literal, $level:literal) => {
         struct $name;
@@ -303,6 +314,7 @@ impl ClientCommandDefinition for UnixDev {
     const DEV_LEVEL: u8 = 0;
 }
 
+/// Installs console resources and per-update command draining.
 pub(super) fn configure(app: &mut App) {
     println!("[cli] Roundo server console ready; type 'help' for available commands");
     app.init_resource::<ServerDevLevel>();
@@ -315,7 +327,6 @@ pub(super) fn configure(app: &mut App) {
 fn process_commands(
     input: Res<TerminalInput>,
     adapter: Res<ServerUnixAdapter>,
-    scenes: Res<ServerSceneWorlds>,
     mut players: Query<(&Player, &PlayerScene, &mut Transform), With<ServerPlayer>>,
     mut dev_level: ResMut<ServerDevLevel>,
     mut app_exit: MessageWriter<AppExit>,
@@ -324,16 +335,19 @@ fn process_commands(
         let Some(request) = project_terminal_line(&adapter.registry, &line) else {
             continue;
         };
-        let response =
-            dispatch_typed_server_command(request, &scenes, &mut players, &mut dev_level);
+        let response = dispatch_typed_server_command(request, &mut players, &mut dev_level);
         let quit_accepted = response["command"] == "app.quit" && response["ok"] == true;
         print_response(response);
         if quit_accepted {
-            app_exit.write(AppExit::Success);
+            let _exit_message = app_exit.write(AppExit::Success);
         }
     }
 }
 
+/// Projects one terminal line into a typed envelope or structured error.
+///
+/// Empty/token-only whitespace lines return `None`; tokenization and argument
+/// failures return an error envelope rather than bypassing typed dispatch.
 fn project_terminal_line(registry: &UnixCommandRegistry, line: &str) -> Option<serde_json::Value> {
     let tokens = match tokenize_unix_line(line) {
         Ok(tokens) if tokens.is_empty() => return None,
@@ -358,6 +372,7 @@ fn project_terminal_line(registry: &UnixCommandRegistry, line: &str) -> Option<s
     })
 }
 
+/// Parses one Unix teleport coordinate and rejects non-finite `f32` values.
 fn parse_finite_coordinate(
     value: &str,
     argument_number: usize,
@@ -374,9 +389,12 @@ fn parse_finite_coordinate(
     }
 }
 
+/// Builds the source-neutral registry over short-lived main-world borrows and dispatches once.
+///
+/// Player lists are sorted by identity before serialization. Teleport mutation
+/// occurs only after complete envelope and typed-input validation.
 fn dispatch_typed_server_command(
     request: serde_json::Value,
-    scenes: &ServerSceneWorlds,
     players: &mut Query<(&Player, &PlayerScene, &mut Transform), With<ServerPlayer>>,
     dev_level: &mut ServerDevLevel,
 ) -> serde_json::Value {
@@ -423,7 +441,7 @@ fn dispatch_typed_server_command(
     });
     registry.register_typed::<PlayerTeleportDefinition>(|input, _| {
         let mut players = players.borrow_mut();
-        let Some((_, scene, mut transform)) = players
+        let Some((_, _, mut transform)) = players
             .iter_mut()
             .find(|(player, _, _)| player.id.0 == input.player_id)
         else {
@@ -432,13 +450,7 @@ fn dispatch_typed_server_command(
                 format!("player {} was not found", input.player_id),
             ));
         };
-        let Some(space) = scenes.space(scene.scene_id) else {
-            return Err(CommandError::new(
-                "scene_unavailable",
-                format!("scene {} is unavailable", scene_name(scene.scene_id)),
-            ));
-        };
-        transform.translation = space.wrap(Vec3::from_array(input.translation));
+        transform.translation = Vec3::from_array(input.translation);
         Ok(PlayerTeleportOutput {
             player_id: input.player_id,
             position: [
@@ -483,6 +495,7 @@ fn dispatch_typed_server_command(
     registry.dispatch_value(request, &mut ())
 }
 
+/// Generates the requested command's schema from its canonical typed definition.
 fn server_command_schema(command: &str) -> Result<serde_json::Value, CommandError> {
     macro_rules! schema {
         ($definition:ty) => {
@@ -508,6 +521,7 @@ fn server_command_schema(command: &str) -> Result<serde_json::Value, CommandErro
     }
 }
 
+/// Returns catalog names whose discovery level does not exceed `level`.
 fn visible_commands(level: u8) -> Vec<&'static str> {
     SERVER_COMMANDS
         .iter()
@@ -515,12 +529,14 @@ fn visible_commands(level: u8) -> Vec<&'static str> {
         .collect()
 }
 
+/// Looks up discovery metadata by canonical JSON command name.
 fn command_dev_level(name: &str) -> Option<u8> {
     SERVER_COMMANDS
         .iter()
         .find_map(|(known, level)| (*known == name).then_some(*level))
 }
 
+/// Constructs the same versioned error shape returned by typed dispatch.
 fn terminal_error(command: &str, code: &str, message: impl std::fmt::Display) -> serde_json::Value {
     serde_json::json!({
         "version": crate::json_command::COMMAND_VERSION,
@@ -534,6 +550,7 @@ fn print_response(response: serde_json::Value) {
     println!("{response}");
 }
 
+/// Formats a scene identity for human-facing console output.
 fn scene_name(scene: SceneId) -> String {
     match scene {
         SceneId::S0 { room_id } => format!("S0/{room_id}"),
@@ -614,8 +631,7 @@ mod tests {
     #[test]
     fn teleport_updates_the_authoritative_player_transform_through_the_registry() {
         let mut app = App::new();
-        app.init_resource::<ServerSceneWorlds>()
-            .insert_resource(TerminalInput::buffered(["tp 7 -1 2 3"]))
+        app.insert_resource(TerminalInput::buffered(["tp 7 -1 2 3"]))
             .init_resource::<ServerDevLevel>()
             .init_resource::<ServerUnixAdapter>()
             .add_message::<AppExit>()
@@ -636,7 +652,7 @@ mod tests {
         app.update();
         assert_eq!(
             app.world().get::<Transform>(player).unwrap().translation,
-            Vec3::new(16_383.0, 2.0, 3.0)
+            Vec3::new(-1.0, 2.0, 3.0)
         );
     }
 
@@ -644,23 +660,11 @@ mod tests {
     fn schemas_and_discovery_are_typed_definition_metadata() {
         let schema = server_command_schema("player.teleport").unwrap();
         assert_eq!(schema["command"], "player.teleport");
-        assert!(
-            schema["success"]["properties"]["data"]["properties"]
-                .get("player_id")
-                .is_some()
-        );
+        assert!(!schema["success"]["properties"]["data"]["properties"]["player_id"].is_null());
         let list = server_command_schema("players.list").unwrap();
-        assert!(
-            list["success"]["properties"]["data"]["properties"]
-                .get("players")
-                .is_some()
-        );
+        assert!(!list["success"]["properties"]["data"]["properties"]["players"].is_null());
         let position = server_command_schema("player.position").unwrap();
-        assert!(
-            position["success"]["properties"]["data"]["properties"]
-                .get("scene")
-                .is_some()
-        );
+        assert!(!position["success"]["properties"]["data"]["properties"]["scene"].is_null());
         assert_eq!(command_dev_level("player.position"), Some(0));
         assert!(!visible_commands(0).contains(&"command.schema"));
     }

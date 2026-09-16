@@ -1,3 +1,9 @@
+//! Finite world-space voxel raycasts over the virtual-chunk broad-phase index.
+//!
+//! Traversal first visits absolute virtual cells, then transforms each candidate
+//! chunk ray into local-coordinate space and performs voxel-grid DDA. Candidate
+//! chunks may be tested in parallel; equal-distance tie identity is unspecified.
+
 use crate::local_coordinate::{
     data::{AtomicVoxel, CHUNK_EDGE_LENGTH, Chunk, LocalCoordinate},
     virtual_chunk::{
@@ -13,7 +19,11 @@ use bevy::{
 
 const DIRECTION_EPSILON: f32 = 1.0e-7;
 
-/// The nearest solid voxel intersected by a finite world-space ray.
+/// The nearest nonempty voxel intersected by a finite world-space ray.
+///
+/// All world-space values use the normalized input ray's distance parameter.
+/// The chunk reference is a logical index result and can become stale after ECS
+/// mutation; callers should consume it in the frame in which it was produced.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct VoxelRaycastHit {
     /// World-space entry point on the voxel.
@@ -28,7 +38,10 @@ pub struct VoxelRaycastHit {
     pub voxel_relative_position: IVec3,
     /// Atomic voxel identifier at the hit position.
     pub voxel: AtomicVoxel,
-    /// Local-coordinate-space voxel traversed immediately before the hit voxel.
+    /// Owning-coordinate voxel immediately before entry along the traversal.
+    ///
+    /// When the ray starts inside a solid voxel, this is chosen opposite the
+    /// dominant local ray axis rather than from an actually traversed empty cell.
     pub previous_voxel_position: IVec3,
 }
 
@@ -39,7 +52,10 @@ impl VoxelRaycastHit {
     }
 }
 
-/// Read-only client system parameter for finite voxel raycasts.
+/// Read-only ECS system parameter for finite voxel raycasts.
+///
+/// It reads the latest [`VirtualChunkIndex`] snapshot and resolves candidates
+/// against currently live coordinate entities and chunks.
 #[derive(SystemParam)]
 pub struct VoxelRaycaster<'w, 's> {
     virtual_chunks: Res<'w, VirtualChunkIndex>,
@@ -47,7 +63,10 @@ pub struct VoxelRaycaster<'w, 's> {
 }
 
 impl VoxelRaycaster<'_, '_> {
-    /// Casts from a camera's world-space origin along its forward axis.
+    /// Casts from a camera's world-space translation along its forward axis.
+    ///
+    /// Returns `None` for an invalid maximum distance or when no indexed nonempty
+    /// voxel is intersected.
     pub fn cast_from_camera(
         &self,
         camera_transform: &GlobalTransform,
@@ -59,16 +78,19 @@ impl VoxelRaycaster<'_, '_> {
         )
     }
 
-    /// Casts a world-space ray up to the required positive finite distance.
+    /// Returns the nearest hit no farther than `max_distance` world units.
+    ///
+    /// `max_distance` and the ray origin/direction must be finite, and distance
+    /// must be positive. Invalid input, stale broad-phase references, missing or
+    /// empty chunks, and non-invertible coordinate transforms are skipped. If
+    /// multiple voxels tie exactly, which identity wins is unspecified.
     pub fn cast(&self, ray: Ray3d, max_distance: f32) -> Option<VoxelRaycastHit> {
         raycast_virtual_chunks(&self.virtual_chunks, ray, max_distance, |chunk_reference| {
-            let (local_coordinate, transform) = self
-                .local_coordinates
-                .get(chunk_reference.local_coordinate_entity())
-                .ok()?;
-            let chunk = local_coordinate
-                .chunks
-                .get(&chunk_reference.local_chunk_position())?;
+            let entity = chunk_reference.local_coordinate_entity();
+            let coordinate_result = self.local_coordinates.get(entity);
+            let (local_coordinate, transform) = coordinate_result.ok()?;
+            let chunk_position = chunk_reference.local_chunk_position();
+            let chunk = local_coordinate.chunks.get(&chunk_position)?;
             Some(ChunkCandidate {
                 chunk_reference,
                 chunk,
@@ -92,6 +114,7 @@ struct RaySegment {
     exit_distance: f32,
 }
 
+// Traverses cells front-to-back, allowing the first segment-local hit to terminate.
 fn raycast_virtual_chunks<'a>(
     index: &VirtualChunkIndex,
     ray: Ray3d,
@@ -128,6 +151,7 @@ fn valid_raycast(ray: Ray3d, max_distance: f32) -> bool {
         && ray.direction.as_vec3().is_finite()
 }
 
+// Parallelizes only multi-candidate cells and reduces results by world distance.
 fn raycast_chunks(
     candidates: Vec<ChunkCandidate<'_>>,
     ray: Ray3d,
@@ -156,6 +180,7 @@ fn raycast_chunks(
     .min_by(|first, second| first.distance.total_cmp(&second.distance))
 }
 
+// Preserves the world-ray distance parameter while traversing in local space.
 fn raycast_chunk(
     candidate: ChunkCandidate<'_>,
     ray: Ray3d,
@@ -400,6 +425,7 @@ fn axis_vector(axis: usize, direction: i32) -> Vec3 {
     vector
 }
 
+/// Front-to-back DDA over absolute virtual cells, clipped to a finite distance.
 struct VirtualChunkTraversal {
     max_distance: f32,
     coordinate: VirtualChunkCoordinate,

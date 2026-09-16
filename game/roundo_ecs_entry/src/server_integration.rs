@@ -2,18 +2,19 @@
 
 use bevy::prelude::{
     Added, App, Commands, Entity, FixedUpdate, GlobalTransform, IntoScheduleConfigs, Plugin, Query,
-    Res, ResMut, Update, With,
+    ResMut, Update, With,
 };
 use roundo_local_coordinate::{
     LocalCoordinateObservationInput, LocalCoordinateObserver, LocalCoordinateServerSet,
 };
 use roundo_marionette::{MarionetteServerSet, NetworkControllerTarget, PlayerControllers};
-use roundo_presence::{
-    Player, PlayerConnection, PlayerScene, PresenceServerSet, ServerPlayer, ServerSceneWorlds,
-};
-use std::collections::HashMap;
+use roundo_presence::{Player, PlayerConnection, PlayerScene, PresenceServerSet, ServerPlayer};
 
-/// Owns server-only entity composition and schedule relations across domains.
+/// Owns the narrow server-only seams between Presence, Marionette, and streaming.
+///
+/// Presence remains the authority that creates players. This plugin attaches
+/// controller ownership before Marionette consumes commands and publishes a
+/// complete observation snapshot before coordinate streaming prepares demand.
 pub(crate) struct ServerDomainIntegrationPlugin;
 
 impl Plugin for ServerDomainIntegrationPlugin {
@@ -21,10 +22,6 @@ impl Plugin for ServerDomainIntegrationPlugin {
         app.configure_sets(
             FixedUpdate,
             PresenceServerSet::Commands.before(MarionetteServerSet::Commands),
-        )
-        .configure_sets(
-            FixedUpdate,
-            PresenceServerSet::SceneConstraints.after(MarionetteServerSet::Movement),
         )
         .add_systems(
             FixedUpdate,
@@ -39,6 +36,7 @@ impl Plugin for ServerDomainIntegrationPlugin {
     }
 }
 
+// Composes each newly added Presence player with connection-routed controllers.
 fn attach_player_control(
     mut commands: Commands,
     players: Query<(Entity, &PlayerConnection), (With<ServerPlayer>, Added<ServerPlayer>)>,
@@ -53,25 +51,22 @@ fn attach_player_control(
     }
 }
 
+// Replaces the streaming observer snapshot from all currently live server players.
+// Query iteration order is unspecified; duplicate PlayerId handling is therefore
+// not deterministic, but Presence is expected to maintain unique player identities.
 fn publish_local_coordinate_observations(
-    scenes: Res<ServerSceneWorlds>,
     players: Query<(&Player, &PlayerScene, &GlobalTransform), With<ServerPlayer>>,
     mut input: ResMut<LocalCoordinateObservationInput>,
 ) {
-    let scene_extents = scenes
-        .spaces()
-        .map(|(scene_id, space)| (scene_id, space.size()))
-        .collect::<HashMap<_, _>>();
     let observers = players
         .iter()
-        .filter(|(_, scene, _)| scene_extents.contains_key(&scene.scene_id))
         .map(|(player, scene, transform)| LocalCoordinateObserver {
             player_id: player.id,
             scene_id: scene.scene_id,
             position: transform.translation().as_dvec3().to_array(),
         })
         .collect::<Vec<_>>();
-    input.replace(observers, scene_extents);
+    input.replace(observers);
 }
 
 #[cfg(test)]
@@ -83,6 +78,7 @@ mod tests {
         PlayerControllerCommand, ServerMarionetteCommand,
     };
     use roundo_presence::{PresenceServerCommand, RoundoPresenceServerPlugin};
+    use std::time::Duration;
 
     #[test]
     fn presence_players_are_composed_with_marionette_control() {
@@ -106,11 +102,14 @@ mod tests {
                 command: PlayerControllerCommand::Movement3D(ControllerCommand {
                     sequence: 1,
                     action: Movement3DAction {
-                        translation_delta: [0.0, 0.0, 5.0],
+                        direction: [0.0, 0.0, 1.0],
                     },
                 }),
             })
             .unwrap();
+        app.world_mut()
+            .resource_mut::<Time<Fixed>>()
+            .advance_by(Duration::from_secs_f32(0.2));
         app.world_mut().run_schedule(FixedUpdate);
 
         let transform = app
@@ -118,6 +117,6 @@ mod tests {
             .query_filtered::<&Transform, With<ServerPlayer>>()
             .single(app.world())
             .unwrap();
-        assert_eq!(transform.translation, Vec3::new(0.0, 2.0, 5.0));
+        assert_eq!(transform.translation, Vec3::new(0.0, 2.0, 1.0));
     }
 }

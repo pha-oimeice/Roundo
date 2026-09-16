@@ -135,7 +135,7 @@ impl StagedCommandGate {
         }
     }
 
-    pub(crate) fn commit(&mut self) -> Vec<String> {
+    pub(crate) fn release_queued(&mut self) -> Vec<String> {
         self.admitted = true;
         std::mem::take(&mut self.queued)
     }
@@ -168,13 +168,11 @@ pub struct UiNavigationExecutor {
     /// operation is allowed to reuse another instance's document.
     #[cfg(target_os = "windows")]
     committed: BTreeMap<UiInstanceId, WebViewOverlay>,
-    /// Presentations from the replaced Root remain physically visible until
-    /// the replacement Root has itself been made visible. They are no longer
-    /// live command sources in the lifecycle model.
+    /// Retiring presentations remain physically visible until their logical
+    /// replacement has been made visible. They are no longer live command
+    /// sources in the lifecycle model.
     #[cfg(target_os = "windows")]
     retiring: BTreeMap<UiInstanceId, WebViewOverlay>,
-    #[cfg(target_os = "windows")]
-    retained_root_presentations: Vec<UiInstanceId>,
     #[cfg(target_os = "windows")]
     staged: BTreeMap<u64, StagedWebView>,
     /// Graph-prefetched physical WebViews whose Mod documents are not loaded.
@@ -209,8 +207,6 @@ impl Default for UiNavigationExecutor {
             committed: BTreeMap::new(),
             #[cfg(target_os = "windows")]
             retiring: BTreeMap::new(),
-            #[cfg(target_os = "windows")]
-            retained_root_presentations: Vec::new(),
             #[cfg(target_os = "windows")]
             staged: BTreeMap::new(),
             #[cfg(target_os = "windows")]
@@ -295,25 +291,20 @@ impl UiNavigationExecutor {
     }
 
     #[cfg(target_os = "windows")]
-    fn supersede_staged_webview(&mut self, id: u64) {
-        if let Some(staged) = self
-            .staged
-            .remove(&id)
-            .or_else(|| self.prepared.remove(&id))
-        {
-            self.superseded_staged.insert(id, staged);
-        }
+    fn take_staged(&mut self, id: u64) -> Option<StagedWebView> {
+        let staged = self.staged.remove(&id);
+        staged
     }
 
     #[cfg(target_os = "windows")]
-    fn begin_root_presentation_handoff(
-        &mut self,
-        presentations: impl IntoIterator<Item = UiInstanceId>,
-    ) {
-        for id in presentations {
-            if !self.retained_root_presentations.contains(&id) {
-                self.retained_root_presentations.push(id);
-            }
+    fn supersede_staged_webview(&mut self, id: u64) {
+        let staged = self.staged.remove(&id);
+        let staged = staged.or_else(|| {
+            let prepared = self.prepared.remove(&id);
+            prepared
+        });
+        if let Some(staged) = staged {
+            self.superseded_staged.insert(id, staged);
         }
     }
 
@@ -321,19 +312,18 @@ impl UiNavigationExecutor {
     /// presentation. A pending or hidden replacement must leave coverage in
     /// place.
     #[cfg(target_os = "windows")]
-    fn finish_root_presentation_handoff(&mut self, replacement_visible: bool) -> bool {
-        if !replacement_visible || self.retained_root_presentations.is_empty() {
+    fn finish_presentation_handoff(&mut self, replacement_visible: bool) -> bool {
+        if !replacement_visible || self.retiring.is_empty() {
             return false;
         }
         for (id, overlay) in &self.retiring {
             log::info!(
-                "Destroying retained Web UI instance {} after Root presentation handoff",
-                id.get()
+                "Destroying retained Web UI instance {} after presentation handoff",
+                id.value()
             );
             dispatch_lifecycle_event(&overlay.webview, "roundo:destroying", "destroying");
         }
         self.retiring.clear();
-        self.retained_root_presentations.clear();
         true
     }
 
@@ -342,7 +332,7 @@ impl UiNavigationExecutor {
         self.load_timeout = timeout;
     }
 
-    pub fn open(
+    pub fn navigate(
         &mut self,
         state: &mut UiLifecycleManager,
         source: UiCommandSource,
@@ -366,7 +356,7 @@ impl UiNavigationExecutor {
                 .map(UiInstanceId::from_host_id),
         };
         #[cfg(not(target_os = "windows"))]
-        let opened = state.open(source, target);
+        let opened = state.open_immediately(source, target);
         if let Ok(id) = &opened {
             self.last_open_pending = Some(*id);
         }
@@ -386,8 +376,8 @@ impl UiNavigationExecutor {
         };
         #[cfg(target_os = "windows")]
         {
-            self.deferred_open_responses
-                .insert(pending.get(), DeferredOpenResponse { sender, success });
+            let responses = &mut self.deferred_open_responses;
+            responses.insert(pending.value(), DeferredOpenResponse { sender, success });
         }
         #[cfg(not(target_os = "windows"))]
         {
@@ -429,7 +419,7 @@ impl UiNavigationExecutor {
                 // A Root UI is optional. The game/world itself is the new
                 // presentation, so no WebView readiness edge will release the
                 // retained old Root for us.
-                self.finish_root_presentation_handoff(true);
+                self.finish_presentation_handoff(true);
             }
             pending
         }
@@ -467,15 +457,14 @@ impl UiNavigationExecutor {
                         match overlay.webview.focus_parent() {
                             Ok(()) => log::debug!(
                                 "restored game-window focus while closing UI instance {}",
-                                id.get()
+                                id.value()
                             ),
                             Err(error) => log::error!(
                                 "cannot restore game-window focus while closing Web UI: {error}"
                             ),
                         }
                     }
-                    dispatch_lifecycle_event(&overlay.webview, "roundo:destroying", "destroying");
-                    drop(overlay);
+                    self.retiring.insert(*id, overlay);
                 }
             }
         }
@@ -656,12 +645,29 @@ pub(crate) fn retire_superseded_staged_webviews(world: &mut bevy::prelude::World
 
 #[cfg(target_os = "windows")]
 pub(crate) fn schedule_graph_prefetches(mut state: bevy::prelude::ResMut<UiLifecycleManager>) {
-    let targets = state
+    let definitions = state
         .instances()
         .filter(|instance| instance.visible && instance.loaded)
         .filter_map(|instance| state.registry.resource(&instance.definition))
-        .flat_map(|definition| definition.prefetch.iter().cloned())
+        .flat_map(|definition| definition.imports.values())
+        .filter(|ui_import| ui_import.prefetch)
+        .map(|ui_import| ui_import.resource.clone())
         .collect::<BTreeSet<_>>();
+    let targets = definitions
+        .into_iter()
+        .filter_map(
+            |definition| match state.resolve_resource_path(&definition, None) {
+                Ok(target) => Some(target),
+                Err(error) => {
+                    log::warn!("cannot resolve imported prefetch target `{definition}`: {error}");
+                    None
+                }
+            },
+        )
+        .collect::<BTreeSet<_>>();
+    for id in state.retain_prefetch_targets(&targets) {
+        log::debug!("discarded unreachable graph-prefetch candidate {id}");
+    }
     let descriptors = state.pending_descriptors();
     let mut available = MAX_PREPARED_UI_CANDIDATES.saturating_sub(
         descriptors
@@ -673,33 +679,26 @@ pub(crate) fn schedule_graph_prefetches(mut state: bevy::prelude::ResMut<UiLifec
         .into_iter()
         .map(|pending| pending.target)
         .collect::<BTreeSet<_>>();
-    for definition in targets {
+    for target in targets {
         if available == 0 {
             break;
         }
+        let definition = target.resource().to_owned();
         let Some(resource) = state.registry.resource(&definition) else {
             continue;
         };
-        if state.live_count(&definition) >= resource.max_instances {
-            continue;
-        }
-        let target = match state.resolve_resource_path(&definition, None) {
-            Ok(target) => target,
-            Err(error) => {
-                log::warn!("cannot resolve graph-prefetch target `{definition}`: {error}");
-                continue;
-            }
-        };
-        if pending_targets.contains(&target) {
+        if state.live_count(&definition) >= resource.max_instances
+            || pending_targets.contains(&target)
+        {
             continue;
         }
         match state.begin_prefetch(target) {
             Ok(id) => {
                 available -= 1;
-                log::debug!("queued graph-prefetch candidate {id} for `{definition}`");
+                log::debug!("queued imported prefetch candidate {id} for `{definition}`");
             }
             Err(UiLifecycleError::UiInstanceLimit | UiLifecycleError::DuplicatePendingOpen) => {}
-            Err(error) => log::warn!("cannot queue graph-prefetch for `{definition}`: {error}"),
+            Err(error) => log::warn!("cannot queue imported prefetch for `{definition}`: {error}"),
         }
     }
 }
@@ -741,7 +740,7 @@ pub(crate) fn stage_pending_webview(world: &mut bevy::prelude::World) {
     let Some(descriptor) = descriptor else {
         return;
     };
-    let (registry, source_definition, transparent) = {
+    let (registry, source_definition, transparent, background_color) = {
         let state = world.resource::<UiLifecycleManager>();
         let definition = state
             .registry
@@ -751,6 +750,7 @@ pub(crate) fn stage_pending_webview(world: &mut bevy::prelude::World) {
             Arc::new(state.registry.clone()),
             definition.name.clone(),
             definition.world_visibility == UiWorldVisibility::Visible,
+            definition.background_color,
         )
     };
     let url = webview2_resource_url(descriptor.target.resource(), &descriptor.target.path);
@@ -814,6 +814,7 @@ pub(crate) fn stage_pending_webview(world: &mut bevy::prelude::World) {
             }))
             .with_visible(false)
             .with_transparent(transparent)
+            .with_background_color(background_color.into())
             .with_url("about:blank")
             .with_navigation_handler(move |url| {
                 let allowed = (url == "about:blank"
@@ -921,34 +922,32 @@ pub(crate) fn stage_pending_webview(world: &mut bevy::prelude::World) {
             let starting_target_navigation_id = Arc::clone(&target_navigation_id);
             let completed_target_navigation_id = Arc::clone(&target_navigation_id);
             let core = webview.webview();
-            let starting_handler =
-                NavigationStartingEventHandler::create(Box::new(move |_sender, args| {
-                    let Some(args) = args else {
-                        return Ok(());
-                    };
-                    let mut raw_uri = windows::core::PWSTR::null();
-                    unsafe { args.Uri(&mut raw_uri)? };
-                    let uri = webview2_com::CoTaskMemPWSTR::from(raw_uri).to_string();
-                    let mut navigation_id = 0;
-                    unsafe { args.NavigationId(&mut navigation_id)? };
-                    log::debug!(
-                        "WebView2 native navigation starting: id={navigation_id}, uri=`{uri}`"
-                    );
-                    if same_definition_path(&native_navigation_definition, &uri).as_deref()
-                        == Some(native_target_path.as_str())
-                    {
-                        *starting_target_navigation_id
-                            .lock()
-                            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(navigation_id);
-                        let mut load = starting_load_state
-                            .lock()
-                            .unwrap_or_else(|poisoned| poisoned.into_inner());
-                        load.navigation_result = None;
-                        load.bridge_ready = false;
-                        load.finished_url = None;
-                    }
-                    Ok(())
-                }));
+            let create_navigation_handler = NavigationStartingEventHandler::create;
+            let starting_handler = create_navigation_handler(Box::new(move |_sender, args| {
+                let Some(args) = args else {
+                    return Ok(());
+                };
+                let mut raw_uri = windows::core::PWSTR::null();
+                unsafe { args.Uri(&mut raw_uri)? };
+                let uri = webview2_com::CoTaskMemPWSTR::from(raw_uri).to_string();
+                let mut navigation_id = 0;
+                unsafe { args.NavigationId(&mut navigation_id)? };
+                log::debug!("WebView2 native navigation starting: id={navigation_id}, uri=`{uri}`");
+                if same_definition_path(&native_navigation_definition, &uri).as_deref()
+                    == Some(native_target_path.as_str())
+                {
+                    *starting_target_navigation_id
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(navigation_id);
+                    let mut load = starting_load_state
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    load.navigation_result = None;
+                    load.bridge_ready = false;
+                    load.finished_url = None;
+                }
+                Ok(())
+            }));
             let completed_handler = NavigationCompletedEventHandler::create(Box::new(
                 move |_sender, args| {
                     let Some(args) = args else {
@@ -982,23 +981,20 @@ pub(crate) fn stage_pending_webview(world: &mut bevy::prelude::World) {
                     Ok(())
                 },
             ));
-            let frame_handler =
-                NavigationStartingEventHandler::create(Box::new(move |_sender, args| {
-                    let Some(args) = args else {
-                        return Ok(());
-                    };
-                    let mut raw_uri = windows::core::PWSTR::null();
-                    unsafe { args.Uri(&mut raw_uri)? };
-                    let uri = webview2_com::CoTaskMemPWSTR::from(raw_uri).to_string();
-                    let allowed = frame_navigation_allowed(&frame_navigation_definition, &uri);
-                    if !allowed {
-                        log::warn!(
-                            "blocked cross-Definition or external frame navigation: `{uri}`"
-                        );
-                        unsafe { args.SetCancel(true)? };
-                    }
-                    Ok(())
-                }));
+            let frame_handler = create_navigation_handler(Box::new(move |_sender, args| {
+                let Some(args) = args else {
+                    return Ok(());
+                };
+                let mut raw_uri = windows::core::PWSTR::null();
+                unsafe { args.Uri(&mut raw_uri)? };
+                let uri = webview2_com::CoTaskMemPWSTR::from(raw_uri).to_string();
+                let allowed = frame_navigation_allowed(&frame_navigation_definition, &uri);
+                if !allowed {
+                    log::warn!("blocked cross-Definition or external frame navigation: `{uri}`");
+                    unsafe { args.SetCancel(true)? };
+                }
+                Ok(())
+            }));
             let mut starting_token = 0;
             let mut completed_token = 0;
             let mut frame_token = 0;
@@ -1186,10 +1182,10 @@ pub(crate) fn advance_staged_webviews(world: &mut bevy::prelude::World) {
     for resolution in resolutions {
         match resolution {
             Resolution::Prepared(pending_id) => {
-                let prepared = world
-                    .non_send_mut::<UiNavigationExecutor>()
-                    .staged
-                    .remove(&pending_id);
+                let prepared = {
+                    let mut executor = world.non_send_mut::<UiNavigationExecutor>();
+                    executor.take_staged(pending_id)
+                };
                 if let Some(prepared) = prepared {
                     suspend_prepared_webview(&prepared.webview);
                     world
@@ -1215,10 +1211,10 @@ pub(crate) fn advance_staged_webviews(world: &mut bevy::prelude::World) {
                         .commit_open(pending_id)
                         .map(|instance| (instance, Vec::new()))
                 };
-                let staged = world
-                    .non_send_mut::<UiNavigationExecutor>()
-                    .staged
-                    .remove(&pending_id);
+                let staged = {
+                    let mut executor = world.non_send_mut::<UiNavigationExecutor>();
+                    executor.take_staged(pending_id)
+                };
                 match (commit, staged) {
                     (Ok((instance, destroyed)), Some(staged)) => {
                         let queued = {
@@ -1226,7 +1222,7 @@ pub(crate) fn advance_staged_webviews(world: &mut bevy::prelude::World) {
                                 .command_gate
                                 .lock()
                                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-                            gate.commit()
+                            gate.release_queued()
                         };
                         for body in queued {
                             dispatch_webui_message(
@@ -1275,14 +1271,11 @@ pub(crate) fn advance_staged_webviews(world: &mut bevy::prelude::World) {
                                     Some(("stale_ui_instance", "UI root was replaced".into())),
                                 );
                             }
-                            let mut retained = Vec::new();
                             for id in &destroyed {
                                 if let Some(overlay) = executor.committed.remove(id) {
                                     executor.retiring.insert(*id, overlay);
-                                    retained.push(*id);
                                 }
                             }
-                            executor.begin_root_presentation_handoff(retained);
                             log::info!(
                                 "Committed transactional Root replacement; destroyed_instances={}",
                                 destroyed.len()
@@ -1320,10 +1313,10 @@ pub(crate) fn advance_staged_webviews(world: &mut bevy::prelude::World) {
                 }
             }
             Resolution::Failed(pending_id, error) => {
-                world
-                    .non_send_mut::<UiNavigationExecutor>()
-                    .staged
-                    .remove(&pending_id);
+                let mut executor = world.non_send_mut::<UiNavigationExecutor>();
+                let removed = executor.staged.remove(&pending_id);
+                debug_assert!(removed.is_some(), "failed staged WebView must exist");
+                drop(executor);
                 let _ = world
                     .resource_mut::<UiLifecycleManager>()
                     .fail_open(pending_id, error.clone());
@@ -1336,10 +1329,10 @@ pub(crate) fn advance_staged_webviews(world: &mut bevy::prelude::World) {
                 log::error!("staged WebView {pending_id} failed navigation: {error}");
             }
             Resolution::Timeout(pending_id) => {
-                world
-                    .non_send_mut::<UiNavigationExecutor>()
-                    .staged
-                    .remove(&pending_id);
+                let mut executor = world.non_send_mut::<UiNavigationExecutor>();
+                let removed = executor.staged.remove(&pending_id);
+                debug_assert!(removed.is_some(), "timed-out staged WebView must exist");
+                drop(executor);
                 let _ = world
                     .resource_mut::<UiLifecycleManager>()
                     .fail_open(pending_id, "UI load timed out before bridge handshake");
@@ -1476,7 +1469,10 @@ pub(crate) fn sync_recovery_surface(world: &mut bevy::prelude::World) {
             .with_ipc_handler(move |message| {
                 let action = serde_json::from_str::<Value>(message.body())
                     .ok()
-                    .and_then(|value| value.get("recovery_action")?.as_str().map(str::to_owned))
+                    .and_then(|value| {
+                        let action = value.get("recovery_action")?;
+                        action.as_str().map(str::to_owned)
+                    })
                     .and_then(|action| match action.as_str() {
                         "retry" => Some(RecoveryAction::Retry),
                         "disconnect" => Some(RecoveryAction::Disconnect),
@@ -1503,8 +1499,8 @@ pub(crate) fn sync_recovery_surface(world: &mut bevy::prelude::World) {
             parent_hwnd.store(host_window.0 as isize, std::sync::atomic::Ordering::Release);
             let mut executor = world.non_send_mut::<UiNavigationExecutor>();
             executor.recovery = Some(RecoveryOverlay { webview, actions });
-            if executor.finish_root_presentation_handoff(true) {
-                log::info!("Recovery Surface is visible; released retained Root presentations");
+            if executor.finish_presentation_handoff(true) {
+                log::info!("Recovery Surface is visible; released retained presentations");
             }
         }
         Err(error) => {
@@ -1566,11 +1562,12 @@ pub(crate) fn sync_committed_navigation(
             if let Err(error) = state.navigate_same_definition(id, &path) {
                 log::warn!(
                     "cannot update same-definition path for {}: {error}",
-                    id.get()
+                    id.value()
                 );
             }
         }
-        if let Some(overlay) = executor.committed.get(&id) {
+        let overlay = executor.committed.get(&id);
+        if let Some(overlay) = overlay {
             activate_webui_bridge(&overlay.webview);
         }
     }
@@ -1616,6 +1613,21 @@ pub(crate) fn resize_webview(
 /// The Win32 detail remains inside this Wry adapter rather than leaking through
 /// the UI registry seam.
 #[cfg(target_os = "windows")]
+pub(crate) fn presentation_sync_order(state: &UiLifecycleManager) -> Vec<UiInstanceId> {
+    let stacking = state.stacking_order();
+    stacking
+        .iter()
+        .copied()
+        .filter(|id| state.instance(*id).is_some_and(|instance| instance.visible))
+        .chain(stacking.iter().copied().filter(|id| {
+            state
+                .instance(*id)
+                .is_some_and(|instance| !instance.visible)
+        }))
+        .collect()
+}
+
+#[cfg(target_os = "windows")]
 pub(crate) fn apply_windows_input_mode(
     state: bevy::ecs::system::Res<UiLifecycleManager>,
     mut executor: Option<bevy::ecs::system::NonSendMut<UiNavigationExecutor>>,
@@ -1625,7 +1637,10 @@ pub(crate) fn apply_windows_input_mode(
     };
     let focused = state.focused_instance();
     let mut replacement_visible = false;
-    for id in state.stacking_order() {
+    // Apply newly visible presentations before hiding covered ones. This
+    // prevents an ordinary exclusive open from exposing the host surface
+    // between two child-HWND visibility calls.
+    for id in presentation_sync_order(&state) {
         let Some(instance) = state.instance(id) else {
             continue;
         };
@@ -1640,7 +1655,7 @@ pub(crate) fn apply_windows_input_mode(
             if let Err(error) = overlay.webview.set_bounds(webview_rect(instance.bounds)) {
                 log::warn!(
                     "cannot apply Web UI bounds for instance {}: {error}",
-                    id.get()
+                    id.value()
                 );
             } else {
                 overlay.last_bounds = Some(instance.bounds);
@@ -1652,13 +1667,13 @@ pub(crate) fn apply_windows_input_mode(
             if let Err(error) = overlay.webview.set_visible(instance.visible) {
                 log::error!(
                     "cannot set Web UI visibility for instance {} to {}: {error}",
-                    id.get(),
+                    id.value(),
                     instance.visible
                 );
             } else {
                 log::debug!(
                     "applied Web UI visibility for instance {}: {}",
-                    id.get(),
+                    id.value(),
                     instance.visible
                 );
                 dispatch_lifecycle_event(
@@ -1706,8 +1721,8 @@ pub(crate) fn apply_windows_input_mode(
             invalidate_webview_parent(&overlay.webview);
         }
     }
-    if executor.finish_root_presentation_handoff(replacement_visible) {
-        log::info!("Replacement Root is visible; released retained Root presentations");
+    if executor.finish_presentation_handoff(replacement_visible) {
+        log::info!("Replacement presentation is visible; released retained presentations");
     }
 }
 
@@ -1823,9 +1838,10 @@ fn dispatch_webui_message(
     source: UiInstanceId,
     body: &str,
 ) {
-    let subscription = serde_json::from_str::<Value>(body)
-        .ok()
-        .and_then(|value| value.get("roundo_subscription").cloned());
+    let subscription = serde_json::from_str::<Value>(body).ok().and_then(|value| {
+        let subscription = value.get("roundo_subscription");
+        subscription.cloned()
+    });
     if let Some(subscription) = subscription {
         let version = subscription.get("version").and_then(Value::as_u64);
         let resource = subscription.get("resource").and_then(Value::as_str);
@@ -1853,14 +1869,15 @@ fn dispatch_webui_message(
             if subscribed {
                 subscriptions.insert(resource.to_owned())
             } else {
-                subscriptions.remove(resource)
+                let removed = subscriptions.remove(resource);
+                removed
             }
         };
         if changed {
             subscription_generation.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
             log::debug!(
                 "Web UI instance {} {} Client Data resource `{resource}`",
-                source.get(),
+                source.value(),
                 if subscribed {
                     "subscribed to"
                 } else {
@@ -1886,11 +1903,13 @@ pub(crate) fn enqueue_webui_command(
             return;
         }
     };
-    let Some(request_id) = transport.get("request_id").and_then(Value::as_u64) else {
+    let request_id = transport.get("request_id").and_then(Value::as_u64);
+    let Some(request_id) = request_id else {
         log::warn!("Web UI IPC was rejected: request_id is missing or not an unsigned integer");
         return;
     };
-    let Some(command) = transport.get("command").cloned() else {
+    let command = transport.get("command").cloned();
+    let Some(command) = command else {
         log::warn!("Web UI IPC request {request_id} was rejected: command is missing");
         pending
             .lock()
@@ -1913,15 +1932,18 @@ pub(crate) fn enqueue_webui_command(
             });
         return;
     };
-    let command_name = command
-        .get("command")
+    let command_name = command.get("command");
+    let command_name = command_name
         .and_then(Value::as_str)
         .unwrap_or_default()
         .to_owned();
     if command_name == "ui.open" {
         log::debug!(
             "Web UI IPC request {request_id}: enqueueing ui.open with arguments {:?}",
-            command.get("arguments")
+            {
+                let arguments = command.get("arguments");
+                arguments
+            }
         );
     }
     let immediate_error = |code: &str, message: &str| json!({"version":1,"command":command_name,"ok":false,"error":{"code":code,"message":message}});
@@ -2035,7 +2057,8 @@ pub(crate) fn resolve_webui_commands(
             };
             let request_id = pending[index].request_id;
             let command_name = &pending[index].command_name;
-            if result.get("ok").and_then(Value::as_bool) == Some(false) {
+            let succeeded = result.get("ok").and_then(Value::as_bool);
+            if succeeded == Some(false) {
                 log::warn!("Web UI IPC request {request_id} ({command_name}) failed: {result}");
             } else if command_name == "ui.open" {
                 log::debug!("Web UI IPC request {request_id}: ui.open completed with {result}");
@@ -2056,15 +2079,19 @@ pub(crate) fn resolve_webui_commands(
 pub(crate) fn bridge_focus_request(body: &str) -> bool {
     serde_json::from_str::<Value>(body)
         .ok()
-        .and_then(|value| value.get("roundo_focus_request").and_then(Value::as_bool))
-        == Some(true)
+        .is_some_and(|value| {
+            let request = value.get("roundo_focus_request");
+            request.and_then(Value::as_bool) == Some(true)
+        })
 }
 
 pub(crate) fn bridge_handshake(body: &str) -> bool {
     serde_json::from_str::<Value>(body)
         .ok()
-        .and_then(|value| value.get("roundo_bridge_ready").and_then(Value::as_bool))
-        == Some(true)
+        .is_some_and(|value| {
+            let readiness = value.get("roundo_bridge_ready");
+            readiness.and_then(Value::as_bool) == Some(true)
+        })
 }
 
 pub(crate) fn response_script(request_id: u64, result: &Value) -> String {

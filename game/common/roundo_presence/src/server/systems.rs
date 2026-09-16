@@ -1,16 +1,17 @@
+//! Authoritative presence command processing and snapshot publication.
+
 use super::*;
 
+// Command ingestion precedes change publication in the same fixed tick.
 impl Plugin for RoundoPresenceServerPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<PresenceServerSettings>()
-            .init_resource::<ServerSceneWorlds>()
             .init_resource::<PlayerRegistry>()
             .insert_resource(PresenceServerPipe(self.pipe.endpoint_b()))
             .configure_sets(
                 FixedUpdate,
                 (
                     PresenceServerSet::Commands,
-                    PresenceServerSet::SceneConstraints,
                     PresenceServerSet::PlayerStates,
                     PresenceServerSet::Snapshots,
                 )
@@ -19,10 +20,6 @@ impl Plugin for RoundoPresenceServerPlugin {
             .add_systems(
                 FixedUpdate,
                 process_presence_commands.in_set(PresenceServerSet::Commands),
-            )
-            .add_systems(
-                FixedUpdate,
-                wrap_player_transforms.in_set(PresenceServerSet::SceneConstraints),
             )
             .add_systems(
                 FixedUpdate,
@@ -36,15 +33,18 @@ impl Plugin for RoundoPresenceServerPlugin {
 }
 
 #[derive(Resource, Clone)]
+/// ECS-side endpoint for network commands and presence events.
 struct PresenceServerPipe(CrossbeamThreadPipeEndpointB<PresenceServerCommand, PresenceServerEvent>);
 
 #[derive(Clone, Copy)]
+/// Registry metadata required to route one connected player.
 struct PlayerEntry {
     entity: Entity,
     player_id: PlayerId,
 }
 
 #[derive(Resource)]
+/// Index from connections to player identities and ECS entities.
 struct PlayerRegistry {
     next_player_id: u64,
     by_connection: HashMap<ConnectionId, PlayerEntry>,
@@ -59,6 +59,7 @@ impl Default for PlayerRegistry {
     }
 }
 
+// Applies connection and disconnection commands from the network bridge.
 fn process_presence_commands(
     mut commands: Commands,
     pipe: Res<PresenceServerPipe>,
@@ -66,6 +67,7 @@ fn process_presence_commands(
 ) {
     while let Some(command) = pipe.0.try_receive() {
         match command {
+            // New players receive a deterministic initial transform.
             PresenceServerCommand::Connect { connection_id } => {
                 if registry.by_connection.contains_key(&connection_id) {
                     continue;
@@ -88,11 +90,22 @@ fn process_presence_commands(
                 registry
                     .by_connection
                     .insert(connection_id, PlayerEntry { entity, player_id });
-                let _ = pipe.0.try_send(PresenceServerEvent::PlayerJoined {
-                    connection_id,
-                    player_id,
-                });
+                if pipe
+                    .0
+                    .try_send(PresenceServerEvent::PlayerJoined {
+                        connection_id,
+                        player_id,
+                    })
+                    .is_err()
+                {
+                    log::error!(
+                        "cannot publish Presence player join: connection_id={}, player_id={}, reason=server_bridge_closed",
+                        connection_id.0,
+                        player_id.0
+                    );
+                }
             }
+            // Disconnect removes only the entity owned by that connection.
             PresenceServerCommand::Disconnect { connection_id } => {
                 if let Some(entry) = registry.by_connection.remove(&connection_id) {
                     commands.entity(entry.entity).despawn();
@@ -102,21 +115,7 @@ fn process_presence_commands(
     }
 }
 
-fn wrap_player_transforms(
-    scenes: Res<ServerSceneWorlds>,
-    mut players: Query<(&mut Transform, &PlayerScene), With<ServerPlayer>>,
-) {
-    for (mut transform, scene) in &mut players {
-        let Some(space) = scenes.space(scene.scene_id) else {
-            continue;
-        };
-        let wrapped = space.wrap(transform.translation);
-        if wrapped != transform.translation {
-            transform.translation = wrapped;
-        }
-    }
-}
-
+// Publishes transforms only when Bevy change detection marks them modified.
 fn publish_changed_player_states(
     pipe: Res<PresenceServerPipe>,
     registry: Res<PlayerRegistry>,
@@ -126,17 +125,27 @@ fn publish_changed_player_states(
         let Ok((transform, scene)) = players.get(entry.entity) else {
             continue;
         };
-        let _ = pipe.0.try_send(PresenceServerEvent::PlayerStateChanged {
-            connection_id: *connection_id,
-            state: player_state(entry.player_id, *scene, transform),
-        });
+        if pipe
+            .0
+            .try_send(PresenceServerEvent::PlayerStateChanged {
+                connection_id: *connection_id,
+                state: player_state(entry.player_id, *scene, transform),
+            })
+            .is_err()
+        {
+            log::error!(
+                "cannot publish Presence player state: connection_id={}, player_id={}, reason=server_bridge_closed",
+                connection_id.0,
+                entry.player_id.0
+            );
+        }
     }
 }
 
+// Builds per-player nearby snapshots within the configured world radius.
 fn publish_presence_snapshots(
     pipe: Res<PresenceServerPipe>,
     settings: Res<PresenceServerSettings>,
-    scenes: Res<ServerSceneWorlds>,
     registry: Res<PlayerRegistry>,
     players: Query<(&Player, &Transform, &PlayerScene), With<ServerPlayer>>,
 ) {
@@ -145,14 +154,13 @@ fn publish_presence_snapshots(
         let Ok((_, own_transform, own_scene)) = players.get(entry.entity) else {
             continue;
         };
-        let Some(space) = scenes.space(own_scene.scene_id) else {
-            continue;
-        };
         let mut nearby_players = players
             .iter()
             .filter(|(_, transform, scene)| {
                 scene.scene_id == own_scene.scene_id
-                    && space.distance_squared(own_transform.translation, transform.translation)
+                    && own_transform
+                        .translation
+                        .distance_squared(transform.translation)
                         <= radius_squared
             })
             .map(|(player, transform, _)| NearbyPlayer {
@@ -163,17 +171,28 @@ fn publish_presence_snapshots(
             .collect::<Vec<_>>();
         nearby_players.sort_unstable_by_key(|player| player.player_id.0);
 
-        let _ = pipe.0.try_send(PresenceServerEvent::Snapshot {
-            connection_id: *connection_id,
-            snapshot: PresenceSnapshot {
-                own_player_id: entry.player_id,
-                players: nearby_players,
-                joinable_worlds: Vec::new(),
-            },
-        });
+        if pipe
+            .0
+            .try_send(PresenceServerEvent::Snapshot {
+                connection_id: *connection_id,
+                snapshot: PresenceSnapshot {
+                    own_player_id: entry.player_id,
+                    players: nearby_players,
+                    joinable_worlds: Vec::new(),
+                },
+            })
+            .is_err()
+        {
+            log::error!(
+                "cannot publish Presence snapshot: connection_id={}, player_id={}, reason=server_bridge_closed",
+                connection_id.0,
+                entry.player_id.0
+            );
+        }
     }
 }
 
+// Converts engine transforms into stable wire arrays.
 fn player_state(player_id: PlayerId, scene: PlayerScene, transform: &Transform) -> PlayerState {
     PlayerState {
         player_id,
@@ -183,6 +202,7 @@ fn player_state(player_id: PlayerId, scene: PlayerScene, transform: &Transform) 
     }
 }
 
+// Scene S1 uses a fixed spawn pose facing negative Y.
 fn s1_spawn_transform() -> Transform {
     Transform {
         translation: S1_SPAWN_TRANSLATION,

@@ -1,3 +1,5 @@
+//! Background encoding and decoding for derived sparse voxel octrees.
+
 use crate::{AtomicVoxel, CHUNK_EDGE_LENGTH, EMPTY_VOXEL_ID};
 use crate::{ChunkVersion, VoxelChunkSvo};
 use roundo_algorithm::tree::{BreadthFirstLosslessSvo, Node, UnoptimizedOctree};
@@ -7,11 +9,13 @@ use roundo_toolbox::{
 };
 use std::sync::Arc;
 
+/// Either a reusable SVO or immutable primitive voxel snapshot.
 pub(crate) enum SvoSource {
     Cached(Arc<VoxelChunkSvo>),
     Primitive(Arc<[AtomicVoxel]>),
 }
 
+/// CPU-heavy conversion work transferred off the ECS thread.
 pub(crate) enum DerivedSvoJob {
     Encode {
         connection_id: ConnectionId,
@@ -24,6 +28,7 @@ pub(crate) enum DerivedSvoJob {
     },
 }
 
+/// Successful conversion or contextual failure returned to the owner.
 pub(crate) enum DerivedSvoResult {
     Encoded {
         connection_id: ConnectionId,
@@ -42,11 +47,13 @@ pub(crate) enum DerivedSvoResult {
 }
 
 #[derive(Clone)]
+/// Non-blocking endpoint for a dedicated SVO conversion thread.
 pub(crate) struct DerivedSvoWorker {
     pipe: CrossbeamThreadPipeEndpointA<DerivedSvoJob, DerivedSvoResult>,
 }
 
 impl DerivedSvoWorker {
+    /// Starts a named worker thread and returns its ECS-side endpoint.
     pub(crate) fn spawn(name: &'static str) -> Self {
         let pipe = CrossbeamThreadPipe::new();
         let worker_pipe = pipe.endpoint_b();
@@ -59,15 +66,18 @@ impl DerivedSvoWorker {
         }
     }
 
-    pub(crate) fn submit(&self, job: DerivedSvoJob) {
-        let _ = self.pipe.try_send(job);
+    /// Submits work or returns it intact when the worker has stopped.
+    pub(crate) fn submit(&self, job: DerivedSvoJob) -> Result<(), DerivedSvoJob> {
+        self.pipe.try_send(job)
     }
 
+    /// Receives one completed conversion without blocking.
     pub(crate) fn try_receive(&self) -> Option<DerivedSvoResult> {
         self.pipe.try_receive()
     }
 }
 
+// Worker lifetime is bounded by endpoint availability.
 fn run_worker(pipe: CrossbeamThreadPipeEndpointB<DerivedSvoJob, DerivedSvoResult>) {
     while let Some(job) = pipe.receive() {
         let result = match job {
@@ -85,6 +95,7 @@ fn run_worker(pipe: CrossbeamThreadPipeEndpointB<DerivedSvoJob, DerivedSvoResult
     }
 }
 
+// Reuses cached SVOs and materializes primitive snapshots only when required.
 fn encode_chunk(
     connection_id: ConnectionId,
     chunk: ChunkVersion,
@@ -103,7 +114,8 @@ fn encode_chunk(
             }
         },
     };
-    match SerializedPayload::encode(&svo) {
+    let encoded = SerializedPayload::encode(&svo);
+    match encoded {
         Ok(payload) => DerivedSvoResult::Encoded {
             connection_id,
             chunk,
@@ -117,6 +129,7 @@ fn encode_chunk(
     }
 }
 
+// Builds the editable tree before breadth-first lossless compaction.
 fn svo_from_primitive_voxels(
     voxels: &[AtomicVoxel],
 ) -> Result<VoxelChunkSvo, roundo_algorithm::tree::OptimizedOctreeError> {
@@ -136,6 +149,7 @@ fn svo_from_primitive_voxels(
     )
 }
 
+// Descends by high-to-low coordinate bits to select each octant.
 fn insert_voxel(root: &mut Node<AtomicVoxel, 8>, position: [usize; 3], voxel: AtomicVoxel) {
     let depth = (CHUNK_EDGE_LENGTH as usize).ilog2() as usize;
     let mut node = root;
@@ -153,8 +167,10 @@ fn insert_voxel(root: &mut Node<AtomicVoxel, 8>, position: [usize; 3], voxel: At
     node.data = voxel;
 }
 
+// Preserves chunk identity across payload decoding failures.
 fn decode_chunk(chunk: ChunkVersion, payload: SerializedPayload) -> DerivedSvoResult {
-    match payload.decode() {
+    let decoded = payload.decode();
+    match decoded {
         Ok(svo) => DerivedSvoResult::Decoded { chunk, svo },
         Err(error) => DerivedSvoResult::Failed {
             connection_id: None,

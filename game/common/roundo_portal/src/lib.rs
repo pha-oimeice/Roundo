@@ -121,15 +121,17 @@ fn teleport_entering_objects(
 ) {
     let mut teleported_this_step = HashSet::new();
 
-    for collision in collision_starts.read() {
+    let started_collisions = collision_starts.read();
+    for collision in started_collisions {
         let Some((source_entity, object_entity)) = portal_collision(collision, &portals) else {
             continue;
         };
         if !tagged_objects.contains(object_entity)
             || teleported_this_step.contains(&object_entity)
-            || exit_guards
-                .get(object_entity)
-                .is_ok_and(|guard| guard.portal == source_entity)
+            || {
+                let exit_guard = exit_guards.get(object_entity);
+                exit_guard.is_ok_and(|guard| guard.portal == source_entity)
+            }
         {
             continue;
         }
@@ -172,7 +174,10 @@ fn teleport_entering_objects(
         mapped_world_transform.translation = mapped_translation;
         mapped_world_transform.rotation = mapped_rotation;
         *transform = parent
-            .and_then(|parent| parent_transforms.get(parent.parent()).ok())
+            .and_then(|parent| {
+                let parent_transform = parent_transforms.get(parent.parent());
+                parent_transform.ok()
+            })
             .map_or(mapped_world_transform, |parent_transform| {
                 GlobalTransform::from(mapped_world_transform).reparented_to(parent_transform)
             });

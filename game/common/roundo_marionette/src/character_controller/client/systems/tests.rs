@@ -7,8 +7,11 @@ use crate::character_controller::{
     },
 };
 use crate::{
-    ControllerCommand, DestroyBlockControllerAction, Movement3DAction, PlaceBlockControllerAction,
-    PlayerControllerCommand, ROTATION_SYNC_INTERVAL_SECS, RotationSync,
+    ControllerCommand, DESTROY_BLOCK_INPUT_SLOT, DestroyBlockControllerAction, InputBinding,
+    MOVE_BACKWARD_INPUT_SLOT, MOVE_DOWN_INPUT_SLOT, MOVE_FORWARD_INPUT_SLOT, MOVE_LEFT_INPUT_SLOT,
+    MOVE_RIGHT_INPUT_SLOT, MOVE_UP_INPUT_SLOT, Movement3DAction, PLACE_BLOCK_INPUT_SLOT,
+    PhysicalInput, PlaceBlockControllerAction, PlayerControllerCommand,
+    ROTATION_SYNC_INTERVAL_SECS, RotationSync,
 };
 use bevy::{
     input::mouse::AccumulatedMouseMotion,
@@ -19,6 +22,47 @@ use bevy::{
 use roundo_contracts::{PlayerId, SceneId};
 use roundo_toolbox::CrossbeamThreadPipe;
 use std::time::Duration;
+
+fn default_bindings() -> ClientInputBindings {
+    ClientInputBindings::new([
+        InputBinding {
+            slot: MOVE_UP_INPUT_SLOT.into(),
+            input: PhysicalInput::Key(KeyCode::Space),
+        },
+        InputBinding {
+            slot: MOVE_DOWN_INPUT_SLOT.into(),
+            input: PhysicalInput::Key(KeyCode::ShiftLeft),
+        },
+        InputBinding {
+            slot: MOVE_LEFT_INPUT_SLOT.into(),
+            input: PhysicalInput::Key(KeyCode::KeyA),
+        },
+        InputBinding {
+            slot: MOVE_RIGHT_INPUT_SLOT.into(),
+            input: PhysicalInput::Key(KeyCode::KeyD),
+        },
+        InputBinding {
+            slot: MOVE_FORWARD_INPUT_SLOT.into(),
+            input: PhysicalInput::Key(KeyCode::KeyW),
+        },
+        InputBinding {
+            slot: MOVE_BACKWARD_INPUT_SLOT.into(),
+            input: PhysicalInput::Key(KeyCode::KeyS),
+        },
+        InputBinding {
+            slot: SPIRIT_CAMERA_INPUT_SLOT.into(),
+            input: PhysicalInput::Key(KeyCode::F1),
+        },
+        InputBinding {
+            slot: DESTROY_BLOCK_INPUT_SLOT.into(),
+            input: PhysicalInput::Mouse(MouseButton::Left),
+        },
+        InputBinding {
+            slot: PLACE_BLOCK_INPUT_SLOT.into(),
+            input: PhysicalInput::Mouse(MouseButton::Right),
+        },
+    ])
+}
 
 fn player_state(translation: [f32; 3], rotation: Quat) -> PlayerState {
     PlayerState {
@@ -38,6 +82,7 @@ fn later_player_states_retarget_translation_without_overriding_local_rotation() 
         .init_resource::<ClientPlayerController>()
         .init_resource::<AuthoritativePlayerState>()
         .init_resource::<PlayerTranslationInterpolation>()
+        .init_resource::<ClientMovementPredictionState>()
         .init_resource::<ClientControllerCommandState>()
         .init_resource::<ClientRotationSyncState>()
         .insert_resource(ClientPipeResource(transport.endpoint_b()))
@@ -91,8 +136,11 @@ fn f1_toggles_spirit_walking_and_restores_the_authoritative_pose() {
     let authoritative_state = player_state([3.0, 4.0, 5.0], Quat::from_rotation_y(0.75));
     let mut app = App::new();
     app.init_resource::<ButtonInput<KeyCode>>()
+        .init_resource::<ButtonInput<MouseButton>>()
+        .insert_resource(default_bindings())
         .init_resource::<ClientPlayerController>()
         .init_resource::<PlayerTranslationInterpolation>()
+        .init_resource::<ClientMovementPredictionState>()
         .init_resource::<ClientRotationSyncState>()
         .insert_resource(AuthoritativePlayerState(Some(authoritative_state)))
         .add_systems(Update, toggle_spirit_walking);
@@ -144,13 +192,14 @@ fn f1_toggles_spirit_walking_and_restores_the_authoritative_pose() {
 
 #[test]
 fn movement_vector_uses_only_camera_horizontal_heading() {
-    let bindings = ClientKeyBindings::default();
+    let bindings = default_bindings();
     let yaw = 0.4;
     let transform = Transform::from_rotation(Quat::from_euler(EulerRot::YXZ, yaw, 0.7, 0.2));
     let mut keyboard = ButtonInput::default();
+    let mouse = ButtonInput::default();
     keyboard.press(KeyCode::KeyW);
 
-    let forward = movement_world_direction(&keyboard, &bindings, &transform);
+    let forward = movement_world_direction(&keyboard, &mouse, &bindings, &transform);
     let expected = Quat::from_rotation_y(yaw) * Vec3::NEG_Z;
 
     assert!(forward.abs_diff_eq(expected, f32::EPSILON));
@@ -159,19 +208,20 @@ fn movement_vector_uses_only_camera_horizontal_heading() {
 
 #[test]
 fn vertical_movement_ignores_camera_rotation() {
-    let bindings = ClientKeyBindings::default();
+    let bindings = default_bindings();
     let transform = Transform::from_rotation(Quat::from_euler(EulerRot::YXZ, 0.4, 0.7, 0.2));
     let mut keyboard = ButtonInput::default();
+    let mouse = ButtonInput::default();
     keyboard.press(KeyCode::Space);
     assert_eq!(
-        movement_world_direction(&keyboard, &bindings, &transform),
+        movement_world_direction(&keyboard, &mouse, &bindings, &transform),
         Vec3::Y
     );
 
     keyboard.release(KeyCode::Space);
     keyboard.press(KeyCode::ShiftLeft);
     assert_eq!(
-        movement_world_direction(&keyboard, &bindings, &transform),
+        movement_world_direction(&keyboard, &mouse, &bindings, &transform),
         Vec3::NEG_Y
     );
 }
@@ -191,20 +241,22 @@ fn camera_pitch_stays_strictly_between_vertical_limits() {
 }
 
 #[test]
-fn bindings_form_an_ordered_unique_bipartite_graph() {
-    let mut bindings = ClientKeyBindings::default();
-    assert!(!bindings.bind(KeyCode::KeyW, MovementAction::MoveForward));
-    assert!(bindings.bind(KeyCode::KeyW, MovementAction::MoveUp));
-    assert_eq!(
-        bindings.actions_for(KeyCode::KeyW),
-        &[MovementAction::MoveForward, MovementAction::MoveUp]
-    );
-    assert!(bindings.reorder(
-        KeyCode::KeyW,
-        MovementAction::MoveUp,
-        MovementAction::MoveForward
-    ));
-    assert!(bindings.unbind(KeyCode::KeyW, MovementAction::MoveUp));
+fn bindings_support_many_to_many_edges() {
+    let bindings = ClientInputBindings::new([
+        InputBinding {
+            slot: MOVE_FORWARD_INPUT_SLOT.into(),
+            input: PhysicalInput::Key(KeyCode::KeyW),
+        },
+        InputBinding {
+            slot: MOVE_UP_INPUT_SLOT.into(),
+            input: PhysicalInput::Key(KeyCode::KeyW),
+        },
+        InputBinding {
+            slot: MOVE_FORWARD_INPUT_SLOT.into(),
+            input: PhysicalInput::Key(KeyCode::ArrowUp),
+        },
+    ]);
+    assert_eq!(bindings.iter().count(), 3);
 }
 
 #[test]
@@ -270,15 +322,17 @@ fn rotation_is_immediate_and_network_sync_is_rate_limited() {
 }
 
 #[test]
-fn movement_is_uploaded_as_a_world_space_translation_delta() {
+fn movement_is_uploaded_as_a_world_space_direction() {
     let transport = CrossbeamThreadPipe::new();
     let events = transport.endpoint_a();
     let mut app = App::new();
     app.init_resource::<ButtonInput<KeyCode>>()
-        .init_resource::<ClientKeyBindings>()
+        .init_resource::<ButtonInput<MouseButton>>()
+        .insert_resource(default_bindings())
         .init_resource::<ClientPlayerController>()
         .init_resource::<ClientMarionetteInputSettings>()
         .init_resource::<ClientControllerCommandState>()
+        .init_resource::<ClientMovementPredictionState>()
         .init_resource::<Time>()
         .insert_resource(AuthoritativePlayerState(Some(player_state(
             [0.0; 3],
@@ -294,6 +348,9 @@ fn movement_is_uploaded_as_a_world_space_translation_delta() {
         .resource_mut::<ClientPlayerController>()
         .bind_camera(camera);
     app.world_mut()
+        .resource_mut::<ClientMarionetteInputSettings>()
+        .player_movement_prediction = true;
+    app.world_mut()
         .resource_mut::<ButtonInput<KeyCode>>()
         .press(KeyCode::KeyW);
     app.world_mut()
@@ -301,21 +358,35 @@ fn movement_is_uploaded_as_a_world_space_translation_delta() {
         .advance_by(Duration::from_secs_f32(0.1));
 
     app.update();
+    assert_eq!(
+        app.world()
+            .resource::<ClientMovementPredictionState>()
+            .offset,
+        Vec3::NEG_Z * 0.5
+    );
     assert!(matches!(
         events.try_receive(),
         Some(ClientMarionetteEvent::UsePlayerController(
             PlayerControllerCommand::Movement3D(ControllerCommand {
                 sequence: 1,
-                action: Movement3DAction { translation_delta },
+                action: Movement3DAction { direction },
             })
-        )) if Vec3::from_array(translation_delta).abs_diff_eq(Vec3::NEG_Z * 0.5, f32::EPSILON)
+        )) if Vec3::from_array(direction).abs_diff_eq(Vec3::NEG_Z, f32::EPSILON)
     ));
 
     app.world_mut()
         .resource_mut::<ButtonInput<KeyCode>>()
         .release(KeyCode::KeyW);
     app.update();
-    assert!(events.try_receive().is_none());
+    assert!(matches!(
+        events.try_receive(),
+        Some(ClientMarionetteEvent::UsePlayerController(
+            PlayerControllerCommand::Movement3D(ControllerCommand {
+                sequence: 2,
+                action: Movement3DAction { direction },
+            })
+        )) if Vec3::from_array(direction) == Vec3::ZERO
+    ));
 }
 
 #[test]
@@ -323,7 +394,9 @@ fn mouse_buttons_upload_destroy_and_fixed_id_place_events() {
     let transport = CrossbeamThreadPipe::new();
     let events = transport.endpoint_a();
     let mut app = App::new();
-    app.init_resource::<ButtonInput<MouseButton>>()
+    app.init_resource::<ButtonInput<KeyCode>>()
+        .init_resource::<ButtonInput<MouseButton>>()
+        .insert_resource(default_bindings())
         .init_resource::<ClientPlayerController>()
         .init_resource::<ClientControllerCommandState>()
         .insert_resource(AuthoritativePlayerState(Some(player_state(

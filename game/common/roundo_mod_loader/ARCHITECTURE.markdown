@@ -2,7 +2,9 @@
 
 本文描述 `roundo_mod_loader` 的目标技术架构。领域术语以仓库根目录 [`CONTEXT.md`](../../../CONTEXT.md) 为准；本文负责加载机制、验证阶段、adapter seam 与迁移约束。
 
-当前实现只完成了 Mod 发现、manifest/依赖校验、依赖闭包和候选裁决。Web UI importer 仍自行组织资源加载；本文其余内容是后续重构必须收敛到的目标。
+当前实现已完成 Mod 发现、manifest/依赖校验、依赖闭包、共同的 Mod Resource Name/reference 解析和候选裁决。显式 `ResourceTypeCatalog` 已拥有 Resource Type Selection 闭包、确定性阶段、同阶段错误聚合和全有或全无发布；Web UI、Atomic Voxel 与 Input Registry 是三个真实 adapter。adapter 内 declaration 仍 fail-fast，完整编译期 Catalog 校验仍是后续目标。
+
+2026-09-12 起，文中的 `mods/` 表示配置选定的 Mod root，而非固定工作目录。Client/Server 都从 `CommonConfig.mod_path` discovery Mods，相对路径以可执行文件目录解析；旧 Bevy 硬编码 `mods` asset source 已删除，engine embedded/default assets 不参与 Mod Resource discovery。
 
 ## 1. 设计目标
 
@@ -39,7 +41,7 @@
 - Wry/WebView 生命周期；
 - Bevy ECS、`AssetServer`、Handle 或运行时资产构造；
 - 某个 Resource Type 的业务字段和类型特有后处理；
-- UI Registry Slot、UI Prefetch 等 Web UI 规则；
+- UI Registry Slot、source-local UI Import 及其 prefetch policy 等 Web UI 规则；
 - 网络同步、存档或热重载。
 
 ### 2.2 Resource Type adapter
@@ -242,12 +244,13 @@ canonical Mod ID → local resource name → error kind
 
 当前代码与目标之间至少存在以下差距：
 
-- `LoadedMods` 已实现 manifest、Mod ID、依赖闭包和依赖环校验，但没有 Resource Type Catalog 或阶段推导。
-- `roundo_webui::UiRegistry::load` 自行扫描 registry、解析引用和发布结果，尚未作为 Resource Type adapter 接入共享阶段。
+- `LoadedMods` 已实现 manifest、Mod ID、依赖闭包、依赖环校验和共同的 local/full Resource Name reference 解析；`ResourceTypeCatalog` 已实现显式注册、root selection closure、确定性阶段、同阶段错误聚合与 typed publication。Catalog 图目前在初始化时验证，尚未提升为编译期失败。
+- `AtomicVoxelRegistry::load` 是第二个有 PCG、客户端放置、服务端权威校验和 Chunk 接收消费者的真实 Resource Type adapter；显式稳定 ID 与 session fingerprint 决策见 ADR-0005。
+- Client composition root 通过共享加载 module 选择 Atomic Voxel 与 Web UI，并把已发布的 typed registry 交给 ECS 与 Web UI platform adapter；Server 只选择 Atomic Voxel。Web UI plugin 仍保留独立 root/LoadedMods constructor 供嵌入与聚焦测试，生产 composition 使用已发布 Registry。
+- `roundo_webui::UiRegistry::load` 与 `AtomicVoxelRegistry::load` 各自扫描固定 registry 并发布结果，尚未接入统一类型阶段；两者遇到错误仍 fail-fast，不提供目标要求的确定性多错误聚合。
 - Web UI registry 已使用共同 `[[resource]]` 外壳；旧 `[[ui]]` 只作为迁移别名。
-- Web UI `prefetch` 已引用 UI Registry Slot，并在 slot 最终裁决后解析。
+- Web UI Import 已通过 source-local handle 引用 UI Registry Slot，并在 slot 最终裁决后解析；每项 import 独立配置 prefetch。
 - manifest 已使用 `override_priority`，旧 `load_priority` 只作为迁移别名。
-- `mod_assets` 将整个 `mods/` 暴露给 Bevy，尚未阻止裸路径绕过 registry。
 - 示例 USD、Attribute、Property、Form、Material、Recipe 与 Action 文件尚无接入共享加载模型的 adapter。
 
-迁移时应优先建立第二个真实 Resource Type adapter，再抽取 Web UI 与第二个 adapter 共同需要的 seam，避免用单一 adapter 推导 hypothetical interface。
+下一步只抽取 Web UI 与 Atomic Voxel 两个 adapter 已证明重复的类型阶段 orchestration、稳定错误聚合和原子全局发布；不要把 Voxel Role Slot 泛化成所有 Resource Type 的排他性模型，也不要据此批量建立 hypothetical adapter。

@@ -1,42 +1,53 @@
-//! Currently fs does not yet have robust implementation of async io, so simply use std.
+//! Small synchronous filesystem helpers exposed through the legacy async API.
+
 use std::fs::File;
-use std::io::Write;
+use std::io::{self, Write};
 use std::path::PathBuf;
 
 #[inline(always)]
+/// Reports whether a path resolves to a regular file.
 pub async fn exists_file(path: &PathBuf) -> bool {
-    File::open(path).is_ok()
+    let open_result = File::open(path);
+    open_result.is_ok()
 }
 
 #[inline(always)]
+/// Returns the executable directory, falling back to the current directory.
 pub fn get_exe_root_path() -> PathBuf {
     std::env::current_exe()
-        .unwrap()
+        .expect("current executable path must be available")
         .parent()
-        .unwrap()
+        .expect("current executable path must have a parent directory")
         .to_path_buf()
 }
 
 #[inline(always)]
-pub async fn write_all_to_file(file_path: &PathBuf, content: &str) {
-    File::create(file_path)
-        .unwrap_or_else(|e| {
-            panic!("Failed to create file {}: {}", file_path.display(), e);
-        })
-        .write_all(content.as_bytes())
-        .unwrap_or_else(|e| {
-            panic!(
-                "Failed to write content to file {}: {}",
-                file_path.display(),
-                e
-            );
-        });
+/// Creates or truncates a file and writes the complete UTF-8 payload.
+pub async fn write_all_to_file(file_path: &PathBuf, content: &str) -> io::Result<()> {
+    let create_result = File::create(file_path);
+    let mut file = create_result.map_err(|error| {
+        io::Error::new(
+            error.kind(),
+            format!("cannot create file {}: {error}", file_path.display()),
+        )
+    })?;
+    let write_result = file.write_all(content.as_bytes());
+    write_result.map_err(|error| {
+        io::Error::new(
+            error.kind(),
+            format!("cannot write file {}: {error}", file_path.display()),
+        )
+    })
 }
 
 #[inline(always)]
-pub async fn create_all_dirs(path: &PathBuf) {
-    std::fs::create_dir_all(path).expect(&format!(
-        "Failed to create directories for path {}",
-        path.display()
-    ));
+/// Creates a directory tree when it does not already exist.
+pub async fn create_all_dirs(path: &PathBuf) -> io::Result<()> {
+    let create_result = std::fs::create_dir_all(path);
+    create_result.map_err(|error| {
+        io::Error::new(
+            error.kind(),
+            format!("cannot create directory {}: {error}", path.display()),
+        )
+    })
 }

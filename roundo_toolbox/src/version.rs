@@ -13,7 +13,7 @@ impl UpdateVersion {
         Self(value)
     }
 
-    pub const fn get(self) -> u64 {
+    pub const fn value(self) -> u64 {
         self.0
     }
 
@@ -37,7 +37,7 @@ mod tests {
 
         assert_eq!(version.advance(), UpdateVersion::new(1));
         assert_eq!(version.advance(), UpdateVersion::new(2));
-        assert_eq!(version.get(), 2);
+        assert_eq!(version.value(), 2);
     }
 
     #[test]

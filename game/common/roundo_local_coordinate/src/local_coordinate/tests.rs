@@ -1,19 +1,29 @@
+// Core invariants for voxel identity, revisions, and aggregate mass.
 use super::data::{
-    AtomicVoxel, EMPTY_VOXEL_ID, GLOBAL_ATOMIC_VOXEL_DATA, LocalCoordinate, PositionedAtomicVoxel,
-    SOLID_VOXEL_ID,
+    AtomicVoxel, EMPTY_VOXEL_ID, LocalCoordinate, PositionedAtomicVoxel, SOLID_VOXEL_ID,
 };
+use super::voxel_registry::AtomicVoxelRegistry;
 use bevy::prelude::{IVec3, Vec3};
 
 #[test]
-fn atomic_voxels_are_compact_identifiers_with_global_definitions() {
+// Wire voxel values must remain compact and registry-backed.
+fn atomic_voxels_are_compact_identifiers_with_resource_definitions() {
     assert_eq!(
         std::mem::size_of::<AtomicVoxel>(),
         std::mem::size_of::<u32>()
     );
     assert_eq!(EMPTY_VOXEL_ID.0, 0);
     assert_eq!(SOLID_VOXEL_ID.0, 1);
-    assert!(GLOBAL_ATOMIC_VOXEL_DATA.contains_key(&EMPTY_VOXEL_ID));
-    assert!(GLOBAL_ATOMIC_VOXEL_DATA.contains_key(&SOLID_VOXEL_ID));
+    let registry = AtomicVoxelRegistry::builtin();
+    assert!(registry.definition(EMPTY_VOXEL_ID).is_none());
+    assert_eq!(
+        registry
+            .definition(SOLID_VOXEL_ID)
+            .unwrap()
+            .name
+            .to_string(),
+        "vanilla.base.stone"
+    );
 }
 
 fn solid_voxel(position: IVec3) -> PositionedAtomicVoxel {
@@ -24,6 +34,7 @@ fn solid_voxel(position: IVec3) -> PositionedAtomicVoxel {
 }
 
 #[test]
+// Idempotent writes must not invalidate derived chunk state.
 fn content_revisions_only_advance_for_authoritative_changes() {
     let mut local_coordinate = LocalCoordinate::default();
     assert!(local_coordinate.apply_voxel(solid_voxel(IVec3::ZERO)));
@@ -43,6 +54,7 @@ fn content_revisions_only_advance_for_authoritative_changes() {
 }
 
 #[test]
+// Chunk centers are weighted by their occupied voxel counts.
 fn center_of_mass_uses_chunk_fill_as_weight() {
     let mut local_coordinate = LocalCoordinate::from_voxels([
         solid_voxel(IVec3::new(0, 0, 0)),

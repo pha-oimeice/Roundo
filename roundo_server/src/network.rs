@@ -1,3 +1,10 @@
+//! Process-level composition between QUIC service callbacks and ECS domain pipes.
+//!
+//! Network hooks run on the networking runtime and only submit non-blocking ECS
+//! messages. Two polling bridge threads drain ECS events back to bounded network
+//! queues. Bridge forwarding is best-effort: rejected network admission is not
+//! requeued by this adapter.
+
 use log::{debug, info, warn};
 use roundo_local_coordinate::{
     CHUNK_EDGE_LENGTH, LocalCoordinateServerCommand, LocalCoordinateServerEvent,
@@ -5,8 +12,9 @@ use roundo_local_coordinate::{
 };
 use roundo_marionette::{ServerMarionetteCommand, ServerMarionetteIpc};
 use roundo_networking::{
-    ClientGameMessage, ClientResourceMessage, ConnectionId, HookFuture, PublicSession, ServerHooks,
-    ServerNetwork, ServerNetworkConfig, ServerResourceMessage, SessionId, StreamId, UserSession,
+    ClientGameMessage, ClientResourceMessage, ConnectionId, HookFuture, PublicSession,
+    ResourceCatalogFingerprint, ServerHooks, ServerNetwork, ServerNetworkConfig,
+    ServerResourceMessage, SessionId, StreamId, UserSession,
 };
 use roundo_presence::{PresenceServerCommand, PresenceServerEvent, PresenceServerIpc};
 use roundo_toolbox::{BridgeStep, BridgeThreadGroup, run_polling_bridge};
@@ -23,10 +31,20 @@ pub struct ServerNetworkRuntime {
 }
 
 impl ServerNetworkRuntime {
+    /// Starts the network listener and both ECS-to-network bridge threads.
+    ///
+    /// The listener is ready before this returns. Database initialization, TLS
+    /// setup, and listener startup happen as part of [`ServerNetwork::start`].
+    ///
+    /// # Panics
+    ///
+    /// Panics if configuration cannot be converted to a usable endpoint, the
+    /// network server cannot start, or either bridge OS thread cannot be spawned.
     pub fn start(
         marionette_ipc: ServerMarionetteIpc,
         presence_ipc: PresenceServerIpc,
         local_coordinate_ipc: LocalCoordinateServerIpc,
+        resource_fingerprint: ResourceCatalogFingerprint,
     ) -> Self {
         let config = network_config();
         debug!(
@@ -38,6 +56,7 @@ impl ServerNetworkRuntime {
             marionette_ipc,
             presence_ipc: presence_ipc.clone(),
             local_coordinate_ipc: local_coordinate_ipc.clone(),
+            resource_fingerprint,
         });
         let network = Arc::new(
             ServerNetwork::start(config, hooks)
@@ -63,8 +82,10 @@ impl ServerNetworkRuntime {
         Self { network, bridges }
     }
 
-    /// Deterministically stops bridge adapters before releasing the network.
-    /// Calling it more than once is harmless.
+    /// Signals and joins both bridge adapters before stopping the network worker.
+    ///
+    /// Calling it more than once is harmless. This blocks the current OS thread
+    /// and relies on bridge workers cooperatively observing their stop flags.
     pub fn shutdown(&mut self) {
         self.bridges.shutdown();
         self.network.shutdown();
@@ -77,6 +98,10 @@ impl Drop for ServerNetworkRuntime {
     }
 }
 
+/// Converts persistent process configuration into networking-service input.
+///
+/// Certificate paths remain relative to the process working directory unless
+/// persistence supplied an absolute path.
 fn network_config() -> ServerNetworkConfig {
     let network = &crate::config::SERVER_CONFIG.network;
     ServerNetworkConfig {
@@ -84,16 +109,20 @@ fn network_config() -> ServerNetworkConfig {
         certificate_directory: PathBuf::from(&network.certificate_path).join("certs"),
         server_alternative_names: network.server_alternative_names.clone(),
         generate_self_signed_certificate: network.generate_self_signed_certificate,
+        admission: roundo_networking::TransportAdmissionPolicy::default(),
     }
 }
 
+/// Non-blocking adapter from networking-runtime callbacks to ECS domain queues.
 struct ServerHooksAdapter {
     marionette_ipc: ServerMarionetteIpc,
     presence_ipc: PresenceServerIpc,
     local_coordinate_ipc: LocalCoordinateServerIpc,
+    resource_fingerprint: ResourceCatalogFingerprint,
 }
 
 impl ServerHooks for ServerHooksAdapter {
+    /// Initializes the database before the listener reports readiness.
     fn initialize(&self) -> HookFuture<()> {
         Box::pin(async {
             debug!("Initializing database before accepting network connections");
@@ -105,6 +134,10 @@ impl ServerHooks for ServerHooksAdapter {
             }
             result
         })
+    }
+
+    fn resource_catalog_fingerprint(&self) -> ResourceCatalogFingerprint {
+        self.resource_fingerprint
     }
 
     fn public_session(&self) -> HookFuture<PublicSession> {
@@ -225,17 +258,29 @@ impl ServerHooks for ServerHooksAdapter {
                 }
             }
             ClientResourceMessage::SetChunkViewDistance { chunks } => {
-                let _ = self.local_coordinate_ipc.try_send(
-                    LocalCoordinateServerCommand::SetChunkViewDistance {
+                if self
+                    .local_coordinate_ipc
+                    .try_send(LocalCoordinateServerCommand::SetChunkViewDistance {
                         connection_id,
                         chunks,
-                    },
-                );
+                    })
+                    .is_err()
+                {
+                    warn!(
+                        "Failed to forward Chunk view distance to ECS: connection_id={}, chunks={chunks}, reason=local_coordinate_channel_closed",
+                        connection_id.0
+                    );
+                }
             }
         }
     }
 }
 
+/// Drains presence events one at a time and projects them onto stream 0.
+///
+/// Player-join events instead establish local-coordinate subscription state.
+/// Failed ECS or network admission is logged by the relevant adapter and is not
+/// retried here.
 fn bridge_game_ecs_events(
     presence_ipc: PresenceServerIpc,
     local_coordinate_ipc: LocalCoordinateServerIpc,
@@ -290,6 +335,10 @@ fn bridge_game_ecs_events(
     });
 }
 
+/// Drains coordinate events one at a time and projects them onto stream 1.
+///
+/// Network queue rejection drops that event after the networking layer logs it;
+/// this bridge provides neither retry nor end-to-end delivery acknowledgment.
 fn bridge_resource_ecs_events(
     local_coordinate_ipc: LocalCoordinateServerIpc,
     network: Arc<ServerNetwork>,

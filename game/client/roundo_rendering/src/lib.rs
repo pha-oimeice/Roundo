@@ -1,3 +1,5 @@
+//! Client rendering plugins for world geometry, presence, and render objects.
+
 mod debug_camera;
 mod presence_visual;
 mod render_object;
@@ -16,8 +18,10 @@ pub use world::{WorldRenderPlugin, WorldRenderSettings};
 
 use bevy::prelude::{App, Plugin};
 
+/// Installs the complete rendering stack in dependency order.
 pub struct RoundoRenderingPlugin;
 
+// Individual plugins retain ownership of their extraction and update systems.
 impl Plugin for RoundoRenderingPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins((

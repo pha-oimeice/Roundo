@@ -5,15 +5,18 @@ use super::infinite_spheres::{
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+/// Generator configured by an inclusive solid-world height.
 pub struct SuperflatGenerator {
     pub height: i64,
 }
 
 impl SuperflatGenerator {
+    /// Creates a generator with the requested surface height.
     pub const fn new(height: i64) -> Self {
         Self { height }
     }
 
+    /// Generates one chunk using this generator's fixed height.
     pub fn generate_chunk(&self, x: i64, y: i64, z: i64) -> GeneratedChunk {
         generate_chunk(x, y, z, self.height)
     }

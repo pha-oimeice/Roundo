@@ -1,7 +1,9 @@
 //! UI Registry、Lifecycle core 与平台 adapter 的公开 interface 回归测试。
 
 use super::*;
-use crate::platform::{claim_webview_creation_turn, data_sync_script, enqueue_webui_command};
+use crate::platform::{
+    claim_webview_creation_turn, data_sync_script, enqueue_webui_command, presentation_sync_order,
+};
 use crate::registry::{LayoutRegistration, RegistryFile};
 use roundo_mod_loader::{LoadedMods, ModId, parse_mod_id};
 use roundo_toolbox::request_response_pipe::{
@@ -9,11 +11,17 @@ use roundo_toolbox::request_response_pipe::{
 };
 use serde_json::{Value, json};
 use std::{
+    collections::BTreeMap,
     fs,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
+
+fn write_fixture(path: impl AsRef<Path>, contents: impl AsRef<[u8]>) -> std::io::Result<()> {
+    let result = fs::write(path, contents);
+    result
+}
 
 fn fixture_root() -> PathBuf {
     let root = std::env::temp_dir().join(format!(
@@ -25,14 +33,14 @@ fn fixture_root() -> PathBuf {
     ));
     let mod_root = root.join("vanilla_ui");
     fs::create_dir_all(mod_root.join("assets/webui/main")).unwrap();
-    fs::write(
+    write_fixture(
         mod_root.join("manifest.toml"),
         "[general]\nmod_name='vanilla_ui'\nauthor='vanilla'\n",
     )
     .unwrap();
-    fs::write(mod_root.join("assets/webui/main/index.html"), "ok").unwrap();
-    fs::write(mod_root.join("assets/webui/main/about.html"), "about").unwrap();
-    fs::write(mod_root.join("assets/webui/registry.toml"), "[[resource]]\nname='main'\nproject='main'\nentry='index.html'\ninteraction_mode='web-ui'\nworld_visibility='hidden'\nmax_instances=2\nprefetch=['roundo.main-menu']\n[slots]\n'roundo.disconnected-root'='main'
+    write_fixture(mod_root.join("assets/webui/main/index.html"), "ok").unwrap();
+    write_fixture(mod_root.join("assets/webui/main/about.html"), "about").unwrap();
+    write_fixture(mod_root.join("assets/webui/registry.toml"), "[[resource]]\nname='main'\nproject='main'\nentry='index.html'\ninteraction_mode='web-ui'\nworld_visibility='hidden'\nmax_instances=2\n[resource.imports.main-menu]\nslot='roundo.main-menu'\n[slots]\n'roundo.disconnected-root'='main'
 'roundo.main-menu'='main'\n").unwrap();
     root
 }
@@ -73,7 +81,7 @@ fn root_replacement_keeps_the_old_root_live_until_the_new_root_commits() {
         "a pending open owned by the old Root must not race its replacement"
     );
 
-    let committed = manager.commit_root_replacement(pending.get()).unwrap();
+    let committed = manager.commit_root_replacement(pending.value()).unwrap();
     assert_eq!(manager.lifecycle_state(), UiLifecycleState::Connected);
     assert_eq!(committed.destroyed, vec![old_root]);
     assert!(manager.instance(old_root).is_none());
@@ -90,9 +98,8 @@ fn navigation_owns_pending_ui_open_response_completion() {
         .resolve_resource_path("vanilla.vanilla_ui.main", None)
         .unwrap();
     let mut executor = UiNavigationExecutor::default();
-    executor
-        .open(&mut manager, UiCommandSource::Host, target)
-        .unwrap();
+    let opened = executor.navigate(&mut manager, UiCommandSource::Host, target);
+    opened.unwrap();
 
     let pipe = RequestResponsePipe::<CommandTransport<UiCommandSource>, Value>::bounded(2);
     let io = ContextualJsonRequestResponseIo::new(pipe.io());
@@ -116,51 +123,127 @@ fn navigation_owns_pending_ui_open_response_completion() {
 }
 
 #[test]
-fn registry_resolves_prefetch_through_the_selected_slot() {
+fn registry_resolves_ui_import_through_the_selected_slot() {
     let root = fixture_root();
     let replacement_root = root.join("replacement_ui");
     fs::create_dir_all(replacement_root.join("assets/webui/replacement")).unwrap();
-    fs::write(
+    write_fixture(
         replacement_root.join("manifest.toml"),
         "[general]\nmod_name='replacement_ui'\nauthor='example'\noverride_priority=10\n",
     )
     .unwrap();
-    fs::write(
+    write_fixture(
         replacement_root.join("assets/webui/replacement/index.html"),
         "replacement",
     )
     .unwrap();
-    fs::write(
+    write_fixture(
         replacement_root.join("assets/webui/registry.toml"),
         "[[resource]]\nname='replacement'\nproject='replacement'\nentry='index.html'\ninteraction_mode='web-ui'\nworld_visibility='hidden'\nmax_instances=1\n[slots]\n'roundo.main-menu'='replacement'\n",
     )
     .unwrap();
 
     let registry = UiRegistry::load(&LoadedMods::discover(&root).unwrap()).unwrap();
-    assert_eq!(
-        registry
-            .resource("vanilla.vanilla_ui.main")
-            .unwrap()
-            .prefetch,
-        vec!["example.replacement_ui.replacement"]
-    );
+    let import = &registry
+        .resource("vanilla.vanilla_ui.main")
+        .unwrap()
+        .imports["main-menu"];
+    assert_eq!(import.slot, "roundo.main-menu");
+    assert_eq!(import.resource, "example.replacement_ui.replacement");
+    assert!(import.prefetch, "UI imports are prefetched by default");
     fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
-fn registry_rejects_unknown_prefetch_slots_atomically() {
+fn registry_rejects_unknown_ui_import_slots_atomically() {
     let root = fixture_root();
     let path = root.join("vanilla_ui/assets/webui/registry.toml");
-    let invalid = fs::read_to_string(&path).unwrap().replace(
-        "prefetch=['roundo.main-menu']",
-        "prefetch=['roundo.missing']",
-    );
-    fs::write(path, invalid).unwrap();
+    let invalid = fs::read_to_string(&path)
+        .unwrap()
+        .replace("slot='roundo.main-menu'", "slot='roundo.missing'");
+    write_fixture(path, invalid).unwrap();
 
     assert!(matches!(
         UiRegistry::load(&LoadedMods::discover(&root).unwrap()),
         Err(UiRegistryError::UnknownSlot(slot)) if slot == "roundo.missing"
     ));
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn registry_rejects_the_removed_standalone_prefetch_field() {
+    let root = fixture_root();
+    let path = root.join("vanilla_ui/assets/webui/registry.toml");
+    let invalid = fs::read_to_string(&path).unwrap().replace(
+        "[resource.imports.main-menu]\nslot='roundo.main-menu'",
+        "prefetch=['roundo.main-menu']",
+    );
+    write_fixture(path, invalid).unwrap();
+
+    assert!(matches!(
+        UiRegistry::load(&LoadedMods::discover(&root).unwrap()),
+        Err(UiRegistryError::InvalidRegistry(_, _))
+    ));
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn ui_import_can_disable_prefetch() {
+    let root = fixture_root();
+    let path = root.join("vanilla_ui/assets/webui/registry.toml");
+    let registry_source = fs::read_to_string(&path).unwrap().replace(
+        "slot='roundo.main-menu'",
+        "slot='roundo.main-menu'\nprefetch=false",
+    );
+    write_fixture(path, registry_source).unwrap();
+
+    let registry = UiRegistry::load(&LoadedMods::discover(&root).unwrap()).unwrap();
+    assert!(
+        !registry
+            .resource("vanilla.vanilla_ui.main")
+            .unwrap()
+            .imports["main-menu"]
+            .prefetch
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn ui_instance_can_open_only_a_declared_import_handle() {
+    let root = fixture_root();
+    let registry = UiRegistry::load(&LoadedMods::discover(&root).unwrap()).unwrap();
+    let mut manager = UiLifecycleManager::new(registry);
+    let source = manager.open_configured_root().unwrap().unwrap();
+
+    let target = manager.resolve_import(source, "main-menu").unwrap();
+    assert_eq!(target.resource(), "vanilla.vanilla_ui.main");
+    assert_eq!(target.path, "index.html");
+    assert!(matches!(
+        manager.resolve_import(source, "undeclared"),
+        Err(UiLifecycleError::UnknownImport(handle)) if handle == "undeclared"
+    ));
+    assert!(matches!(
+        manager.resolve_import(UiInstanceId::from_host_id(u64::MAX), "main-menu"),
+        Err(UiLifecycleError::StaleUiInstance)
+    ));
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn prefetch_reconciliation_discards_candidates_not_reachable_from_visible_ui() {
+    let root = fixture_root();
+    let registry = UiRegistry::load(&LoadedMods::discover(&root).unwrap()).unwrap();
+    let mut manager = UiLifecycleManager::new(registry);
+    let target = manager
+        .resolve_resource_path("vanilla.vanilla_ui.main", Some("about.html"))
+        .unwrap();
+    let pending = manager.begin_prefetch(target).unwrap();
+
+    assert_eq!(
+        manager.retain_prefetch_targets(&std::collections::BTreeSet::new()),
+        vec![pending]
+    );
+    assert!(manager.pending_descriptor(pending).is_none());
     fs::remove_dir_all(root).unwrap();
 }
 
@@ -198,9 +281,11 @@ fn staged_command_gate_flushes_in_order_and_never_requeues_after_commit() {
     let mut gate = StagedCommandGate::default();
     assert!(gate.queue_until_commit("first"));
     assert!(gate.queue_until_commit("second"));
-    assert_eq!(gate.commit(), vec!["first", "second"]);
+    let committed = gate.release_queued();
+    assert_eq!(committed, vec!["first", "second"]);
     assert!(!gate.queue_until_commit("third"));
-    assert!(gate.commit().is_empty());
+    let repeated_commit = gate.release_queued();
+    assert!(repeated_commit.is_empty());
 }
 
 #[test]
@@ -537,7 +622,8 @@ fn custom_protocol_rejects_cross_definition_frames_and_assets() {
         lifecycle_independent: false,
         presentation: PresentationMode::Exclusive,
         layout: UiLayout::Fullscreen,
-        prefetch: Vec::new(),
+        background_color: [0, 0, 0, 255],
+        imports: BTreeMap::new(),
     };
     let mut registry = UiRegistry::default();
     registry.resources.insert(
@@ -595,7 +681,7 @@ fn registry_requires_positive_max_instances_and_applies_definition_defaults() {
     let invalid = fs::read_to_string(&path)
         .unwrap()
         .replace("max_instances=2", "max_instances=0");
-    fs::write(&path, invalid).unwrap();
+    write_fixture(&path, invalid).unwrap();
     assert!(UiRegistry::load(&LoadedMods::discover(&root).unwrap()).is_err());
     fs::remove_dir_all(root).unwrap();
 }
@@ -633,7 +719,7 @@ fn ignores_mods_without_webui_resources() {
     let root = fixture_root();
     let model_mod = root.join("vanilla_models");
     fs::create_dir_all(model_mod.join("assets")).unwrap();
-    fs::write(
+    write_fixture(
         model_mod.join("manifest.toml"),
         "[general]\nmod_name='vanilla_models'\nauthor='vanilla'\n",
     )
@@ -672,6 +758,31 @@ fn vanilla_asset(path: &str) -> Option<String> {
             .join(path),
     )
     .ok()
+}
+
+#[test]
+fn vanilla_ui_registry_and_pages_use_source_local_import_handles() {
+    let mods_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../mods");
+    let registry = UiRegistry::load(&LoadedMods::discover(&mods_root).unwrap()).unwrap();
+    let main = registry.resource("vanilla.vanilla_ui.main-menu").unwrap();
+    assert_eq!(main.imports["settings"].slot, "roundo.settings");
+    assert_eq!(
+        main.imports["server-selection"].slot,
+        "roundo.server-selection"
+    );
+    assert_eq!(main.background_color, [16, 21, 29, 255]);
+
+    for page in [
+        "main-menu/index.html",
+        "server-selection/index.html",
+        "pause-menu/index.html",
+    ] {
+        let source = vanilla_asset(page).unwrap();
+        assert!(source.contains("command:'ui.open'") || source.contains("'ui.open'"));
+        assert!(source.contains("import:"));
+        assert!(!source.contains("slot:"));
+        assert!(!source.contains("resource:"));
+    }
 }
 
 #[test]
@@ -734,7 +845,7 @@ fn vanilla_settings_asset_consumes_command_metadata_and_keeps_edits_atomic() {
     assert!(!settings.contains("command('bindings.list',{})"));
     assert!(!settings.contains("command('settings.show',{})"));
     assert!(settings.contains("bindingModel.supported_keys"));
-    assert!(settings.contains("bindingModel.supported_actions"));
+    assert!(settings.contains("bindingModel.supported_slots"));
     assert!(!settings.contains("const actions=['"));
     assert!(!settings.contains("const keys=['"));
     assert!(settings.contains("command('bindings.replace'"));
@@ -782,25 +893,20 @@ fn manager_creates_distinct_children_enforces_cap_and_back_is_source_bound() {
     let target = manager
         .resolve_resource_path("vanilla.vanilla_ui.main", Some("about.html"))
         .unwrap();
-    let child = manager
-        .open(UiCommandSource::WebView(root_ui), target)
-        .unwrap();
+    let opened = manager.open_immediately(UiCommandSource::WebView(root_ui), target);
+    let child = opened.unwrap();
     assert_ne!(root_ui, child);
     assert_eq!(manager.parent_instance(child), Some(root_ui));
     assert_eq!(manager.parent_instance(root_ui), None);
     assert_eq!(manager.live_count("vanilla.vanilla_ui.main"), 2);
-    assert_eq!(manager.adapter_count(), 2);
     let target = manager
         .resolve_resource_path("vanilla.vanilla_ui.main", None)
         .unwrap();
-    assert_eq!(
-        manager.open(UiCommandSource::Host, target),
-        Err(UiLifecycleError::UiInstanceLimit)
-    );
+    let capped_open = manager.open_immediately(UiCommandSource::Host, target);
+    assert_eq!(capped_open, Err(UiLifecycleError::UiInstanceLimit));
     assert_eq!(manager.back(child).unwrap(), vec![child]);
     assert!(manager.instance(root_ui).is_some());
     assert_eq!(manager.live_count("vanilla.vanilla_ui.main"), 1);
-    assert_eq!(manager.adapter_count(), 1);
     assert_eq!(manager.back(child), Err(UiLifecycleError::StaleUiInstance));
     fs::remove_dir_all(root).unwrap();
 }
@@ -834,11 +940,25 @@ fn duplicate_pending_open_is_rejected_but_back_allows_a_fresh_instance() {
 
     assert_eq!(manager.back(first).unwrap(), vec![first]);
     assert_eq!(manager.live_count("vanilla.vanilla_ui.settings"), 0);
-    let second = manager
-        .open(UiCommandSource::WebView(root_ui), target)
-        .unwrap();
+    let opened = manager.open_immediately(UiCommandSource::WebView(root_ui), target);
+    let second = opened.unwrap();
     assert_ne!(first, second);
     assert_eq!(manager.live_count("vanilla.vanilla_ui.settings"), 1);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[cfg(target_os = "windows")]
+#[test]
+fn presentation_handoff_shows_the_replacement_before_hiding_its_parent() {
+    let root = fixture_root();
+    let registry = UiRegistry::load(&LoadedMods::discover(&root).unwrap()).unwrap();
+    let mut manager = UiLifecycleManager::new(registry);
+    let parent = manager.open_configured_root().unwrap().unwrap();
+    let target = manager.resolve_import(parent, "main-menu").unwrap();
+    let opened = manager.open_immediately(UiCommandSource::WebView(parent), target);
+    let child = opened.unwrap();
+
+    assert_eq!(presentation_sync_order(&manager), vec![child, parent]);
     fs::remove_dir_all(root).unwrap();
 }
 
@@ -946,7 +1066,7 @@ fn presentation_hides_exclusive_branches_without_unloading_and_restores_focus() 
 }
 
 #[test]
-fn windowed_survivor_preserves_geometry_and_adapter_identity_after_back() {
+fn windowed_survivor_preserves_geometry_after_back() {
     let root = fixture_root();
     let mut registry = UiRegistry::load(&LoadedMods::discover(&root).unwrap()).unwrap();
     let mut window = registry
@@ -979,11 +1099,9 @@ fn windowed_survivor_preserves_geometry_and_adapter_identity_after_back() {
         height: 444,
     };
     manager.set_bounds(child, bounds).unwrap();
-    let adapter = manager.adapter_identity(child).unwrap();
     manager.back(parent).unwrap();
     assert_eq!(manager.parent_instance(child), None);
     assert_eq!(manager.instance(child).unwrap().bounds, bounds);
-    assert_eq!(manager.adapter_identity(child), Some(adapter));
     assert!(manager.instance(child).unwrap().visible);
     fs::remove_dir_all(root).unwrap();
 }
@@ -1094,7 +1212,7 @@ fn prepared_candidate_survives_root_replacement_until_claimed() {
 fn pending_open_is_cancelled_by_root_replacement_and_optional_root_is_valid() {
     let root = fixture_root();
     let mut registry = UiRegistry::load(&LoadedMods::discover(&root).unwrap()).unwrap();
-    registry.slots.remove(CONNECTED_ROOT_SLOT);
+    let _removed_root = registry.slots.remove(CONNECTED_ROOT_SLOT);
     let mut manager = UiLifecycleManager::new(registry);
     let target = manager
         .resolve_resource_path("vanilla.vanilla_ui.main", None)

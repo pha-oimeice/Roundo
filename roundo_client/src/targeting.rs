@@ -1,3 +1,5 @@
+//! Camera-driven voxel selection and render-object highlighting.
+
 use bevy::{prelude::*, transform::TransformSystems};
 use roundo_local_coordinate::{VoxelRaycastHit, VoxelRaycaster};
 use roundo_marionette::ClientPlayerController;
@@ -10,9 +12,11 @@ use roundo_user_config::{
     DEFAULT_VOXEL_RAYCAST_DISTANCE, MAX_VOXEL_RAYCAST_DISTANCE, MIN_VOXEL_RAYCAST_DISTANCE,
 };
 
+// Slight oversizing prevents the highlight shell from z-fighting with voxel faces.
 const HIGHLIGHT_EDGE_LENGTH: f32 = 1.025;
 const HIGHLIGHT_ALPHA: f32 = 0.22;
 
+/// Installs post-transform raycasting before render-object synchronization.
 pub(crate) struct ClientVoxelTargetingPlugin;
 
 impl Plugin for ClientVoxelTargetingPlugin {
@@ -34,14 +38,17 @@ impl Plugin for ClientVoxelTargetingPlugin {
 }
 
 #[derive(SystemSet, Clone, Debug, Eq, Hash, PartialEq)]
+/// Ordering boundary for consumers of the current voxel target.
 pub(crate) struct ClientVoxelTargetingSet;
 
 #[derive(Resource, Clone, Copy, Debug, PartialEq)]
+/// Validated maximum distance for client targeting rays.
 pub(crate) struct ClientVoxelRaycastSettings {
     max_distance: f32,
 }
 
 impl ClientVoxelRaycastSettings {
+    /// Creates settings with protocol bounds applied.
     pub(crate) fn new(max_distance: f32) -> Self {
         let mut settings = Self::default();
         settings.set_max_distance(max_distance);
@@ -52,6 +59,7 @@ impl ClientVoxelRaycastSettings {
         self.max_distance
     }
 
+    /// Replaces invalid values with the default and clamps finite values.
     pub(crate) fn set_max_distance(&mut self, max_distance: f32) -> f32 {
         self.max_distance = if max_distance.is_finite() {
             max_distance.clamp(MIN_VOXEL_RAYCAST_DISTANCE, MAX_VOXEL_RAYCAST_DISTANCE)
@@ -71,15 +79,18 @@ impl Default for ClientVoxelRaycastSettings {
 }
 
 #[derive(Resource, Clone, Copy, Debug, Default, PartialEq)]
+/// Latest voxel intersection exposed to interaction and HUD systems.
 pub(crate) struct ClientVoxelTarget {
     pub(crate) hit: Option<VoxelRaycastHit>,
 }
 
 #[derive(Resource, Default)]
+/// Retains one reusable render object for the selection shell.
 struct VoxelHighlightState {
     render_object_id: Option<RenderObjectId>,
 }
 
+// Casts from the active camera and synchronizes target, HUD, and highlight.
 fn update_voxel_target(
     player_controller: Res<ClientPlayerController>,
     settings: Res<ClientVoxelRaycastSettings>,
@@ -115,6 +126,7 @@ fn update_voxel_target(
         })
     }));
 
+    // Missing targets hide rather than destroy the reusable highlight.
     let Some(hit) = hit else {
         if let Some(id) = highlight.render_object_id {
             update_render_object_visibility(&mut render_objects, id, false);
@@ -131,6 +143,7 @@ fn update_voxel_target(
 
     let local_transform = Transform::from_translation(hit.voxel_position().as_vec3() + 0.5);
     let world_transform = local_coordinate_transform.mul_transform(local_transform);
+    // Allocate lazily after the first valid hit.
     let render_object_id = match highlight.render_object_id {
         Some(id) => id,
         None => {

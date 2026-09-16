@@ -1,3 +1,9 @@
+//! Client projection of authoritative presence snapshots into ECS marker entities.
+//!
+//! Each snapshot is treated as the complete desired player/world set. Missing
+//! identities are despawned, existing identities retain their ECS entity, and
+//! player translation is interpolated over one nominal server tick.
+
 use crate::{JoinableWorld, JoinableWorldId, Player, PlayerId, PresenceSnapshot};
 use bevy::prelude::{
     App, Commands, Component, DetectChanges, Entity, IntoScheduleConfigs, Name, Plugin, Quat,
@@ -9,23 +15,31 @@ use roundo_toolbox::{
 };
 use std::collections::{HashMap, HashSet};
 
+/// Fallback visual radius for joinable-world marker entities.
 pub const DEFAULT_JOINABLE_WORLD_RADIUS: f32 = 4.0;
 const PLAYER_INTERPOLATION_DURATION_SECS: f32 = 1.0 / 20.0;
 
+/// Clonable producer for authoritative presence commands.
+///
+/// Clones share one unbounded in-process queue; command submission is
+/// non-blocking and does not wait for ECS application.
 pub type ClientPresenceIpc = CrossbeamThreadPipeEndpointA<ClientPresenceCommand, ()>;
 
+/// Installs presence-command projection and marker interpolation systems.
 #[derive(Clone)]
 pub struct RoundoPresenceClientPlugin {
     pipe: CrossbeamThreadPipe<ClientPresenceCommand, ()>,
 }
 
 impl RoundoPresenceClientPlugin {
+    /// Creates a plugin with a fresh command queue.
     pub fn new() -> Self {
         Self {
             pipe: CrossbeamThreadPipe::new(),
         }
     }
 
+    /// Returns a producer sharing this plugin's command queue.
     pub fn ipc(&self) -> ClientPresenceIpc {
         self.pipe.endpoint_a()
     }
@@ -55,22 +69,29 @@ impl Plugin for RoundoPresenceClientPlugin {
     }
 }
 
+/// Client-side presentation settings for presence markers.
 #[derive(Resource, Clone, Copy, Debug)]
 pub struct ClientPresenceSettings {
     joinable_world_radius: f32,
 }
 
 impl ClientPresenceSettings {
+    /// Creates settings, replacing a non-finite or non-positive radius with the default.
     pub fn new(joinable_world_radius: f32) -> Self {
         Self {
             joinable_world_radius: valid_world_radius(joinable_world_radius),
         }
     }
 
+    /// Returns the finite positive marker radius in local ECS units.
     pub fn joinable_world_radius(&self) -> f32 {
         self.joinable_world_radius
     }
 
+    /// Replaces the radius after applying the same validation as [`Self::new`].
+    ///
+    /// Existing world-marker scales are synchronized during a subsequent
+    /// [`Update`] schedule.
     pub fn set_joinable_world_radius(&mut self, radius: f32) {
         self.joinable_world_radius = valid_world_radius(radius);
     }
@@ -82,27 +103,36 @@ impl Default for ClientPresenceSettings {
     }
 }
 
+/// Latest own-player identity received from the presence server.
+///
+/// The value is `None` before the first snapshot and after [`ClientPresenceCommand::Clear`].
 #[derive(Resource, Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct LocalPlayerIdentity {
     player_id: Option<PlayerId>,
 }
 
 impl LocalPlayerIdentity {
+    /// Returns the latest authoritative player identity, if connected.
     pub fn player_id(&self) -> Option<PlayerId> {
         self.player_id
     }
 }
 
+/// Authoritative replacement or teardown command consumed by the client ECS.
 #[derive(Clone, Debug)]
 pub enum ClientPresenceCommand {
+    /// Reconciles markers to the complete supplied presence snapshot.
     Snapshot(PresenceSnapshot),
+    /// Despawns all projected markers and clears the local player identity.
     Clear,
 }
 
-/// Domain-side description of a player marker. Rendering observes this component.
+/// Domain-side player marker observed by rendering.
 #[derive(Component, Clone, Copy, Debug)]
 pub struct ClientPlayerMarker {
+    /// Stable player identity represented by this ECS entity.
     pub player_id: PlayerId,
+    /// Logical visibility requested from the rendering adapter.
     pub visible: bool,
 }
 
@@ -118,9 +148,10 @@ impl PlayerTranslationInterpolation {
     }
 }
 
-/// Domain-side description of a joinable world marker.
+/// Domain-side joinable-world marker observed by presentation systems.
 #[derive(Component, Clone, Copy, Debug)]
 pub struct ClientJoinableWorld {
+    /// Stable world identity represented by this ECS entity.
     pub world_id: JoinableWorldId,
 }
 

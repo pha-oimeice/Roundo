@@ -7,9 +7,9 @@ use roundo_networking::protocol::{
     ChunkVersion, ClientGameMessage, ClientMessage, ClientResourceMessage, ControllerCommand,
     DestroyBlockControllerAction, JoinableWorldId, LocalCoordinateId, Movement3DAction,
     NearbyJoinableWorld, NearbyPlayer, PlaceBlockControllerAction, PlayerControllerCommand,
-    PlayerId, PlayerState, PresenceSnapshot, ProtocolErrorCode, RotationSync, SceneId,
-    SerializedPayload, ServerGameMessage, ServerMessage, ServerResourceMessage, SessionId,
-    SessionInfo, StreamId, UserId, UserSession,
+    PlayerId, PlayerState, PresenceSnapshot, ProtocolErrorCode, ResourceCatalogFingerprint,
+    RotationSync, SceneId, SerializedPayload, ServerGameMessage, ServerMessage,
+    ServerResourceMessage, SessionId, SessionInfo, StreamId, UserId, UserSession,
 };
 use roundo_networking::session::{ClientSession, ServerSession, SessionState};
 use roundo_toolbox::UpdateVersion;
@@ -56,14 +56,14 @@ async fn consecutive_frames_preserve_boundaries_and_order() {
         command: PlayerControllerCommand::Movement3D(ControllerCommand {
             sequence: 7,
             action: Movement3DAction {
-                translation_delta: [1.0, 0.0, 0.0],
+                direction: [1.0, 0.0, 0.0],
             },
         }),
     });
 
     timeout(TEST_TIMEOUT, async {
-        client.send(&first).await?;
-        client.send(&second).await?;
+        client.transmit(&first).await?;
+        client.transmit(&second).await?;
         let received_first = server.receive().await?;
         let received_second = server.receive().await?;
         assert_eq!(received_first, first);
@@ -145,12 +145,12 @@ async fn game_intent_before_session_establishment_is_rejected() {
     let mut client: ClientConnection<_> = ClientConnection::new(client_stream);
     timeout(
         TEST_TIMEOUT,
-        client.send(&ClientMessage::Game(
+        client.transmit(&ClientMessage::Game(
             ClientGameMessage::UsePlayerController {
                 command: PlayerControllerCommand::Movement3D(ControllerCommand {
                     sequence: 11,
                     action: Movement3DAction {
-                        translation_delta: [0.0, 0.0, 1.0],
+                        direction: [0.0, 0.0, 1.0],
                     },
                 }),
             },
@@ -179,9 +179,14 @@ async fn public_session_is_server_confirmed_and_client_state_changes_after_reply
     let (client_done, mut client_result) = oneshot::channel();
     let client_task = tokio::spawn(async move {
         let result = ClientSession::new(client_stream)
-            .join_public_session()
+            .join_public_session(ResourceCatalogFingerprint::default())
             .await;
-        let _ = client_done.send(result.map(|session| (session.state(), session.session_info())));
+        let client_summary = result.map(|session| (session.state(), session.session_info()));
+        let notification = client_done.send(client_summary);
+        assert!(
+            notification.is_ok(),
+            "client result test receiver was dropped"
+        );
     });
 
     let pending = timeout(
@@ -191,6 +196,10 @@ async fn public_session_is_server_confirmed_and_client_state_changes_after_reply
     .await
     .expect("server must receive public session request")
     .expect("public session request must be valid");
+    assert_eq!(
+        pending.resource_fingerprint(),
+        ResourceCatalogFingerprint::default()
+    );
     assert!(matches!(
         client_result.try_recv(),
         Err(oneshot::error::TryRecvError::Empty)
@@ -244,12 +253,11 @@ async fn normal_and_abnormal_disconnects_end_connection_tasks() {
     let (_, writer) = client.into_split();
     drop(ServerConnection::<DuplexStream>::new(server_stream));
     let (outbound, receiver) = mpsc::unbounded_channel();
-    outbound
-        .send(ClientMessage::Ready {
-            stream: StreamId::Stream0,
-            protocol_version: 1,
-        })
-        .expect("test sender should be open");
+    let notification = outbound.send(ClientMessage::Ready {
+        stream: StreamId::Stream0,
+        protocol_version: 1,
+    });
+    notification.expect("test sender should be open");
     drop(outbound);
     let abrupt_result = timeout(TEST_TIMEOUT, tokio::spawn(run_writer(writer, receiver)))
         .await
@@ -269,7 +277,9 @@ fn session_info() -> SessionInfo {
 
 fn client_messages() -> Vec<ClientMessage> {
     vec![
-        ClientMessage::JoinPublicSession,
+        ClientMessage::JoinPublicSession {
+            resource_fingerprint: ResourceCatalogFingerprint::default(),
+        },
         ClientMessage::Ready {
             stream: StreamId::Stream0,
             protocol_version: 1,
@@ -278,7 +288,7 @@ fn client_messages() -> Vec<ClientMessage> {
             command: PlayerControllerCommand::Movement3D(ControllerCommand {
                 sequence: 4,
                 action: Movement3DAction {
-                    translation_delta: [0.0, 0.0, 0.0],
+                    direction: [0.0, 0.0, 0.0],
                 },
             }),
         }),
@@ -318,6 +328,9 @@ fn server_messages() -> Vec<ServerMessage> {
         },
         ServerMessage::Error {
             code: ProtocolErrorCode::UnsupportedProtocolVersion,
+        },
+        ServerMessage::Error {
+            code: ProtocolErrorCode::IncompatibleResources,
         },
         ServerMessage::Game(ServerGameMessage::PlayerState {
             state: PlayerState {
@@ -362,5 +375,6 @@ fn test_chunk_version() -> ChunkVersion {
 }
 
 fn test_chunk_svo() -> SerializedPayload {
-    SerializedPayload::encode(&[0_u32, 7, 11]).unwrap()
+    let encoded = SerializedPayload::encode(&[0_u32, 7, 11]);
+    encoded.unwrap()
 }

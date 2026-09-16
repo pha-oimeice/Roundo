@@ -2,6 +2,17 @@ use super::*;
 use crate::AtomicVoxel;
 use roundo_algorithm::tree::{BreadthFirstLosslessSvo, UnoptimizedOctree};
 
+#[test]
+fn decoded_chunks_reject_voxel_ids_missing_from_the_resource_registry() {
+    let source = UnoptimizedOctree::new(0, AtomicVoxelId(99));
+    let svo = BreadthFirstLosslessSvo::from_unoptimized_mapped(&source, 4, |data| *data).unwrap();
+
+    assert_eq!(
+        first_unknown_voxel(&svo, &AtomicVoxelRegistry::builtin()),
+        Some(AtomicVoxelId(99))
+    );
+}
+
 fn add_ingest_systems(app: &mut App) {
     app.init_resource::<ClientChunkViewDistance>().add_systems(
         Update,
@@ -97,13 +108,9 @@ fn version_updates_do_not_unload_chunks_omitted_from_the_event() {
         .unwrap();
     app.update();
 
-    assert_eq!(
-        app.world()
-            .resource::<LocalCoordinateClientWorld>()
-            .active_server_versions
-            .get(&active.id()),
-        Some(&active.version)
-    );
+    let client_world = app.world().resource::<LocalCoordinateClientWorld>();
+    let active_version = client_world.active_server_versions.get(&active.id());
+    assert_eq!(active_version, Some(&active.version));
 }
 
 #[test]

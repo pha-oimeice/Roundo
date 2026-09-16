@@ -1,3 +1,4 @@
+/// Defines a transparent, serializable identifier newtype.
 #[macro_export]
 macro_rules! identifier {
     ($name:ident) => {
@@ -22,6 +23,7 @@ macro_rules! identifier {
     };
 }
 
+/// Prints a type's in-memory size for development diagnostics.
 #[macro_export]
 macro_rules! print_size {
     ($t:ty) => {
@@ -29,4 +31,5 @@ macro_rules! print_size {
     };
 }
 
+// Re-export macros through the module path as well as the crate root.
 pub use crate::{identifier, print_size};

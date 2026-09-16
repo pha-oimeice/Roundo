@@ -1,3 +1,5 @@
+//! Stable logical render objects decoupled from Bevy entity and asset lifetimes.
+
 use bevy::{
     asset::RenderAssetUsages,
     mesh::{Indices, Meshable},
@@ -13,6 +15,7 @@ use bevy::{
 use std::collections::HashMap;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+/// Process-local identity for one logical render object.
 pub struct RenderObjectId(u64);
 
 impl RenderObjectId {
@@ -22,6 +25,7 @@ impl RenderObjectId {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
+/// Engine-independent transform stored by the render-object registry.
 pub struct RenderTransform {
     pub translation: Vec3,
     pub rotation: Quat,
@@ -29,6 +33,7 @@ pub struct RenderTransform {
 }
 
 impl RenderTransform {
+    /// Identity translation, rotation, and scale.
     pub const IDENTITY: Self = Self {
         translation: Vec3::ZERO,
         rotation: Quat::IDENTITY,
@@ -55,6 +60,7 @@ impl RenderTransform {
         self
     }
 
+    /// Composes a child transform under this transform.
     pub fn compose(self, child: Self) -> Self {
         Self::from(Transform::from(self).mul_transform(Transform::from(child)))
     }
@@ -83,9 +89,11 @@ impl From<RenderTransform> for Transform {
 }
 
 #[derive(Clone, Debug)]
+/// Validated mesh payload owned by a logical render object.
 pub struct RenderMesh(Mesh);
 
 impl RenderMesh {
+    /// Builds an indexed triangle list after validating all attributes.
     pub fn triangle_list(
         positions: Vec<[f32; 3]>,
         normals: Vec<[f32; 3]>,
@@ -116,14 +124,17 @@ impl RenderMesh {
         Ok(Self(mesh))
     }
 
+    /// Creates the built-in tetrahedron marker mesh.
     pub fn tetrahedron() -> Self {
         Self(Mesh::from(Tetrahedron::default()))
     }
 
+    /// Creates a UV sphere with explicit tessellation.
     pub fn uv_sphere(radius: f32, sectors: u32, stacks: u32) -> Self {
         Self(Sphere::new(radius).mesh().uv(sectors, stacks))
     }
 
+    /// Creates an axis-aligned cuboid with the given dimensions.
     pub fn cuboid(size: Vec3) -> Self {
         Self(Mesh::from(Cuboid::new(size.x, size.y, size.z)))
     }
@@ -138,6 +149,7 @@ impl RenderMesh {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+/// Structural failures that make a triangle mesh unsafe to publish.
 pub enum RenderMeshError {
     AttributeLengthMismatch,
     IncompleteTriangle,
@@ -145,9 +157,11 @@ pub enum RenderMeshError {
 }
 
 #[derive(Clone, Debug)]
+/// Material payload owned by a logical render object.
 pub struct RenderMaterial(StandardMaterial);
 
 impl RenderMaterial {
+    /// Creates an unlit material from linear RGBA components.
     pub fn unlit(color: [f32; 4]) -> Self {
         Self(StandardMaterial {
             base_color: Color::srgba(color[0], color[1], color[2], color[3]),
@@ -156,16 +170,19 @@ impl RenderMaterial {
         })
     }
 
+    /// Replaces perceptual roughness for fluent construction.
     pub fn with_perceptual_roughness(mut self, roughness: f32) -> Self {
         self.0.perceptual_roughness = roughness;
         self
     }
 
+    /// Replaces the metallic factor for fluent construction.
     pub fn with_metallic(mut self, metallic: f32) -> Self {
         self.0.metallic = metallic;
         self
     }
 
+    /// Enables alpha blending for translucent objects.
     pub fn with_alpha_blend(mut self) -> Self {
         self.0.alpha_mode = AlphaMode::Blend;
         self
@@ -177,6 +194,7 @@ impl RenderMaterial {
 }
 
 #[derive(Clone, Debug)]
+/// Logical mesh, material, transform, name, and visibility state.
 pub struct RenderObject {
     name: String,
     transform: RenderTransform,
@@ -186,6 +204,7 @@ pub struct RenderObject {
 }
 
 impl RenderObject {
+    /// Creates a visible object with a default diagnostic name.
     pub fn new(mesh: RenderMesh, material: RenderMaterial, transform: RenderTransform) -> Self {
         Self {
             name: "Render Object".to_string(),
@@ -196,11 +215,13 @@ impl RenderObject {
         }
     }
 
+    /// Replaces the diagnostic entity name.
     pub fn with_name(mut self, name: impl Into<String>) -> Self {
         self.name = name.into();
         self
     }
 
+    /// Sets initial visibility before issuance.
     pub fn with_visibility(mut self, visible: bool) -> Self {
         self.visible = visible;
         self
@@ -227,6 +248,7 @@ impl RenderObject {
     }
 }
 
+/// Object state with independent property revisions for incremental sync.
 struct RenderObjectEntry {
     object: RenderObject,
     name_revision: u64,
@@ -250,6 +272,7 @@ impl RenderObjectEntry {
 }
 
 #[derive(Resource)]
+/// Authoritative registry synchronized into Bevy after gameplay updates.
 pub struct RenderObjects {
     next_id: u64,
     objects: HashMap<RenderObjectId, RenderObjectEntry>,
@@ -264,6 +287,7 @@ impl Default for RenderObjects {
     }
 }
 
+/// Allocates an identity and publishes a logical object.
 pub fn issue_render_object(
     render_objects: &mut RenderObjects,
     object: RenderObject,
@@ -279,12 +303,16 @@ pub fn issue_render_object(
     id
 }
 
+/// Removes an object and reports whether it existed.
 pub fn remove_render_object(render_objects: &mut RenderObjects, id: RenderObjectId) -> bool {
-    render_objects.objects.remove(&id).is_some()
+    let removed = render_objects.objects.remove(&id);
+    removed.is_some()
 }
 
+/// Resolves the complete logical object by identity.
 pub fn render_object(render_objects: &RenderObjects, id: RenderObjectId) -> Option<&RenderObject> {
-    render_objects.objects.get(&id).map(|entry| &entry.object)
+    let entry = render_objects.objects.get(&id);
+    entry.map(|entry| &entry.object)
 }
 
 pub fn render_object_transform(
@@ -308,6 +336,7 @@ pub fn render_object_mesh(
     render_object(render_objects, id).map(RenderObject::mesh)
 }
 
+/// Replaces an object's name and advances only its name revision.
 pub fn update_render_object_name(
     render_objects: &mut RenderObjects,
     id: RenderObjectId,
@@ -321,6 +350,7 @@ pub fn update_render_object_name(
     true
 }
 
+/// Replaces an object's transform when its identity exists.
 pub fn update_render_object_transform(
     render_objects: &mut RenderObjects,
     id: RenderObjectId,
@@ -337,6 +367,7 @@ pub fn update_render_object_transform(
     true
 }
 
+/// Replaces an object's material and advances its material revision.
 pub fn update_render_object_material(
     render_objects: &mut RenderObjects,
     id: RenderObjectId,
@@ -350,6 +381,7 @@ pub fn update_render_object_material(
     true
 }
 
+/// Replaces an object's mesh and advances its mesh revision.
 pub fn update_render_object_mesh(
     render_objects: &mut RenderObjects,
     id: RenderObjectId,
@@ -363,6 +395,7 @@ pub fn update_render_object_mesh(
     true
 }
 
+/// Updates visibility without advancing its revision for idempotent writes.
 pub fn update_render_object_visibility(
     render_objects: &mut RenderObjects,
     id: RenderObjectId,
@@ -379,9 +412,11 @@ pub fn update_render_object_visibility(
     true
 }
 
+/// Materializes and synchronizes logical objects into Bevy runtime state.
 pub struct RenderObjectPlugin;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, SystemSet)]
+/// Ordering set completed after logical render objects reach Bevy state.
 pub struct RenderObjectSync;
 
 mod runtime;

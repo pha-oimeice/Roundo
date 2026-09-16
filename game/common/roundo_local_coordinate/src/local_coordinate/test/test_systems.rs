@@ -8,15 +8,16 @@ pub fn test_msg_router(
     mut msg_reader: MessageReader<LocalCoordinateTestMessage>,
     mut message_writer_create_dummy_maze: MessageWriter<TestCreateDummyMaze>,
 ) {
-    for msg in msg_reader.read() {
+    let pending_messages = msg_reader.read();
+    for msg in pending_messages {
         match msg {
             LocalCoordinateTestMessage::CreateDummyMaze {
                 entity,
                 seed,
                 radius,
             } => {
-                message_writer_create_dummy_maze
-                    .write(TestCreateDummyMaze::new(*entity, *seed, *radius));
+                let message = TestCreateDummyMaze::new(*entity, *seed, *radius);
+                let _message_id = message_writer_create_dummy_maze.write(message);
             }
         }
     }
@@ -27,7 +28,8 @@ pub fn create_dummy_maze(
     mut msg_reader: MessageReader<TestCreateDummyMaze>,
     mut msg_writer: MessageWriter<LocalCoordinateCRUDMessage>,
 ) {
-    for msg in msg_reader.read() {
+    let pending_messages = msg_reader.read();
+    for msg in pending_messages {
         let temp = generate_maze(msg.seed, msg.radius)
             .into_iter()
             .map(
@@ -43,6 +45,6 @@ pub fn create_dummy_maze(
             key: msg.entity,
             value: temp,
         });
-        msg_writer.write(msg);
+        let _message_id = msg_writer.write(msg);
     }
 }

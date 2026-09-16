@@ -1,19 +1,24 @@
+//! Converts generated or transferred chunks into local-coordinate storage.
+
 use crate::local_coordinate::data::{CHUNK_EDGE_LENGTH, Chunk, LocalCoordinate};
-use crate::{AtomicVoxelId, ChunkCoordinate, VoxelChunkSvo};
+use crate::{AtomicVoxelRegistry, ChunkCoordinate, VoxelChunkSvo};
 use bevy::prelude::IVec3;
 use roundo_algorithm::pcg::infinite_spheres::{
     CHUNK_EDGE_LENGTH as GENERATED_CHUNK_EDGE_LENGTH, EMPTY_MATERIAL_ID, GeneratedChunk,
 };
 use std::sync::Arc;
 
+/// Materializes registered nonempty voxels from a generated chunk.
 pub(crate) fn replace_generated_chunk(
     local_coordinate: &mut LocalCoordinate,
     chunk: &GeneratedChunk,
+    voxels: &AtomicVoxelRegistry,
 ) -> bool {
     let Some(chunk_position) = local_chunk_position(chunk.coordinate) else {
         return false;
     };
 
+    // Generated array order is x-major, followed by y and z.
     let mut stored_chunk = Chunk::default();
     for (index, id) in chunk.voxels().iter().enumerate() {
         if *id == EMPTY_MATERIAL_ID {
@@ -24,13 +29,14 @@ pub(crate) fn replace_generated_chunk(
         let z = index / GENERATED_CHUNK_EDGE_LENGTH.pow(2);
         stored_chunk.set_voxel(
             IVec3::new(x as i32, y as i32, z as i32),
-            AtomicVoxelId(u32::from(*id)),
+            voxels.generated_voxel(*id),
         );
     }
     local_coordinate.replace_chunk(chunk_position, stored_chunk);
     true
 }
 
+/// Installs an immutable transferred SVO without primitive expansion.
 pub(crate) fn replace_read_only_chunk(
     local_coordinate: &mut LocalCoordinate,
     coordinate: ChunkCoordinate,
@@ -46,6 +52,7 @@ pub(crate) fn replace_read_only_chunk(
     true
 }
 
+/// Removes a generated chunk when its coordinate fits local storage.
 pub(crate) fn remove_generated_chunk(
     local_coordinate: &mut LocalCoordinate,
     coordinate: ChunkCoordinate,
@@ -53,7 +60,9 @@ pub(crate) fn remove_generated_chunk(
     local_chunk_position(coordinate).is_some_and(|position| local_coordinate.remove_chunk(position))
 }
 
+/// Converts wire coordinates only when every axis is representable locally.
 pub(crate) fn local_chunk_position(coordinate: ChunkCoordinate) -> Option<IVec3> {
+    // Bounds account for voxel-to-chunk scaling before narrowing to i32.
     let minimum = i64::from(i32::MIN / CHUNK_EDGE_LENGTH);
     let maximum = i64::from(i32::MAX / CHUNK_EDGE_LENGTH);
     if coordinate
@@ -87,7 +96,11 @@ mod tests {
             .expect("test chunk has the required volume");
         let mut local_coordinate = LocalCoordinate::default();
 
-        assert!(replace_generated_chunk(&mut local_coordinate, &chunk));
+        assert!(replace_generated_chunk(
+            &mut local_coordinate,
+            &chunk,
+            &AtomicVoxelRegistry::builtin()
+        ));
         assert!(local_coordinate.chunks[&IVec3::new(2, -1, 0)].is_solid(IVec3::new(1, 2, 3)));
         assert!(remove_generated_chunk(
             &mut local_coordinate,
@@ -101,7 +114,11 @@ mod tests {
         let chunk = GeneratedChunk::empty([3, 4, 5]);
         let mut local_coordinate = LocalCoordinate::default();
 
-        assert!(replace_generated_chunk(&mut local_coordinate, &chunk));
+        assert!(replace_generated_chunk(
+            &mut local_coordinate,
+            &chunk,
+            &AtomicVoxelRegistry::builtin()
+        ));
         assert!(local_coordinate.chunks.contains_key(&IVec3::new(3, 4, 5)));
         assert!(local_coordinate.chunks[&IVec3::new(3, 4, 5)].is_empty());
     }

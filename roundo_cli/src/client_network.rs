@@ -1,3 +1,9 @@
+//! Client composition for connection state, endpoint probes, and ECS/network bridges.
+//!
+//! Connection callbacks update a thread-safe status snapshot and submit domain
+//! commands without blocking. Separate polling threads forward ECS controller and
+//! chunk-demand events into bounded networking queues.
+
 use log::{debug, info, warn};
 use roundo_local_coordinate::{
     CHUNK_EDGE_LENGTH, LocalCoordinateClientCommand, LocalCoordinateClientEvent,
@@ -7,7 +13,8 @@ use roundo_marionette::{ClientMarionetteCommand, ClientMarionetteEvent, ClientMa
 use roundo_networking::{
     CertificatePolicy, ClientGameMessage, ClientHooks, ClientNetwork,
     ClientNetworkConfig as NetworkRuntimeConfig, ClientResourceMessage, NetworkError,
-    ServerGameMessage, ServerResourceMessage, StreamId, probe_quic_endpoint,
+    ResourceCatalogFingerprint, ServerGameMessage, ServerResourceMessage, StreamId,
+    probe_quic_endpoint,
 };
 use roundo_presence::{ClientPresenceCommand, ClientPresenceIpc};
 use roundo_toolbox::{BridgeStep, BridgeThreadGroup, run_polling_bridge};
@@ -31,9 +38,11 @@ pub enum ClientConnectionStatus {
     Error { message: String },
 }
 
+/// Owned point-in-time connection state returned to command/UI callers.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct ClientConnectionSnapshot {
     pub status: ClientConnectionStatus,
+    /// Selected server while connecting, connected, reconnecting, or in error.
     pub server: Option<ServerEntry>,
 }
 
@@ -59,13 +68,21 @@ struct ProbeCacheEntry {
     result: ProbeResult,
 }
 
+/// Owned endpoint-probe result suitable for direct JSON serialization.
 #[derive(Clone, Debug, Serialize)]
 pub struct ProbeResult {
+    /// One of `probing`, `reachable`, `unreachable`, `error`, or `unknown`.
     pub status: &'static str,
+    /// Diagnostic detail for `unreachable` and local configuration `error`.
     pub message: Option<String>,
 }
 
 impl ServerProbeManager {
+    /// Replaces the cache with `probing` entries and spawns one probe thread per server.
+    ///
+    /// Returns the new batch revision without waiting for DNS, TLS, or QUIC I/O.
+    /// Results from older batches are discarded. Probe threads are detached and
+    /// cannot be cancelled through this manager.
     pub fn refresh(
         &self,
         servers: &[ServerEntry],
@@ -108,11 +125,9 @@ impl ServerProbeManager {
                     .unwrap_or_else(|poisoned| poisoned.into_inner());
                 // A newer refresh or any server-list mutation owns the cache,
                 // so stale workers cannot attach a result to another endpoint.
+                let cached_entry = cache.entries.get(&index);
                 let owns_entry = cache.revision == revision
-                    && cache
-                        .entries
-                        .get(&index)
-                        .is_some_and(|entry| entry.server == server);
+                    && cached_entry.is_some_and(|entry| entry.server == server);
                 if owns_entry {
                     if let Some(entry) = cache.entries.get_mut(&index) {
                         entry.result = result;
@@ -124,12 +139,16 @@ impl ServerProbeManager {
         revision
     }
 
+    /// Returns a cloned cached result only when both index and server value match.
+    ///
+    /// Missing or stale entries return `unknown`; this method does not start a probe.
     pub fn result(&self, index: usize, server: &ServerEntry) -> ProbeResult {
-        self.cache
+        let cache = self
+            .cache
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .entries
-            .get(&index)
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let entry = cache.entries.get(&index);
+        entry
             .filter(|entry| &entry.server == server)
             .map(|entry| entry.result.clone())
             .unwrap_or(ProbeResult {
@@ -151,6 +170,9 @@ impl ServerProbeManager {
         cache.entries.clear();
     }
 
+    /// Returns a cache-change counter for polling UI invalidation.
+    ///
+    /// Refresh, invalidation, and each accepted worker result advance the counter.
     pub fn change_revision(&self) -> u64 {
         self.cache
             .lock()
@@ -186,28 +208,33 @@ fn probe_server(server: &ServerEntry, network_settings: &ClientNetworkSettings) 
     }
 }
 
+/// Bevy-owned authority for one selected server and at most one active attempt.
 #[derive(bevy::prelude::Resource)]
 pub struct ClientNetworkManager {
     network_settings: ClientNetworkSettings,
     marionette_ipc: ClientMarionetteIpc,
     presence_ipc: ClientPresenceIpc,
     local_coordinate_ipc: LocalCoordinateClientIpc,
+    resource_fingerprint: ResourceCatalogFingerprint,
     active: Option<ActiveClientConnection>,
     snapshot: ClientConnectionSnapshot,
 }
 
 impl ClientNetworkManager {
+    /// Creates a disconnected manager over the supplied domain IPC endpoints.
     pub fn new(
         network_settings: ClientNetworkSettings,
         marionette_ipc: ClientMarionetteIpc,
         presence_ipc: ClientPresenceIpc,
         local_coordinate_ipc: LocalCoordinateClientIpc,
+        resource_fingerprint: ResourceCatalogFingerprint,
     ) -> Self {
         Self {
             network_settings,
             marionette_ipc,
             presence_ipc,
             local_coordinate_ipc,
+            resource_fingerprint,
             active: None,
             snapshot: ClientConnectionSnapshot {
                 status: ClientConnectionStatus::Disconnected,
@@ -215,7 +242,17 @@ impl ClientNetworkManager {
             },
         }
     }
-    pub fn connect(&mut self, server: &ServerEntry) -> Result<(), String> {
+    /// Starts one asynchronous reconnecting attempt from the disconnected state.
+    ///
+    /// Local validation/runtime startup failure leaves the selected server and an
+    /// `Error` status for retry. Later dial failures are reflected asynchronously
+    /// through [`Self::status`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if another attempt/session is active or local connection
+    /// setup fails.
+    pub fn start_connection(&mut self, server: &ServerEntry) -> Result<(), String> {
         let status = self.status().status;
         if self.active.is_some() || status != ClientConnectionStatus::Disconnected {
             return Err(format!(
@@ -236,6 +273,7 @@ impl ClientNetworkManager {
             self.marionette_ipc.clone(),
             self.presence_ipc.clone(),
             self.local_coordinate_ipc.clone(),
+            self.resource_fingerprint,
         ) {
             Ok(active) => {
                 self.active = Some(active);
@@ -253,6 +291,11 @@ impl ClientNetworkManager {
             }
         }
     }
+    /// Stops the current attempt, then starts a fresh attempt to the selected server.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if no server is selected or fresh startup fails.
     pub fn retry(&mut self) -> Result<(), String> {
         let server = self
             .snapshot
@@ -262,8 +305,12 @@ impl ClientNetworkManager {
         // Retry owns termination of the previous attempt. Ordinary connect
         // must never implicitly tear down a session or attempt.
         self.disconnect();
-        self.connect(&server)
+        self.start_connection(&server)
     }
+    /// Stops and joins the active connection runtime and clears server selection.
+    ///
+    /// This blocks the current OS thread. It does not itself enqueue domain-state
+    /// clear commands; connection-loss callbacks own transient-loss cleanup.
     pub fn disconnect(&mut self) {
         let previous = self.status().status;
         let server = self
@@ -283,6 +330,7 @@ impl ClientNetworkManager {
         };
         info!("Client connection state transition completed: {previous:?} -> Disconnected");
     }
+    /// Returns an owned snapshot, overlaying live callback status when active.
     pub fn status(&self) -> ClientConnectionSnapshot {
         let mut snapshot = self.snapshot.clone();
         if let Some(active) = &self.active {
@@ -292,6 +340,7 @@ impl ClientNetworkManager {
     }
 }
 
+/// Owns one reconnecting network runtime and its two ECS outbound bridges.
 pub struct ActiveClientConnection {
     name: String,
     network: Arc<ClientNetwork>,
@@ -300,12 +349,18 @@ pub struct ActiveClientConnection {
 }
 
 impl ActiveClientConnection {
+    /// Validates the server, starts networking, and spawns game/resource bridges.
+    ///
+    /// Success does not mean a remote session is established; status begins as
+    /// `Connecting`. If bridge creation fails, already-created owners are dropped
+    /// during error unwinding and shut down their workers.
     pub fn start(
         server: &ServerEntry,
         network_settings: &ClientNetworkSettings,
         marionette_ipc: ClientMarionetteIpc,
         presence_ipc: ClientPresenceIpc,
         local_coordinate_ipc: LocalCoordinateClientIpc,
+        resource_fingerprint: ResourceCatalogFingerprint,
     ) -> Result<Self, String> {
         validate_server_entry(server, network_settings)?;
         let name = server.name.trim();
@@ -319,6 +374,7 @@ impl ActiveClientConnection {
             marionette_ipc: marionette_ipc.clone(),
             presence_ipc: presence_ipc.clone(),
             local_coordinate_ipc: local_coordinate_ipc.clone(),
+            resource_fingerprint,
             status: Arc::clone(&status),
         });
         let network = Arc::new(
@@ -347,19 +403,23 @@ impl ActiveClientConnection {
         })
     }
 
+    /// Returns the trimmed server display name captured at startup.
     pub fn name(&self) -> &str {
         &self.name
     }
 
+    /// Returns a cloned momentary status updated by networking callbacks.
     pub fn status(&self) -> ClientConnectionStatus {
-        self.status
-            .read()
+        let status = self.status.read();
+        status
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clone()
     }
 
-    /// Deterministically stops both ECS bridge adapters before stopping the
-    /// network runtime. Calling it more than once is harmless.
+    /// Signals and joins both ECS bridges before stopping the network runtime.
+    ///
+    /// This blocks the current OS thread and is idempotent after worker handles
+    /// are drained.
     pub fn shutdown(&mut self) {
         debug!("Stopping client connection: server={}", self.name);
         self.bridges.shutdown();
@@ -373,6 +433,10 @@ impl Drop for ActiveClientConnection {
     }
 }
 
+/// Validates a nonempty display name and resolves the configured endpoint.
+///
+/// Resolution is synchronous and may perform DNS. Success is only local
+/// configuration validation; no QUIC connection is attempted.
 pub fn validate_server_entry(
     server: &ServerEntry,
     configured: &ClientNetworkSettings,
@@ -401,9 +465,15 @@ fn network_config(
             CertificatePolicy::TrustOnFirstUse
         },
         reconnect_delay: Duration::from_secs(5),
+        admission: roundo_networking::TransportAdmissionPolicy::default(),
     })
 }
 
+/// Resolves endpoint text and preserves the host text needed for TLS SNI.
+///
+/// Explicit socket addresses retain their numeric IP as server name; bare IPs
+/// receive `default_port`; hostnames may include an explicit port and resolve
+/// synchronously. When DNS returns multiple addresses, only the first is kept.
 pub(crate) fn resolve_socket_address(
     address: &str,
     default_port: u16,
@@ -437,19 +507,19 @@ pub(crate) fn resolve_socket_address(
     Ok((resolved, host.to_string()))
 }
 
+/// Projects network-runtime callbacks into domain queues and connection status.
 struct ClientHooksAdapter {
     marionette_ipc: ClientMarionetteIpc,
     presence_ipc: ClientPresenceIpc,
     local_coordinate_ipc: LocalCoordinateClientIpc,
+    resource_fingerprint: ResourceCatalogFingerprint,
     status: Arc<RwLock<ClientConnectionStatus>>,
 }
 
 impl ClientHooksAdapter {
     fn set_status(&self, status: ClientConnectionStatus) {
-        let mut current = self
-            .status
-            .write()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let current = self.status.write();
+        let mut current = current.unwrap_or_else(|poisoned| poisoned.into_inner());
         if *current != status {
             info!(
                 "Client connection state transition: {:?} -> {status:?}",
@@ -461,6 +531,10 @@ impl ClientHooksAdapter {
 }
 
 impl ClientHooks for ClientHooksAdapter {
+    fn resource_catalog_fingerprint(&self) -> ResourceCatalogFingerprint {
+        self.resource_fingerprint
+    }
+
     fn on_server_game_message(&self, message: ServerGameMessage) {
         match message {
             ServerGameMessage::PlayerState { state } => {
@@ -621,6 +695,10 @@ impl ClientHooks for ClientHooksAdapter {
     }
 }
 
+/// Forwards sequenced controller events to stream 0 until shutdown or send failure.
+///
+/// The event that encounters saturation/closure is dropped, and the bridge stops
+/// permanently; it does not retry after network reconnection.
 fn bridge_game_ecs_events(
     marionette_ipc: ClientMarionetteIpc,
     network: Arc<ClientNetwork>,
@@ -648,6 +726,10 @@ fn bridge_game_ecs_events(
     debug!("Stopped client game IPC bridge");
 }
 
+/// Forwards chunk demand to stream 1 until shutdown or send failure.
+///
+/// The event that encounters saturation/closure is dropped, and the bridge stops
+/// permanently; it does not retry after network reconnection.
 fn bridge_resource_ecs_events(
     local_coordinate_ipc: LocalCoordinateClientIpc,
     network: Arc<ClientNetwork>,
@@ -705,6 +787,7 @@ mod tests {
             marionette.endpoint_a(),
             presence.endpoint_a(),
             local_coordinate.endpoint_a(),
+            roundo_networking::ResourceCatalogFingerprint::default(),
         )
     }
 
@@ -761,13 +844,13 @@ mod tests {
             name: String::new(),
             address: String::new(),
         };
-        assert!(manager.connect(&invalid).is_err());
+        assert!(manager.start_connection(&invalid).is_err());
         assert!(matches!(
             manager.status().status,
             ClientConnectionStatus::Error { .. }
         ));
 
-        let error = manager.connect(&invalid).unwrap_err();
+        let error = manager.start_connection(&invalid).unwrap_err();
         assert!(error.contains("cannot start a connection"));
         assert!(matches!(
             manager.status().status,
@@ -783,7 +866,7 @@ mod tests {
             .unwrap();
         let mut manager = network_manager();
         manager
-            .connect(&ServerEntry {
+            .start_connection(&ServerEntry {
                 name: "blackhole".into(),
                 address: blackhole.local_addr().unwrap().to_string(),
             })

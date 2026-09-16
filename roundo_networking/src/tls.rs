@@ -16,10 +16,12 @@ use std::fs;
 use std::path::Path;
 use std::sync::{Arc, RwLock};
 
+/// DER credentials assembled into a QUIC-ready server configuration.
 pub(crate) struct PreparedServerTls {
     pub config: Arc<ServerConfig>,
 }
 
+/// Loads configured credentials or generates and persists a self-signed pair.
 pub(crate) fn prepare_server_tls(
     certificate_directory: &Path,
     subject_alt_names: &[String],
@@ -30,6 +32,7 @@ pub(crate) fn prepare_server_tls(
     let private_key_path = certificate_directory.join("server_key.pem");
 
     if !(certificate_path.is_file() && private_key_path.is_file()) {
+        // Missing files are generated only when explicitly permitted.
         if !generate_self_signed_certificate {
             return Err(NetworkError::new(format!(
                 "TLS certificate or key is missing in {}",
@@ -39,9 +42,25 @@ pub(crate) fn prepare_server_tls(
         let CertifiedKey { cert, signing_key } =
             generate_simple_self_signed(subject_alt_names.to_vec())
                 .map_err(NetworkError::from_display)?;
-        fs::write(&certificate_path, cert.pem()).map_err(NetworkError::from_display)?;
-        fs::write(&private_key_path, signing_key.serialize_pem())
-            .map_err(NetworkError::from_display)?;
+        let certificate_write = fs::write(&certificate_path, cert.pem());
+        certificate_write.map_err(|error| {
+            NetworkError::new(format!(
+                "cannot write TLS certificate {}: {error}",
+                certificate_path.display()
+            ))
+        })?;
+        let private_key_write = fs::write(&private_key_path, signing_key.serialize_pem());
+        private_key_write.map_err(|error| {
+            NetworkError::new(format!(
+                "cannot write TLS private key {}: {error}",
+                private_key_path.display()
+            ))
+        })?;
+        log::info!(
+            "generated self-signed TLS identity: certificate={}, private_key={}",
+            certificate_path.display(),
+            private_key_path.display()
+        );
     }
 
     let certificates = CertificateDer::pem_file_iter(&certificate_path)
@@ -64,6 +83,7 @@ pub(crate) fn prepare_server_tls(
     })
 }
 
+/// Builds a client config for strict, TOFU, or insecure verification.
 pub(crate) fn create_client_tls_config(
     policy: &CertificatePolicy,
 ) -> Result<Arc<ClientConfig>, NetworkError> {
@@ -88,6 +108,7 @@ pub(crate) fn create_client_tls_config(
     Ok(Arc::new(config))
 }
 
+// Native roots are imported for strict verification.
 fn system_roots() -> RootCertStore {
     let mut roots = RootCertStore::empty();
     roots.roots = Vec::from(webpki_roots::TLS_SERVER_ROOTS);
@@ -95,11 +116,13 @@ fn system_roots() -> RootCertStore {
 }
 
 #[derive(Debug)]
+/// Pins the first observed certificate fingerprint for each server name.
 struct TrustOnFirstUseVerifier {
     roots: Arc<RootCertStore>,
     fingerprints: Arc<RwLock<HashMap<String, [u8; 32]>>>,
 }
 
+// Pin storage is synchronized because rustls may verify concurrently.
 impl TrustOnFirstUseVerifier {
     fn new() -> Self {
         Self {
@@ -109,6 +132,7 @@ impl TrustOnFirstUseVerifier {
     }
 }
 
+// Signature checks still use rustls-supported algorithms.
 impl ServerCertVerifier for TrustOnFirstUseVerifier {
     fn verify_server_cert(
         &self,
@@ -132,11 +156,11 @@ impl ServerCertVerifier for TrustOnFirstUseVerifier {
 
         let server_name = server_name.to_str().to_string();
         let fingerprint: [u8; 32] = Sha256::digest(end_entity.as_ref()).into();
-        let mut fingerprints = self
-            .fingerprints
-            .write()
+        let fingerprint_write = self.fingerprints.write();
+        let mut fingerprints = fingerprint_write
             .map_err(|_| Error::General("certificate trust store lock poisoned".into()))?;
-        match fingerprints.get(&server_name) {
+        let trusted_fingerprint = fingerprints.get(&server_name);
+        match trusted_fingerprint {
             Some(trusted) if trusted == &fingerprint => Ok(ServerCertVerified::assertion()),
             Some(_) => Err(Error::General("server certificate changed".into())),
             None => {
@@ -182,6 +206,7 @@ impl ServerCertVerifier for TrustOnFirstUseVerifier {
 }
 
 #[derive(Debug)]
+/// Development-only verifier that accepts any presented certificate.
 struct InsecureVerifier;
 
 impl ServerCertVerifier for InsecureVerifier {

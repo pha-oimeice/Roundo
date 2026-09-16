@@ -1,3 +1,5 @@
+//! Presence identities, scene membership, and nearby-entity synchronization.
+
 mod client;
 mod server;
 
@@ -12,18 +14,18 @@ pub use roundo_contracts::{
     SceneId,
 };
 pub use server::{
-    DEFAULT_S0_ROOM_SIZE, DEFAULT_S1_EDGE_LENGTH, PlayerConnection, PlayerScene,
-    PresenceServerCommand, PresenceServerEvent, PresenceServerIpc, PresenceServerSet,
-    PresenceServerSettings, RoundoPresenceServerPlugin, ServerPlayer, ServerSceneWorlds,
-    TorusSpace,
+    PlayerConnection, PlayerScene, PresenceServerCommand, PresenceServerEvent, PresenceServerIpc,
+    PresenceServerSet, PresenceServerSettings, RoundoPresenceServerPlugin, ServerPlayer,
 };
 
 #[derive(Component, Clone, Copy, Debug, Eq, PartialEq)]
+/// Stable network identity attached to a player entity.
 pub struct Player {
     pub id: PlayerId,
 }
 
 #[derive(Component, Clone, Debug, Eq, PartialEq)]
+/// Discoverable world metadata exposed through presence snapshots.
 pub struct JoinableWorld {
     pub id: JoinableWorldId,
     pub name: String,

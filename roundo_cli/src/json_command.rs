@@ -96,7 +96,8 @@ impl UnixCommandRegistry {
                     .iter()
                     .map(|token| token.trim_start_matches('/').to_ascii_lowercase())
                     .collect::<Vec<_>>();
-                self.commands.get(&path).map(|entry| (length, entry))
+                let entry = self.commands.get(&path);
+                entry.map(|entry| (length, entry))
             })
             .ok_or_else(|| UnixCommandParseError::new("unknown command"))?;
         Ok((
@@ -109,7 +110,8 @@ impl UnixCommandRegistry {
             .iter()
             .map(|token| token.trim_start_matches('/').to_ascii_lowercase())
             .collect::<Vec<_>>();
-        self.commands.get(&path).map(|entry| (entry.usage)())
+        let entry = self.commands.get(&path);
+        entry.map(|entry| (entry.usage)())
     }
 }
 
@@ -282,8 +284,8 @@ impl<'a, Context> CommandRegistry<'a, Context> {
         self.handlers.keys().map(String::as_str).collect()
     }
     pub fn dispatch_value(&self, input: Value, context: &mut Context) -> Value {
-        let command = input
-            .get("command")
+        let command_value = input.get("command");
+        let command = command_value
             .and_then(Value::as_str)
             .unwrap_or_default()
             .to_owned();
@@ -507,16 +509,8 @@ mod tests {
         let schema = command_schema::<EchoDefinition>();
         assert_eq!(schema["command"], "echo");
         assert_eq!(schema["input"]["properties"]["command"]["const"], "echo");
-        assert!(
-            schema["input"]["properties"]["arguments"]["properties"]
-                .get("value")
-                .is_some()
-        );
-        assert!(
-            schema["success"]["properties"]["data"]["properties"]
-                .get("echoed")
-                .is_some()
-        );
+        assert!(!schema["input"]["properties"]["arguments"]["properties"]["value"].is_null());
+        assert!(!schema["success"]["properties"]["data"]["properties"]["echoed"].is_null());
     }
 
     #[test]

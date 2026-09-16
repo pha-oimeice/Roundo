@@ -7,14 +7,6 @@ CREATE TABLE roundo_users (
     status TEXT NOT NULL DEFAULT 'active'
 );
 
-CREATE TABLE roundo_user_authentications (
-    id INT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    user_id INT NOT NULL REFERENCES roundo_users(id) ON DELETE CASCADE,
-    provider TEXT NOT NULL,
-    provider_subject TEXT NOT NULL,
-    UNIQUE(provider, provider_subject)
-);
-
 CREATE TABLE roundo_game_sessions (
     id INT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     owner_user_id INT NOT NULL REFERENCES roundo_users(id) ON DELETE CASCADE,

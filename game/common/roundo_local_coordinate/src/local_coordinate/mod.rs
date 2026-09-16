@@ -26,6 +26,7 @@ mod test;
 mod tests;
 mod transform;
 mod virtual_chunk;
+mod voxel_registry;
 
 pub use base::LocalCoordinateSet;
 pub use client::{
@@ -34,10 +35,9 @@ pub use client::{
     LocalCoordinateClientWorld, MAX_CHUNK_VIEW_DISTANCE, MIN_CHUNK_VIEW_DISTANCE,
 };
 pub use data::{
-    AtomicVoxel, AtomicVoxelId, EMPTY_VOXEL_ID, GLOBAL_ATOMIC_VOXEL_DATA, GlobalAtomicVoxelData,
-    LocalAtomicVoxelData, LocalCoordinate, LocalCoordinateCRUDMessage,
-    LocalCoordinateCRUDMessageEnum, LocalCoordinateChunkView, LocalCoordinateIdentity,
-    PositionedAtomicVoxel, SOLID_VOXEL_ID,
+    AtomicVoxel, AtomicVoxelId, EMPTY_VOXEL_ID, GlobalAtomicVoxelData, LocalAtomicVoxelData,
+    LocalCoordinate, LocalCoordinateCRUDMessage, LocalCoordinateCRUDMessageEnum,
+    LocalCoordinateChunkView, LocalCoordinateIdentity, PositionedAtomicVoxel, SOLID_VOXEL_ID,
 };
 pub use raycast::{VoxelRaycastHit, VoxelRaycaster};
 pub use server::{
@@ -49,6 +49,10 @@ pub use server::{
 pub use transform::LocalCoordinateTransform;
 pub use virtual_chunk::{
     ChunkReference, VIRTUAL_CHUNK_EDGE_LENGTH, VirtualChunkCoordinate, VirtualChunkIndex,
+};
+pub use voxel_registry::{
+    AtomicVoxelRegistry, AtomicVoxelRegistryError, DEFAULT_PLACED_VOXEL_SLOT,
+    GENERATED_SOLID_VOXEL_SLOT,
 };
 
 pub mod msg {

@@ -2,52 +2,10 @@ use super::*;
 use bevy::prelude::{Fixed, Time};
 
 #[test]
-fn s1_has_configurable_constant_default_dimensions() {
-    let scenes = ServerSceneWorlds::default();
-    assert_eq!(
-        scenes.space(SceneId::S1).unwrap().size(),
-        [DEFAULT_S1_EDGE_LENGTH; 3]
-    );
-}
-
-#[test]
 fn anonymous_players_spawn_at_two_facing_negative_y() {
     let transform = s1_spawn_transform();
     assert_eq!(transform.translation, Vec3::new(0.0, 2.0, 0.0));
     assert!((transform.rotation * Vec3::NEG_Z).abs_diff_eq(Vec3::NEG_Y, f32::EPSILON * 4.0));
-}
-
-#[test]
-fn s0_room_dimensions_can_change_at_runtime() {
-    let mut scenes = ServerSceneWorlds::default();
-    assert!(scenes.resize_s0_room(7, DEFAULT_S0_ROOM_SIZE));
-    assert_eq!(
-        scenes.space(SceneId::S0 { room_id: 7 }).unwrap().size(),
-        DEFAULT_S0_ROOM_SIZE
-    );
-    assert!(scenes.resize_s0_room(7, [64.0, 32.0, 16.0]));
-    assert_eq!(
-        scenes.space(SceneId::S0 { room_id: 7 }).unwrap().size(),
-        [64.0, 32.0, 16.0]
-    );
-}
-
-#[test]
-fn torus_wraps_through_both_endpoints() {
-    let space = TorusSpace::new([10.0; 3]).unwrap();
-    assert_eq!(
-        space.wrap(Vec3::new(-1.0, 10.0, 21.0)),
-        Vec3::new(9.0, 0.0, 1.0)
-    );
-}
-
-#[test]
-fn torus_distance_uses_the_shortest_wrapped_path() {
-    let space = TorusSpace::new([10.0; 3]).unwrap();
-    assert_eq!(
-        space.distance_squared(Vec3::new(0.5, 0.0, 0.0), Vec3::new(9.5, 0.0, 0.0)),
-        1.0
-    );
 }
 
 #[test]

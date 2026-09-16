@@ -1,3 +1,5 @@
+//! Client command catalog, adapters, main-world dispatch, and subscribed Client Data.
+
 mod application;
 
 use crate::{
@@ -11,11 +13,9 @@ use bevy::{
         Update,
     },
 };
-use roundo_marionette::ClientPlayerController;
+use roundo_marionette::{ClientPlayerController, InputRegistry};
 use roundo_toolbox::request_response_pipe::{JsonSubmitError, RequestCall};
-use roundo_user_config::{
-    ClientConfig, ClientKeyBindingConfig, ClientKeyCode, ClientMovementAction, ServerEntry,
-};
+use roundo_user_config::{ClientConfig, ClientInputBindingConfig, ClientInputKey, ServerEntry};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -32,6 +32,7 @@ const BINDINGS_DATA: &str = "client.bindings";
 const HUD_DATA: &str = "client.hud";
 const HUD_SYNC_INTERVAL_SECS: f32 = 0.05;
 
+/// Last published Client Data snapshots and source-specific change counters.
 #[derive(Resource, Default)]
 struct ClientDataSyncState {
     subscription_generation: u64,
@@ -50,9 +51,7 @@ struct ServerIndexArguments {
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct UiOpenArguments {
-    slot: Option<String>,
-    resource: Option<String>,
-    path: Option<String>,
+    import: String,
 }
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -106,8 +105,8 @@ struct SettingsSetArguments {
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct BindingArguments {
+    slot: String,
     key: String,
-    actions: Vec<String>,
 }
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -115,38 +114,27 @@ struct BindingsReplaceArguments {
     old_binding: BindingArguments,
     binding: BindingArguments,
 }
-impl TryFrom<BindingArguments> for ClientKeyBindingConfig {
+impl TryFrom<BindingArguments> for ClientInputBindingConfig {
     type Error = crate::json_command::CommandError;
     fn try_from(value: BindingArguments) -> Result<Self, Self::Error> {
-        if value.actions.is_empty() {
+        if value.slot.trim().is_empty() {
             return Err(crate::json_command::CommandError::new(
                 "invalid_arguments",
-                "binding actions cannot be empty",
+                "binding slot cannot be empty",
             ));
         }
-        let unique_count = value
-            .actions
-            .iter()
-            .collect::<std::collections::BTreeSet<_>>()
-            .len();
-        if unique_count != value.actions.len() {
-            return Err(crate::json_command::CommandError::new(
-                "invalid_arguments",
-                "binding actions must be unique",
-            ));
-        }
-        serde_json::from_value(serde_json::json!({"key": value.key, "actions": value.actions}))
-            .map_err(|error| {
+        let key =
+            serde_json::from_value(serde_json::Value::String(value.key)).map_err(|error| {
                 crate::json_command::CommandError::new("invalid_arguments", error.to_string())
-            })
+            })?;
+        Ok(Self::new(value.slot, key))
     }
 }
 
-/// Stable UI-facing binding relation, adapted from the canonical config enums.
 #[derive(Serialize, JsonSchema)]
 struct BindingDisplay {
+    slot: String,
     key: String,
-    actions: Vec<String>,
 }
 #[derive(Serialize, JsonSchema)]
 struct SupportedKeyDisplay {
@@ -154,73 +142,77 @@ struct SupportedKeyDisplay {
     display_name: String,
 }
 #[derive(Serialize, JsonSchema)]
-struct SupportedActionDisplay {
-    action: String,
+struct SupportedSlotDisplay {
+    slot: String,
     display_name: String,
 }
 #[derive(Serialize, JsonSchema)]
 struct BindingsListOutput {
     bindings: Vec<BindingDisplay>,
     supported_keys: Vec<SupportedKeyDisplay>,
-    supported_actions: Vec<SupportedActionDisplay>,
+    supported_slots: Vec<SupportedSlotDisplay>,
 }
 #[derive(Serialize, JsonSchema)]
 struct BindingMutationOutput {}
 
-fn key_display(key: ClientKeyCode) -> SupportedKeyDisplay {
+fn key_display(key: ClientInputKey) -> SupportedKeyDisplay {
+    use ClientInputKey::*;
     let (key, display_name) = match key {
-        ClientKeyCode::Escape => ("escape", "Escape"),
-        ClientKeyCode::Digit0 => ("digit0", "0"),
-        ClientKeyCode::Digit1 => ("digit1", "1"),
-        ClientKeyCode::Digit2 => ("digit2", "2"),
-        ClientKeyCode::Digit3 => ("digit3", "3"),
-        ClientKeyCode::Digit4 => ("digit4", "4"),
-        ClientKeyCode::Digit5 => ("digit5", "5"),
-        ClientKeyCode::Digit6 => ("digit6", "6"),
-        ClientKeyCode::Digit7 => ("digit7", "7"),
-        ClientKeyCode::Digit8 => ("digit8", "8"),
-        ClientKeyCode::Digit9 => ("digit9", "9"),
-        ClientKeyCode::Backspace => ("backspace", "Backspace"),
-        ClientKeyCode::Tab => ("tab", "Tab"),
-        ClientKeyCode::KeyQ => ("key_q", "Q"),
-        ClientKeyCode::KeyW => ("key_w", "W"),
-        ClientKeyCode::KeyE => ("key_e", "E"),
-        ClientKeyCode::KeyR => ("key_r", "R"),
-        ClientKeyCode::KeyT => ("key_t", "T"),
-        ClientKeyCode::KeyY => ("key_y", "Y"),
-        ClientKeyCode::KeyU => ("key_u", "U"),
-        ClientKeyCode::KeyI => ("key_i", "I"),
-        ClientKeyCode::KeyO => ("key_o", "O"),
-        ClientKeyCode::KeyP => ("key_p", "P"),
-        ClientKeyCode::CapsLock => ("caps_lock", "Caps Lock"),
-        ClientKeyCode::KeyA => ("key_a", "A"),
-        ClientKeyCode::KeyS => ("key_s", "S"),
-        ClientKeyCode::KeyD => ("key_d", "D"),
-        ClientKeyCode::KeyF => ("key_f", "F"),
-        ClientKeyCode::KeyG => ("key_g", "G"),
-        ClientKeyCode::KeyH => ("key_h", "H"),
-        ClientKeyCode::KeyJ => ("key_j", "J"),
-        ClientKeyCode::KeyK => ("key_k", "K"),
-        ClientKeyCode::KeyL => ("key_l", "L"),
-        ClientKeyCode::Enter => ("enter", "Enter"),
-        ClientKeyCode::ShiftLeft => ("shift_left", "Left Shift"),
-        ClientKeyCode::KeyZ => ("key_z", "Z"),
-        ClientKeyCode::KeyX => ("key_x", "X"),
-        ClientKeyCode::KeyC => ("key_c", "C"),
-        ClientKeyCode::KeyV => ("key_v", "V"),
-        ClientKeyCode::KeyB => ("key_b", "B"),
-        ClientKeyCode::KeyN => ("key_n", "N"),
-        ClientKeyCode::KeyM => ("key_m", "M"),
-        ClientKeyCode::ShiftRight => ("shift_right", "Right Shift"),
-        ClientKeyCode::ControlLeft => ("control_left", "Left Control"),
-        ClientKeyCode::AltLeft => ("alt_left", "Left Alt"),
-        ClientKeyCode::Space => ("space", "Space"),
-        ClientKeyCode::AltRight => ("alt_right", "Right Alt"),
-        ClientKeyCode::ControlRight => ("control_right", "Right Control"),
-        ClientKeyCode::ArrowLeft => ("arrow_left", "Left Arrow"),
-        ClientKeyCode::ArrowUp => ("arrow_up", "Up Arrow"),
-        ClientKeyCode::ArrowDown => ("arrow_down", "Down Arrow"),
-        ClientKeyCode::ArrowRight => ("arrow_right", "Right Arrow"),
+        Digit0 => ("digit0", "0"),
+        Digit1 => ("digit1", "1"),
+        Digit2 => ("digit2", "2"),
+        Digit3 => ("digit3", "3"),
+        Digit4 => ("digit4", "4"),
+        Digit5 => ("digit5", "5"),
+        Digit6 => ("digit6", "6"),
+        Digit7 => ("digit7", "7"),
+        Digit8 => ("digit8", "8"),
+        Digit9 => ("digit9", "9"),
+        Backspace => ("backspace", "Backspace"),
+        Tab => ("tab", "Tab"),
+        KeyQ => ("key_q", "Q"),
+        KeyW => ("key_w", "W"),
+        KeyE => ("key_e", "E"),
+        KeyR => ("key_r", "R"),
+        KeyT => ("key_t", "T"),
+        KeyY => ("key_y", "Y"),
+        KeyU => ("key_u", "U"),
+        KeyI => ("key_i", "I"),
+        KeyO => ("key_o", "O"),
+        KeyP => ("key_p", "P"),
+        CapsLock => ("caps_lock", "Caps Lock"),
+        KeyA => ("key_a", "A"),
+        KeyS => ("key_s", "S"),
+        KeyD => ("key_d", "D"),
+        KeyF => ("key_f", "F"),
+        KeyG => ("key_g", "G"),
+        KeyH => ("key_h", "H"),
+        KeyJ => ("key_j", "J"),
+        KeyK => ("key_k", "K"),
+        KeyL => ("key_l", "L"),
+        Enter => ("enter", "Enter"),
+        ShiftLeft => ("shift_left", "Left Shift"),
+        KeyZ => ("key_z", "Z"),
+        KeyX => ("key_x", "X"),
+        KeyC => ("key_c", "C"),
+        KeyV => ("key_v", "V"),
+        KeyB => ("key_b", "B"),
+        KeyN => ("key_n", "N"),
+        KeyM => ("key_m", "M"),
+        ShiftRight => ("shift_right", "Right Shift"),
+        ControlLeft => ("control_left", "Left Control"),
+        AltLeft => ("alt_left", "Left Alt"),
+        Space => ("space", "Space"),
+        AltRight => ("alt_right", "Right Alt"),
+        ControlRight => ("control_right", "Right Control"),
+        ArrowLeft => ("arrow_left", "Left Arrow"),
+        ArrowUp => ("arrow_up", "Up Arrow"),
+        ArrowDown => ("arrow_down", "Down Arrow"),
+        ArrowRight => ("arrow_right", "Right Arrow"),
+        F1 => ("f1", "F1"),
+        MouseLeft => ("mouse_left", "Left Mouse Button"),
+        MouseRight => ("mouse_right", "Right Mouse Button"),
+        MouseMiddle => ("mouse_middle", "Middle Mouse Button"),
     };
     SupportedKeyDisplay {
         key: key.into(),
@@ -228,111 +220,81 @@ fn key_display(key: ClientKeyCode) -> SupportedKeyDisplay {
     }
 }
 
-fn action_display(action: ClientMovementAction) -> SupportedActionDisplay {
-    let (action, display_name) = match action {
-        ClientMovementAction::MoveUp => ("move_up", "Move Up"),
-        ClientMovementAction::MoveDown => ("move_down", "Move Down"),
-        ClientMovementAction::MoveLeft => ("move_left", "Move Left"),
-        ClientMovementAction::MoveRight => ("move_right", "Move Right"),
-        ClientMovementAction::MoveForward => ("move_forward", "Move Forward"),
-        ClientMovementAction::MoveBackward => ("move_backward", "Move Backward"),
-    };
-    SupportedActionDisplay {
-        action: action.into(),
-        display_name: display_name.into(),
-    }
-}
-
 fn supported_keys() -> Vec<SupportedKeyDisplay> {
+    use ClientInputKey::*;
     [
-        ClientKeyCode::Escape,
-        ClientKeyCode::Digit0,
-        ClientKeyCode::Digit1,
-        ClientKeyCode::Digit2,
-        ClientKeyCode::Digit3,
-        ClientKeyCode::Digit4,
-        ClientKeyCode::Digit5,
-        ClientKeyCode::Digit6,
-        ClientKeyCode::Digit7,
-        ClientKeyCode::Digit8,
-        ClientKeyCode::Digit9,
-        ClientKeyCode::Backspace,
-        ClientKeyCode::Tab,
-        ClientKeyCode::KeyQ,
-        ClientKeyCode::KeyW,
-        ClientKeyCode::KeyE,
-        ClientKeyCode::KeyR,
-        ClientKeyCode::KeyT,
-        ClientKeyCode::KeyY,
-        ClientKeyCode::KeyU,
-        ClientKeyCode::KeyI,
-        ClientKeyCode::KeyO,
-        ClientKeyCode::KeyP,
-        ClientKeyCode::CapsLock,
-        ClientKeyCode::KeyA,
-        ClientKeyCode::KeyS,
-        ClientKeyCode::KeyD,
-        ClientKeyCode::KeyF,
-        ClientKeyCode::KeyG,
-        ClientKeyCode::KeyH,
-        ClientKeyCode::KeyJ,
-        ClientKeyCode::KeyK,
-        ClientKeyCode::KeyL,
-        ClientKeyCode::Enter,
-        ClientKeyCode::ShiftLeft,
-        ClientKeyCode::KeyZ,
-        ClientKeyCode::KeyX,
-        ClientKeyCode::KeyC,
-        ClientKeyCode::KeyV,
-        ClientKeyCode::KeyB,
-        ClientKeyCode::KeyN,
-        ClientKeyCode::KeyM,
-        ClientKeyCode::ShiftRight,
-        ClientKeyCode::ControlLeft,
-        ClientKeyCode::AltLeft,
-        ClientKeyCode::Space,
-        ClientKeyCode::AltRight,
-        ClientKeyCode::ControlRight,
-        ClientKeyCode::ArrowLeft,
-        ClientKeyCode::ArrowUp,
-        ClientKeyCode::ArrowDown,
-        ClientKeyCode::ArrowRight,
+        Digit0,
+        Digit1,
+        Digit2,
+        Digit3,
+        Digit4,
+        Digit5,
+        Digit6,
+        Digit7,
+        Digit8,
+        Digit9,
+        Backspace,
+        Tab,
+        KeyQ,
+        KeyW,
+        KeyE,
+        KeyR,
+        KeyT,
+        KeyY,
+        KeyU,
+        KeyI,
+        KeyO,
+        KeyP,
+        CapsLock,
+        KeyA,
+        KeyS,
+        KeyD,
+        KeyF,
+        KeyG,
+        KeyH,
+        KeyJ,
+        KeyK,
+        KeyL,
+        Enter,
+        ShiftLeft,
+        KeyZ,
+        KeyX,
+        KeyC,
+        KeyV,
+        KeyB,
+        KeyN,
+        KeyM,
+        ShiftRight,
+        ControlLeft,
+        AltLeft,
+        Space,
+        AltRight,
+        ControlRight,
+        ArrowLeft,
+        ArrowUp,
+        ArrowDown,
+        ArrowRight,
+        F1,
+        MouseLeft,
+        MouseRight,
+        MouseMiddle,
     ]
     .into_iter()
     .map(key_display)
     .collect()
 }
 
-fn supported_actions() -> Vec<SupportedActionDisplay> {
-    [
-        ClientMovementAction::MoveUp,
-        ClientMovementAction::MoveDown,
-        ClientMovementAction::MoveLeft,
-        ClientMovementAction::MoveRight,
-        ClientMovementAction::MoveForward,
-        ClientMovementAction::MoveBackward,
-    ]
-    .into_iter()
-    .map(action_display)
-    .collect()
-}
-
-fn binding_display(binding: &ClientKeyBindingConfig) -> BindingDisplay {
+fn binding_display(binding: &ClientInputBindingConfig) -> BindingDisplay {
     BindingDisplay {
+        slot: binding.slot.clone(),
         key: key_display(binding.key).key,
-        actions: binding
-            .actions
-            .iter()
-            .copied()
-            .map(|action| action_display(action).action)
-            .collect(),
     }
 }
 
 fn replace_binding(
-    bindings: &mut Vec<ClientKeyBindingConfig>,
-    old_binding: ClientKeyBindingConfig,
-    replacement: ClientKeyBindingConfig,
+    bindings: &mut Vec<ClientInputBindingConfig>,
+    old_binding: ClientInputBindingConfig,
+    replacement: ClientInputBindingConfig,
 ) -> Result<(), crate::json_command::CommandError> {
     let Some(index) = bindings
         .iter()
@@ -346,13 +308,11 @@ fn replace_binding(
     if bindings
         .iter()
         .enumerate()
-        .any(|(existing_index, existing)| {
-            existing_index != index && existing.key == replacement.key
-        })
+        .any(|(other, existing)| other != index && *existing == replacement)
     {
         return Err(crate::json_command::CommandError::new(
             "binding_exists",
-            "replacement key already has a binding",
+            "replacement binding already exists",
         ));
     }
     bindings[index] = replacement;
@@ -572,17 +532,40 @@ fn settings_show_output(config: &ClientConfigStore) -> SettingsShowOutput {
     }
 }
 
-fn bindings_list_output(config: &ClientConfigStore) -> BindingsListOutput {
+fn validate_binding_slot(
+    binding: &ClientInputBindingConfig,
+    registry: Option<&InputRegistry>,
+) -> Result<(), crate::json_command::CommandError> {
+    if registry.is_some_and(|registry| !registry.contains_slot(&binding.slot)) {
+        return Err(crate::json_command::CommandError::new(
+            "unknown_input_slot",
+            format!("input slot `{}` is not registered", binding.slot),
+        ));
+    }
+    Ok(())
+}
+
+fn bindings_list_output(
+    config: &ClientConfigStore,
+    registry: Option<&InputRegistry>,
+) -> BindingsListOutput {
     BindingsListOutput {
         bindings: config
             .0
             .settings
-            .key_bindings
+            .input_bindings
             .iter()
             .map(binding_display)
             .collect(),
         supported_keys: supported_keys(),
-        supported_actions: supported_actions(),
+        supported_slots: registry
+            .into_iter()
+            .flat_map(InputRegistry::slots)
+            .map(|(slot, definition)| SupportedSlotDisplay {
+                slot: slot.into(),
+                display_name: definition.display_name.clone(),
+            })
+            .collect(),
     }
 }
 
@@ -815,49 +798,60 @@ const CLIENT_COMMANDS: &[ClientCommandCatalogEntry] = &[
     ClientCommandCatalogEntry::of::<DevDefinition>(),
 ];
 
-fn visible_commands(level: u8) -> Vec<&'static str> {
-    CLIENT_COMMANDS
-        .iter()
-        .filter_map(|command| (command.dev_level <= level).then_some(command.name))
-        .collect()
-}
+/// Owns command discovery, visibility, schemas, and dispatch completeness as
+/// one deep module. Source adapters never inspect the declaration list.
+struct ClientCommandCatalog;
 
-fn command_dev_level(name: &str) -> Option<u8> {
-    CLIENT_COMMANDS
-        .iter()
-        .find_map(|command| (command.name == name).then_some(command.dev_level))
-}
+const CLIENT_COMMAND_CATALOG: ClientCommandCatalog = ClientCommandCatalog;
 
-fn client_command_schema(
-    command: &str,
-) -> Result<serde_json::Value, crate::json_command::CommandError> {
-    CLIENT_COMMANDS
-        .iter()
-        .find(|entry| entry.name == command)
-        .map(|entry| (entry.schema)())
-        .ok_or_else(|| match command.is_empty() {
-            true => crate::json_command::CommandError::new(
-                "invalid_arguments",
-                "command must be a non-empty string",
-            ),
-            false => {
-                crate::json_command::CommandError::new("unknown_command", "schema is unavailable")
-            }
-        })
-}
+impl ClientCommandCatalog {
+    fn visible(&self, level: u8) -> Vec<&'static str> {
+        CLIENT_COMMANDS
+            .iter()
+            .filter_map(|command| (command.dev_level <= level).then_some(command.name))
+            .collect()
+    }
 
-/// composition 遗漏目录命令时拒绝 dispatch，防止 catalog、schema 与 handler 漂移。
-fn assert_catalog_matches_registry(registry: &crate::json_command::CommandRegistry<'_, ()>) {
-    let mut catalog_names = CLIENT_COMMANDS
-        .iter()
-        .map(|entry| entry.name)
-        .collect::<Vec<_>>();
-    catalog_names.sort_unstable();
-    assert_eq!(
-        registry.registered_names(),
-        catalog_names,
-        "client command catalog and dispatch registrations diverged"
-    );
+    fn dev_level(&self, name: &str) -> Option<u8> {
+        CLIENT_COMMANDS
+            .iter()
+            .find_map(|command| (command.name == name).then_some(command.dev_level))
+    }
+
+    fn schema(
+        &self,
+        command: &str,
+    ) -> Result<serde_json::Value, crate::json_command::CommandError> {
+        CLIENT_COMMANDS
+            .iter()
+            .find(|entry| entry.name == command)
+            .map(|entry| (entry.schema)())
+            .ok_or_else(|| match command.is_empty() {
+                true => crate::json_command::CommandError::new(
+                    "invalid_arguments",
+                    "command must be a non-empty string",
+                ),
+                false => crate::json_command::CommandError::new(
+                    "unknown_command",
+                    "schema is unavailable",
+                ),
+            })
+    }
+
+    /// Refuses dispatch when composition omitted a catalog command. This check
+    /// is owned here rather than repeated by Web UI and terminal adapters.
+    fn assert_complete(&self, registry: &crate::json_command::CommandRegistry<'_, ()>) {
+        let mut catalog_names = CLIENT_COMMANDS
+            .iter()
+            .map(|entry| entry.name)
+            .collect::<Vec<_>>();
+        catalog_names.sort_unstable();
+        assert_eq!(
+            registry.registered_names(),
+            catalog_names,
+            "client command catalog and dispatch registrations diverged"
+        );
+    }
 }
 
 macro_rules! unix_empty_command {
@@ -926,24 +920,6 @@ unix_empty_command!(
     PositionOutput
 );
 unix_empty_command!(UnixHudShow, "hud.show", "hud show", HudShowOutput);
-
-#[derive(Deserialize, Serialize, JsonSchema, roundo_proc_macros::UnixCommand)]
-#[serde(deny_unknown_fields)]
-#[unix(path = "ui open")]
-struct UnixUiOpen {
-    #[unix(long)]
-    slot: Option<String>,
-    #[unix(long)]
-    resource: Option<String>,
-    #[unix(long)]
-    path: Option<String>,
-}
-impl ClientCommandDefinition for UnixUiOpen {
-    type Input = Self;
-    type Output = UiOpenOutput;
-    const NAME: &'static str = "ui.open";
-    const DEV_LEVEL: u8 = 0;
-}
 
 #[derive(Deserialize, Serialize, JsonSchema, roundo_proc_macros::UnixCommand)]
 #[serde(deny_unknown_fields)]
@@ -1105,7 +1081,6 @@ impl Default for ClientUnixAdapter {
     fn default() -> Self {
         let mut registry = UnixCommandRegistry::default();
         registry.register::<UnixAppQuit>();
-        registry.register::<UnixUiOpen>();
         registry.register::<UnixUiBack>();
         registry.register::<UnixCommandHelp>();
         registry.register::<UnixCommandSchema>();
@@ -1136,9 +1111,15 @@ impl Default for ClientUnixAdapter {
     }
 }
 
+/// Accepted terminal calls awaiting non-blocking response collection.
 #[derive(Resource, Default)]
 struct TerminalResponses(Vec<RequestCall<serde_json::Value>>);
 
+/// Mutable in-memory client configuration used by command handlers.
+///
+/// Most handlers mutate this value before attempting persistence; callers must
+/// inspect command errors because a save failure can leave memory and disk out
+/// of sync.
 #[derive(bevy::prelude::Resource)]
 pub struct ClientConfigStore(pub ClientConfig);
 
@@ -1146,13 +1127,17 @@ pub struct ClientConfigStore(pub ClientConfig);
 /// this resource; Web UI only crosses the small `hud.show` command seam.
 #[derive(Resource, Clone, Debug, Serialize)]
 pub struct HudCache {
+    /// Statistics over at most the latest 120 valid frame durations.
     pub fps: HudFps,
+    /// Current bound-camera position, absent when no valid camera is available.
     pub position: Option<HudPosition>,
+    /// Caller-defined owned targeting snapshot.
     pub target: Option<serde_json::Value>,
     #[serde(skip)]
     frames: VecDeque<f32>,
 }
 
+/// Frames-per-second statistics derived from finite positive frame durations.
 #[derive(Clone, Debug, Serialize)]
 pub struct HudFps {
     pub current: f32,
@@ -1160,9 +1145,11 @@ pub struct HudFps {
     pub min: f32,
     pub max: f32,
 }
+/// Camera position represented as raw world coordinates and floored integer coordinates.
 #[derive(Clone, Debug, Serialize)]
 pub struct HudPosition {
     pub absolute: [f32; 3],
+    /// Each world component is floored and converted to `i32`; this is not a Chunk offset.
     pub chunk_relative: [i32; 3],
 }
 
@@ -1183,6 +1170,7 @@ impl Default for HudCache {
 }
 
 impl HudCache {
+    /// Replaces the owned targeting snapshot exposed by `hud.show` and Client Data.
     pub fn set_target(&mut self, target: Option<serde_json::Value>) {
         self.target = target;
     }
@@ -1211,6 +1199,9 @@ impl ClientConfigStore {
     }
 }
 
+/// Accepts an absolute lowercase `http`/`https` URL without credentials or whitespace.
+///
+/// This is a narrow launch-safety check, not full URL parsing or host validation.
 fn validate_external_url(value: &str) -> Result<&str, crate::json_command::CommandError> {
     if value.trim() != value || value.chars().any(char::is_control) {
         return Err(crate::json_command::CommandError::new(
@@ -1238,6 +1229,9 @@ fn validate_external_url(value: &str) -> Result<&str, crate::json_command::Comma
     Ok(value)
 }
 
+/// Spawns the platform URL opener without waiting for it to finish.
+///
+/// Success means only that the helper process started.
 fn open_external_url(url: &str) -> std::io::Result<()> {
     #[cfg(target_os = "windows")]
     let mut command = {
@@ -1260,6 +1254,9 @@ fn open_external_url(url: &str) -> std::io::Result<()> {
     command.spawn().map(|_| ())
 }
 
+/// Installs missing client resources and the ordered command/data systems.
+///
+/// Preinserted command pipes and configuration stores are preserved.
 pub(super) fn configure(app: &mut App) {
     if !app.world().contains_resource::<ClientCommandPipe>() {
         app.insert_resource(ClientCommandPipe::bounded(256));
@@ -1301,6 +1298,7 @@ fn process_json_commands(
     mut webui: Option<ResMut<roundo_webui::UiLifecycleManager>>,
     mut navigation: Option<bevy::ecs::system::NonSendMut<roundo_webui::UiNavigationExecutor>>,
     hud: Res<HudCache>,
+    input_registry: Option<Res<InputRegistry>>,
 ) {
     for _ in 0..MAX_JSON_COMMANDS_PER_UPDATE {
         let Some((transport, reply)) = pipe.try_receive() else {
@@ -1308,11 +1306,8 @@ fn process_json_commands(
         };
         let request = transport.command;
         let ui_source = command_transport_source(transport.context);
-        let command_name = request
-            .get("command")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or_default()
-            .to_owned();
+        let command_value = &request["command"];
+        let command_name = command_value.as_str().unwrap_or_default().to_owned();
         if command_name == "ui.open" {
             log::debug!("Processing Web UI ui.open command: {request}");
         }
@@ -1323,11 +1318,15 @@ fn process_json_commands(
             dev_level: &mut dev_level,
             camera_position: controller
                 .camera()
-                .and_then(|entity| cameras.get(entity).ok())
+                .and_then(|entity| {
+                    let camera = cameras.get(entity);
+                    camera.ok()
+                })
                 .map(|transform| transform.translation.to_array()),
             webui: webui.as_deref_mut(),
             navigation: navigation.as_deref_mut(),
             hud: &hud,
+            input_registry: input_registry.as_deref(),
         }
         .dispatch(request, ui_source);
         let quit_accepted = response["command"] == "app.quit" && response["ok"] == true;
@@ -1365,7 +1364,7 @@ fn process_json_commands(
             }
         }
         if quit_accepted {
-            app_exit.write(AppExit::Success);
+            let _exit_message = app_exit.write(AppExit::Success);
         }
     }
 }
@@ -1383,11 +1382,8 @@ fn command_transport_source(
 }
 
 fn stale_ui_source_response(request: &serde_json::Value) -> serde_json::Value {
-    let command = request
-        .get("command")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or_default()
-        .to_owned();
+    let command_value = &request["command"];
+    let command = command_value.as_str().unwrap_or_default().to_owned();
     serde_json::to_value(crate::json_command::CommandResult {
         version: crate::json_command::COMMAND_VERSION,
         command,
@@ -1401,15 +1397,14 @@ fn stale_ui_source_response(request: &serde_json::Value) -> serde_json::Value {
     .expect("serializable stale UI command result")
 }
 
-/// Registers the typed definitions at the Bevy main-world seam. The registry
-/// owns envelope/input/output mechanics; this adapter only supplies the state
-/// that existing client capabilities require.
+/// Maps lifecycle-domain failures onto command error categories.
 fn map_ui_lifecycle_error(
     error: roundo_webui::UiLifecycleError,
 ) -> crate::json_command::CommandError {
     let code = match error {
         roundo_webui::UiLifecycleError::UiInstanceLimit => "ui_instance_limit",
         roundo_webui::UiLifecycleError::DuplicatePendingOpen => "ui_open_pending",
+        roundo_webui::UiLifecycleError::UnknownImport(_) => "unknown_ui_import",
         roundo_webui::UiLifecycleError::StaleUiInstance => "stale_ui_instance",
         roundo_webui::UiLifecycleError::CannotCloseUiRoot => "cannot_close_ui_root",
         roundo_webui::UiLifecycleError::Registry(_) => "invalid_ui_resource",
@@ -1420,6 +1415,7 @@ fn map_ui_lifecycle_error(
     crate::json_command::CommandError::new(code, error.to_string())
 }
 
+// Samples only the currently bound valid camera; missing cameras clear position.
 fn update_hud_cache(
     time: Res<Time>,
     controller: Res<ClientPlayerController>,
@@ -1429,7 +1425,10 @@ fn update_hud_cache(
     hud.record_frame(time.delta_secs());
     hud.position = controller
         .camera()
-        .and_then(|entity| cameras.get(entity).ok())
+        .and_then(|entity| {
+            let camera = cameras.get(entity);
+            camera.ok()
+        })
         .map(|transform| {
             let translation = transform.translation;
             HudPosition {
@@ -1443,6 +1442,7 @@ fn update_hud_cache(
         });
 }
 
+/// Publishes changed/forced data and caches it only if at least one subscriber received it.
 fn publish_client_data_if_changed(
     navigation: &mut roundo_webui::UiNavigationExecutor,
     sync: &mut ClientDataSyncState,
@@ -1465,6 +1465,7 @@ fn sync_subscribed_client_data(
     network: Res<crate::client_network::ClientNetworkManager>,
     probes: Res<crate::client_network::ServerProbeManager>,
     hud: Res<HudCache>,
+    input_registry: Option<Res<InputRegistry>>,
     mut sync: ResMut<ClientDataSyncState>,
     mut navigation: Option<bevy::ecs::system::NonSendMut<roundo_webui::UiNavigationExecutor>>,
 ) {
@@ -1513,8 +1514,9 @@ fn sync_subscribed_client_data(
         );
     }
     if navigation.has_data_subscribers(BINDINGS_DATA) {
-        let snapshot = serde_json::to_value(bindings_list_output(&config))
-            .expect("bindings snapshot serializes");
+        let snapshot =
+            serde_json::to_value(bindings_list_output(&config, input_registry.as_deref()))
+                .expect("bindings snapshot serializes");
         publish_client_data_if_changed(
             navigation,
             &mut sync,
@@ -1542,6 +1544,7 @@ fn sync_subscribed_client_data(
     }
 }
 
+// Collects prior terminal responses before admitting another bounded stdin batch.
 fn process_commands(
     input: Res<TerminalInput>,
     adapter: Res<ClientUnixAdapter>,
@@ -1587,6 +1590,7 @@ fn project_terminal_line(registry: &UnixCommandRegistry, line: &str) -> Option<s
     })
 }
 
+/// Attempts non-blocking host-authority admission to the shared JSON queue.
 fn submit_terminal_request(
     pipe: &ClientCommandPipe,
     responses: &mut TerminalResponses,
@@ -1618,6 +1622,10 @@ fn submit_terminal_request(
     }
 }
 
+/// Partitions calls into completed responses and handles still reporting `None`.
+///
+/// `RequestCall::try_result` conflates pending and disconnected response paths,
+/// so a disconnected call remains retained by this polling adapter.
 fn collect_terminal_responses(responses: &mut TerminalResponses) -> Vec<serde_json::Value> {
     let mut pending = Vec::new();
     let mut completed = Vec::new();
@@ -1646,7 +1654,35 @@ fn print_terminal_response(response: serde_json::Value) {
 
 #[cfg(test)]
 mod tests {
-    use super::{CLIENT_COMMANDS, command_dev_level, validate_external_url, visible_commands};
+    use super::{CLIENT_COMMAND_CATALOG, CLIENT_COMMANDS, UiOpenArguments, validate_external_url};
+
+    fn assert_has_property(value: &serde_json::Value, name: &str) {
+        let property = value.get(name);
+        assert!(property.is_some(), "schema property `{name}` is missing");
+    }
+
+    #[test]
+    fn ui_open_accepts_only_a_source_local_import_handle() {
+        assert!(
+            serde_json::from_value::<UiOpenArguments>(serde_json::json!({
+                "import": "settings"
+            }))
+            .is_ok()
+        );
+        assert!(
+            serde_json::from_value::<UiOpenArguments>(serde_json::json!({
+                "slot": "roundo.settings"
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<UiOpenArguments>(serde_json::json!({
+                "resource": "vanilla.vanilla_ui.settings"
+            }))
+            .is_err()
+        );
+    }
+
     #[test]
     fn catalog_has_unique_names_and_a_schema_for_every_typed_command() {
         let mut names = std::collections::BTreeSet::new();
@@ -1664,10 +1700,10 @@ mod tests {
 
     #[test]
     fn dev_level_filters_discovery_but_not_the_catalog() {
-        assert!(!visible_commands(0).contains(&"hud.show"));
-        assert!(visible_commands(1).contains(&"hud.show"));
-        assert_eq!(command_dev_level("hud.show"), Some(1));
-        assert_eq!(command_dev_level("missing"), None);
+        assert!(!CLIENT_COMMAND_CATALOG.visible(0).contains(&"hud.show"));
+        assert!(CLIENT_COMMAND_CATALOG.visible(1).contains(&"hud.show"));
+        assert_eq!(CLIENT_COMMAND_CATALOG.dev_level("hud.show"), Some(1));
+        assert_eq!(CLIENT_COMMAND_CATALOG.dev_level("missing"), None);
     }
 
     #[test]
@@ -1703,43 +1739,28 @@ mod tests {
 
     #[test]
     fn success_schemas_describe_client_display_status_settings_bindings_and_meta_outputs() {
-        let status = super::client_command_schema("server.status").unwrap();
-        assert!(
-            status["success"]["properties"]["data"]["properties"]
-                .get("status")
-                .is_some()
-        );
-        assert!(
-            status["success"]["properties"]["data"]["properties"]["status"]
-                .get("$ref")
-                .is_some()
-        );
+        let status = CLIENT_COMMAND_CATALOG.schema("server.status").unwrap();
+        let properties = &status["success"]["properties"]["data"]["properties"];
+        assert_has_property(properties, "status");
+        let status_schema = &properties["status"];
+        assert_has_property(status_schema, "$ref");
 
         for command in ["server.list", "settings.show", "bindings.list"] {
-            let schema = super::client_command_schema(command).unwrap();
+            let schema = CLIENT_COMMAND_CATALOG.schema(command).unwrap();
             assert_eq!(schema["success"]["properties"]["data"]["type"], "object");
         }
-        let list = super::client_command_schema("server.list").unwrap();
-        assert!(
-            list["success"]["properties"]["data"]["properties"]
-                .get("servers")
-                .is_some()
-        );
-        let settings = super::client_command_schema("settings.show").unwrap();
-        assert!(
-            settings["success"]["properties"]["data"]["properties"]
-                .get("settings")
-                .is_some()
-        );
-        let bindings = super::client_command_schema("bindings.list").unwrap();
-        assert!(
-            bindings["success"]["properties"]["data"]["properties"]
-                .get("supported_keys")
-                .is_some()
-        );
-        let meta = super::client_command_schema("command.help").unwrap();
-        assert!(meta["success"]["properties"]["data"].get("anyOf").is_some());
-        let schema_meta = super::client_command_schema("command.schema").unwrap();
+        let list = CLIENT_COMMAND_CATALOG.schema("server.list").unwrap();
+        let properties = &list["success"]["properties"]["data"]["properties"];
+        assert_has_property(properties, "servers");
+        let settings = CLIENT_COMMAND_CATALOG.schema("settings.show").unwrap();
+        let properties = &settings["success"]["properties"]["data"]["properties"];
+        assert_has_property(properties, "settings");
+        let bindings = CLIENT_COMMAND_CATALOG.schema("bindings.list").unwrap();
+        let properties = &bindings["success"]["properties"]["data"]["properties"];
+        assert_has_property(properties, "supported_keys");
+        let meta = CLIENT_COMMAND_CATALOG.schema("command.help").unwrap();
+        assert_has_property(&meta["success"]["properties"]["data"], "anyOf");
+        let schema_meta = CLIENT_COMMAND_CATALOG.schema("command.schema").unwrap();
         assert_eq!(
             schema_meta["success"]["properties"]["data"]["type"],
             "object"
@@ -1747,113 +1768,86 @@ mod tests {
     }
 
     #[test]
-    fn binding_input_rejects_empty_duplicate_and_unknown_values() {
-        use std::convert::TryFrom;
+    fn binding_input_rejects_empty_slots_and_unknown_keys() {
         let valid = super::BindingArguments {
+            slot: "roundo.move-forward".into(),
             key: "key_w".into(),
-            actions: vec!["move_forward".into()],
         };
-        assert!(roundo_user_config::ClientKeyBindingConfig::try_from(valid).is_ok());
+        assert!(roundo_user_config::ClientInputBindingConfig::try_from(valid).is_ok());
         for arguments in [
             super::BindingArguments {
+                slot: "".into(),
                 key: "key_w".into(),
-                actions: vec![],
             },
             super::BindingArguments {
-                key: "key_w".into(),
-                actions: vec!["move_forward".into(), "move_forward".into()],
+                slot: "roundo.move-forward".into(),
+                key: "escape".into(),
             },
             super::BindingArguments {
+                slot: "roundo.move-forward".into(),
                 key: "unknown".into(),
-                actions: vec!["move_forward".into()],
             },
         ] {
-            assert!(roundo_user_config::ClientKeyBindingConfig::try_from(arguments).is_err());
+            assert!(roundo_user_config::ClientInputBindingConfig::try_from(arguments).is_err());
         }
     }
 
     #[test]
-    fn bindings_list_display_model_adapts_config_enums() {
+    fn bindings_list_display_excludes_escape_and_includes_mouse() {
         let keys = super::supported_keys();
-        assert_eq!(keys.len(), 52);
-        assert_eq!(keys[0].key, "escape");
-        assert_eq!(keys[0].display_name, "Escape");
-        assert_eq!(keys.last().unwrap().key, "arrow_right");
-        assert!(keys.iter().all(|key| !key.display_name.is_empty()));
+        assert_eq!(keys.len(), 55);
+        assert_eq!(keys[0].key, "digit0");
+        assert_eq!(keys.last().unwrap().key, "mouse_middle");
+        assert!(
+            keys.iter()
+                .all(|key| key.key != "escape" && !key.display_name.is_empty())
+        );
 
-        let actions = super::supported_actions();
-        assert_eq!(actions.len(), 6);
-        assert_eq!(actions[4].action, "move_forward");
-        assert_eq!(actions[4].display_name, "Move Forward");
-
-        let binding = roundo_user_config::ClientKeyBindingConfig::new(
-            roundo_user_config::ClientKeyCode::KeyW,
-            roundo_user_config::ClientMovementAction::MoveForward,
+        let binding = roundo_user_config::ClientInputBindingConfig::new(
+            "roundo.move-forward",
+            roundo_user_config::ClientInputKey::KeyW,
         );
         let display = super::binding_display(&binding);
+        assert_eq!(display.slot, "roundo.move-forward");
         assert_eq!(display.key, "key_w");
-        assert_eq!(display.actions, ["move_forward"]);
     }
 
     #[test]
     fn bindings_replace_input_is_strict_and_reuses_binding_validation() {
         let valid = serde_json::json!({
-            "old_binding": {"key": "key_w", "actions": ["move_forward"]},
-            "binding": {"key": "key_e", "actions": ["move_forward"]},
+            "old_binding": {"slot": "roundo.move-forward", "key": "key_w"},
+            "binding": {"slot": "roundo.move-forward", "key": "key_e"},
         });
         let parsed: super::BindingsReplaceArguments = serde_json::from_value(valid).unwrap();
-        assert!(roundo_user_config::ClientKeyBindingConfig::try_from(parsed.old_binding).is_ok());
-        assert!(roundo_user_config::ClientKeyBindingConfig::try_from(parsed.binding).is_ok());
-
+        assert!(roundo_user_config::ClientInputBindingConfig::try_from(parsed.old_binding).is_ok());
+        assert!(roundo_user_config::ClientInputBindingConfig::try_from(parsed.binding).is_ok());
         assert!(
             serde_json::from_value::<super::BindingsReplaceArguments>(serde_json::json!({
-                "old_binding": {"key": "key_w", "actions": ["move_forward"]},
-                "binding": {"key": "key_e", "actions": ["move_forward"]},
+                "old_binding": {"slot": "roundo.move-forward", "key": "key_w"},
+                "binding": {"slot": "roundo.move-forward", "key": "key_e"},
                 "unexpected": true,
             }))
             .is_err()
         );
-        let invalid: super::BindingsReplaceArguments = serde_json::from_value(serde_json::json!({
-            "old_binding": {"key": "key_w", "actions": []},
-            "binding": {"key": "key_e", "actions": ["move_forward", "move_forward"]},
-        }))
-        .unwrap();
-        assert!(roundo_user_config::ClientKeyBindingConfig::try_from(invalid.old_binding).is_err());
-        assert!(roundo_user_config::ClientKeyBindingConfig::try_from(invalid.binding).is_err());
-
-        let schema = crate::json_command::command_schema::<super::BindingsReplaceDefinition>();
-        assert_eq!(schema["command"], "bindings.replace");
-        assert_eq!(schema["input"]["properties"]["arguments"]["type"], "object");
-        assert_eq!(
-            schema["input"]["properties"]["arguments"]["additionalProperties"],
-            false
-        );
     }
 
     #[test]
-    fn bindings_replace_is_atomic_in_memory_and_rejects_missing_or_duplicate_keys() {
-        use roundo_user_config::{ClientKeyBindingConfig, ClientKeyCode, ClientMovementAction};
-
-        let old =
-            ClientKeyBindingConfig::new(ClientKeyCode::KeyW, ClientMovementAction::MoveForward);
+    fn bindings_replace_is_atomic_and_rejects_missing_or_duplicate_edges() {
+        use roundo_user_config::{ClientInputBindingConfig, ClientInputKey};
+        let old = ClientInputBindingConfig::new("roundo.move-forward", ClientInputKey::KeyW);
         let replacement =
-            ClientKeyBindingConfig::new(ClientKeyCode::KeyE, ClientMovementAction::MoveForward);
+            ClientInputBindingConfig::new("roundo.move-forward", ClientInputKey::KeyE);
         let mut bindings = vec![old.clone()];
         super::replace_binding(&mut bindings, old.clone(), replacement.clone()).unwrap();
         assert_eq!(bindings, vec![replacement.clone()]);
-
         let before_missing = bindings.clone();
-        let missing =
-            ClientKeyBindingConfig::new(ClientKeyCode::KeyQ, ClientMovementAction::MoveLeft);
+        let missing = ClientInputBindingConfig::new("roundo.move-left", ClientInputKey::KeyQ);
         let error = super::replace_binding(&mut bindings, missing, old.clone()).unwrap_err();
         assert_eq!(error.code, "binding_not_found");
         assert_eq!(bindings, before_missing);
-
-        let existing =
-            ClientKeyBindingConfig::new(ClientKeyCode::KeyA, ClientMovementAction::MoveLeft);
-        bindings.push(existing.clone());
+        bindings.push(old.clone());
         let before_duplicate = bindings.clone();
-        let error = super::replace_binding(&mut bindings, replacement, existing).unwrap_err();
+        let error = super::replace_binding(&mut bindings, replacement, old).unwrap_err();
         assert_eq!(error.code, "binding_exists");
         assert_eq!(bindings, before_duplicate);
     }
@@ -1947,7 +1941,7 @@ mod tests {
             super::command_transport_source(roundo_webui::UiCommandSource::WebView(
                 roundo_webui::UiInstanceId::from_host_id(42),
             ))
-            .map(roundo_webui::UiInstanceId::get),
+            .map(roundo_webui::UiInstanceId::value),
             Some(42)
         );
     }
@@ -1964,7 +1958,8 @@ mod tests {
         assert_eq!(response["ok"], false);
         assert_eq!(response["error"]["code"], "stale_ui_instance");
         assert_eq!(command["arguments"], serde_json::json!({}));
-        assert!(command.get("_roundo_source_instance").is_none());
+        let injected_source = command.get("_roundo_source_instance");
+        assert!(injected_source.is_none());
     }
 
     #[test]

@@ -3,6 +3,7 @@ use crate::local_coordinate::data::{
 };
 use crate::local_coordinate::transform::configure_transform_derivation;
 use crate::local_coordinate::virtual_chunk::{VirtualChunkIndex, rebuild_virtual_chunk_index};
+use crate::{AtomicVoxelRegistry, EMPTY_VOXEL_ID};
 use bevy::prelude::{
     App, Commands, FixedUpdate, IntoScheduleConfigs, MessageReader, Plugin, Query, SystemSet,
     Update,
@@ -24,7 +25,8 @@ impl Plugin for LocalCoordinateBasePlugin {
             app.add_plugins(TransformPlugin);
         }
         configure_transform_derivation(app);
-        app.init_resource::<VirtualChunkIndex>()
+        app.init_resource::<AtomicVoxelRegistry>()
+            .init_resource::<VirtualChunkIndex>()
             .add_message::<LocalCoordinateCRUDMessage>()
             .add_systems(
                 FixedUpdate,
@@ -46,19 +48,29 @@ impl Plugin for LocalCoordinateBasePlugin {
 
 fn apply_crud_messages(
     mut commands: Commands,
+    voxels: bevy::prelude::Res<AtomicVoxelRegistry>,
     mut messages: MessageReader<LocalCoordinateCRUDMessage>,
     mut local_coordinates: Query<&mut LocalCoordinate>,
 ) {
-    for message in messages.read() {
+    let pending_messages = messages.read();
+    for message in pending_messages {
         match &message.0 {
             LocalCoordinateCRUDMessageEnum::Create { key, value } => {
-                commands
-                    .entity(*key)
-                    .insert(LocalCoordinate::from_voxels(value.iter().copied()));
+                commands.entity(*key).insert(LocalCoordinate::from_voxels(
+                    value
+                        .iter()
+                        .copied()
+                        .filter(|voxel| voxel_is_registered(voxel.voxel, &voxels)),
+                ));
             }
             LocalCoordinateCRUDMessageEnum::Update { key, value } => {
                 if let Ok(mut local_coordinate) = local_coordinates.get_mut(*key) {
-                    local_coordinate.apply_voxels(value.iter().copied());
+                    local_coordinate.apply_voxels(
+                        value
+                            .iter()
+                            .copied()
+                            .filter(|voxel| voxel_is_registered(voxel.voxel, &voxels)),
+                    );
                 }
             }
             LocalCoordinateCRUDMessageEnum::Delete { key } => {
@@ -66,5 +78,24 @@ fn apply_crud_messages(
             }
             LocalCoordinateCRUDMessageEnum::Retrieve { .. } => {}
         }
+    }
+}
+
+fn voxel_is_registered(id: crate::AtomicVoxelId, registry: &AtomicVoxelRegistry) -> bool {
+    id == EMPTY_VOXEL_ID || registry.definition(id).is_some()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{AtomicVoxelId, SOLID_VOXEL_ID};
+
+    #[test]
+    fn authoritative_crud_accepts_only_empty_or_registered_voxels() {
+        let registry = AtomicVoxelRegistry::builtin();
+
+        assert!(voxel_is_registered(EMPTY_VOXEL_ID, &registry));
+        assert!(voxel_is_registered(SOLID_VOXEL_ID, &registry));
+        assert!(!voxel_is_registered(AtomicVoxelId(99), &registry));
     }
 }

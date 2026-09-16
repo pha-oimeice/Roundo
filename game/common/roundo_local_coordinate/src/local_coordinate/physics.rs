@@ -1,3 +1,10 @@
+//! Incremental derivation of Avian child colliders from voxel chunks.
+//!
+//! Collider meshes contain only exposed voxel faces. A chunk's mesh therefore
+//! depends on its own content revision and the six adjacent chunk revisions.
+//! Rebuild work is queued and bounded per Bevy update; collider state may lag
+//! voxel mutations while that queue drains.
+
 use crate::local_coordinate::data::{CHUNK_EDGE_LENGTH, Chunk, LocalCoordinate};
 use crate::{LocalCoordinateId, LocalCoordinateIdentity};
 use avian3d::{math::Vector, prelude::Collider};
@@ -9,7 +16,12 @@ use std::collections::{HashMap, HashSet, VecDeque};
 
 const MAX_COLLIDER_CHUNKS_PER_UPDATE: usize = 32;
 
-/// Materializes one chunk-local child collider for each non-empty chunk.
+/// Derives one chunk-local child collider for each relevant nonempty chunk.
+///
+/// Systems run in [`Update`] and process at most 32 queued chunks per coordinate
+/// per update. Empty, removed, or no-longer-relevant chunks have their collider
+/// entities despawned. Generated colliders are children of the coordinate owner,
+/// so the owner's transform and rigid body define their world-space placement.
 pub struct LocalCoordinatePhysicsPlugin;
 
 impl Plugin for LocalCoordinatePhysicsPlugin {
@@ -31,6 +43,11 @@ pub(crate) enum LocalCoordinatePhysicsSet {
     Sync,
 }
 
+/// Optional exact set of chunks for which physics should be materialized.
+///
+/// The default is unrestricted. After [`Self::replace`], only listed chunks are
+/// retained; changing the set schedules reconciliation rather than rebuilding
+/// every collider synchronously.
 #[derive(Default, Resource)]
 pub(crate) struct LocalCoordinatePhysicsInterests {
     restricted: bool,
@@ -38,10 +55,15 @@ pub(crate) struct LocalCoordinatePhysicsInterests {
 }
 
 impl LocalCoordinatePhysicsInterests {
+    /// Returns whether this resource already contains the same restricted set.
     pub fn matches(&self, chunks: &HashMap<LocalCoordinateId, HashSet<IVec3>>) -> bool {
         self.restricted && self.chunks == *chunks
     }
 
+    /// Replaces unrestricted/default behavior with an exact chunk-interest set.
+    ///
+    /// The ECS synchronization system observes the resource change and applies
+    /// additions/removals subject to its per-update queue budget.
     pub fn replace(&mut self, chunks: HashMap<LocalCoordinateId, HashSet<IVec3>>) {
         self.restricted = true;
         self.chunks = chunks;
@@ -50,14 +72,13 @@ impl LocalCoordinatePhysicsInterests {
     fn contains(&self, id: Option<LocalCoordinateId>, position: IVec3) -> bool {
         !self.restricted
             || id.is_some_and(|id| {
-                self.chunks
-                    .get(&id)
-                    .is_some_and(|chunks| chunks.contains(&position))
+                let chunks = self.chunks.get(&id);
+                chunks.is_some_and(|chunks| chunks.contains(&position))
             })
     }
 }
 
-/// Private derived output owned by one local-coordinate rigid body.
+/// Derived collider entities and deduplicated rebuild queue for one coordinate.
 #[derive(Component, Default)]
 struct LocalCoordinatePhysicsState {
     chunks: HashMap<IVec3, ChunkColliderState>,
@@ -91,6 +112,7 @@ const FACE_OFFSETS: [IVec3; 6] = [
     IVec3::NEG_Z,
 ];
 
+// Consumes dirty chunks, includes face neighbors, then drains bounded rebuild work.
 fn sync_local_coordinate_colliders(
     mut commands: Commands,
     interests: Res<LocalCoordinatePhysicsInterests>,
@@ -175,7 +197,8 @@ fn take_pending_collider_chunks(state: &mut LocalCoordinatePhysicsState) -> Vec<
             .pending_chunks
             .pop_front()
             .expect("bounded collider queue length was checked");
-        state.pending_set.remove(&position);
+        let removed = state.pending_set.remove(&position);
+        debug_assert!(removed, "queued collider Chunk must be in the pending set");
         chunks.push(position);
     }
     chunks
@@ -200,11 +223,8 @@ fn sync_physics_state(
             continue;
         };
         let source = collider_source(local_coordinate, position, chunk);
-        if state
-            .chunks
-            .get(&position)
-            .is_some_and(|chunk_state| chunk_state.source == source)
-        {
+        let existing_chunk = state.chunks.get(&position);
+        if existing_chunk.is_some_and(|chunk_state| chunk_state.source == source) {
             continue;
         }
 
@@ -241,10 +261,8 @@ fn collider_source(
     ChunkColliderSource {
         content_revision: chunk.content_revision,
         neighbor_revisions: FACE_OFFSETS.map(|offset| {
-            local_coordinate
-                .chunks
-                .get(&(position + offset))
-                .map(|neighbor| neighbor.content_revision)
+            let neighbor = local_coordinate.chunks.get(&(position + offset));
+            neighbor.map(|neighbor| neighbor.content_revision)
         }),
     }
 }
@@ -282,6 +300,7 @@ fn chunk_collider(
     (!indices.is_empty()).then(|| Collider::trimesh(vertices, indices))
 }
 
+// Emits four independent vertices and two triangles for each exposed voxel face.
 fn chunk_collider_mesh(
     local_coordinate: &LocalCoordinate,
     chunk_position: IVec3,
@@ -313,6 +332,7 @@ fn chunk_collider_mesh(
     (vertices, indices)
 }
 
+// Euclidean division keeps chunk-local coordinates nonnegative across the origin.
 fn local_coordinate_is_solid(local_coordinate: &LocalCoordinate, position: IVec3) -> bool {
     let chunk_position = IVec3::new(
         position.x.div_euclid(CHUNK_EDGE_LENGTH),
@@ -324,10 +344,8 @@ fn local_coordinate_is_solid(local_coordinate: &LocalCoordinate, position: IVec3
         position.y.rem_euclid(CHUNK_EDGE_LENGTH),
         position.z.rem_euclid(CHUNK_EDGE_LENGTH),
     );
-    local_coordinate
-        .chunks
-        .get(&chunk_position)
-        .is_some_and(|candidate| candidate.is_solid(local_position))
+    let chunk = local_coordinate.chunks.get(&chunk_position);
+    chunk.is_some_and(|candidate| candidate.is_solid(local_position))
 }
 
 fn push_face(

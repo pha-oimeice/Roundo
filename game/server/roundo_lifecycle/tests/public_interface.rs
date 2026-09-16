@@ -1,3 +1,4 @@
+// Verifies that lifecycle consumers can construct and traverse the exported tree.
 use roundo_lifecycle::AnchorTree;
 
 #[test]

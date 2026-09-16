@@ -14,6 +14,7 @@ roundo_cli = { workspace = true, features = ["server"] }
 roundo_ecs_entry = { workspace = true, features = ["server"] }
 roundo_local_coordinate.workspace = true
 roundo_marionette.workspace = true
+roundo_mod_loader.workspace = true
 roundo_networking.workspace = true
 roundo_presence.workspace = true
 roundo_toolbox.workspace = true

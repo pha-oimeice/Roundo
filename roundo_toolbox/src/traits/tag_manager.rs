@@ -1,3 +1,4 @@
+/// Provides typed lookup and replacement for tag-associated values.
 pub trait TagManager<T, V>
 where
     T: Copy,

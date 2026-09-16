@@ -1,11 +1,12 @@
-//! Client process configuration plus the installation-wide configuration shared with the server.
+//! Client configuration loading and conversion into runtime domain types.
 
-use bevy::prelude::KeyCode;
-use roundo_marionette::{ClientKeyBindings, ClientMarionetteInputSettings, MovementAction};
+use bevy::prelude::{KeyCode, MouseButton};
+use roundo_marionette::{
+    ClientInputBindings, ClientMarionetteInputSettings, InputBinding, InputRegistry, PhysicalInput,
+};
 use roundo_presence::ClientPresenceSettings;
 use roundo_user_config::{
-    ClientConfig, ClientKeyCode, ClientMovementAction, ClientNetworkConfig, ClientSettingsConfig,
-    CommonConfig,
+    ClientConfig, ClientInputKey, ClientNetworkConfig, ClientSettingsConfig, CommonConfig,
 };
 use std::{
     path::PathBuf,
@@ -22,41 +23,46 @@ pub fn load_config() -> ClientConfig {
     config.settings.normalize();
     config
 }
-
 pub fn network_config() -> ClientNetworkConfig {
     read_config().network.clone()
 }
-
-/// Resolves relative Mod paths against the directory containing the executable
-/// and its configuration files, rather than the caller's working directory.
 pub fn mod_path() -> PathBuf {
     COMMON_CONFIG.resolved_mod_path()
 }
-
 pub fn settings() -> ClientSettingsConfig {
     read_config().settings.clone()
 }
-
 pub fn runtime_presence_settings(settings: &ClientSettingsConfig) -> ClientPresenceSettings {
     ClientPresenceSettings::new(settings.world.joinable_world_radius)
 }
-
 pub fn runtime_input_settings(settings: &ClientSettingsConfig) -> ClientMarionetteInputSettings {
     ClientMarionetteInputSettings {
         mouse_sensitivity: settings.controls.mouse_sensitivity,
         camera_move_speed: settings.camera.move_speed,
+        player_movement_prediction: settings.controls.player_movement_prediction,
     }
 }
 
-pub fn runtime_key_bindings(settings: &ClientSettingsConfig) -> ClientKeyBindings {
-    let mut bindings = ClientKeyBindings::empty();
-    for configured in &settings.key_bindings {
-        let key = runtime_key_code(configured.key);
-        for action in configured.actions.iter().copied().map(runtime_action) {
-            bindings.bind(key, action);
-        }
-    }
-    bindings
+/// Validates configured slots against the published Mod registry and adapts
+/// stable physical inputs into Bevy runtime values.
+pub fn runtime_input_bindings(
+    settings: &ClientSettingsConfig,
+    registry: &InputRegistry,
+) -> Result<ClientInputBindings, String> {
+    let bindings = settings
+        .input_bindings
+        .iter()
+        .map(|configured| {
+            if !registry.contains_slot(&configured.slot) {
+                return Err(format!("unknown input slot `{}`", configured.slot));
+            }
+            Ok(InputBinding {
+                slot: configured.slot.clone(),
+                input: runtime_input_key(configured.key),
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(ClientInputBindings::new(bindings))
 }
 
 fn read_config() -> std::sync::RwLockReadGuard<'static, ClientConfig> {
@@ -65,77 +71,66 @@ fn read_config() -> std::sync::RwLockReadGuard<'static, ClientConfig> {
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
-const KEY_CODE_PAIRS: [(ClientKeyCode, KeyCode); 52] = [
-    (ClientKeyCode::Escape, KeyCode::Escape),
-    (ClientKeyCode::Digit0, KeyCode::Digit0),
-    (ClientKeyCode::Digit1, KeyCode::Digit1),
-    (ClientKeyCode::Digit2, KeyCode::Digit2),
-    (ClientKeyCode::Digit3, KeyCode::Digit3),
-    (ClientKeyCode::Digit4, KeyCode::Digit4),
-    (ClientKeyCode::Digit5, KeyCode::Digit5),
-    (ClientKeyCode::Digit6, KeyCode::Digit6),
-    (ClientKeyCode::Digit7, KeyCode::Digit7),
-    (ClientKeyCode::Digit8, KeyCode::Digit8),
-    (ClientKeyCode::Digit9, KeyCode::Digit9),
-    (ClientKeyCode::Backspace, KeyCode::Backspace),
-    (ClientKeyCode::Tab, KeyCode::Tab),
-    (ClientKeyCode::KeyQ, KeyCode::KeyQ),
-    (ClientKeyCode::KeyW, KeyCode::KeyW),
-    (ClientKeyCode::KeyE, KeyCode::KeyE),
-    (ClientKeyCode::KeyR, KeyCode::KeyR),
-    (ClientKeyCode::KeyT, KeyCode::KeyT),
-    (ClientKeyCode::KeyY, KeyCode::KeyY),
-    (ClientKeyCode::KeyU, KeyCode::KeyU),
-    (ClientKeyCode::KeyI, KeyCode::KeyI),
-    (ClientKeyCode::KeyO, KeyCode::KeyO),
-    (ClientKeyCode::KeyP, KeyCode::KeyP),
-    (ClientKeyCode::CapsLock, KeyCode::CapsLock),
-    (ClientKeyCode::KeyA, KeyCode::KeyA),
-    (ClientKeyCode::KeyS, KeyCode::KeyS),
-    (ClientKeyCode::KeyD, KeyCode::KeyD),
-    (ClientKeyCode::KeyF, KeyCode::KeyF),
-    (ClientKeyCode::KeyG, KeyCode::KeyG),
-    (ClientKeyCode::KeyH, KeyCode::KeyH),
-    (ClientKeyCode::KeyJ, KeyCode::KeyJ),
-    (ClientKeyCode::KeyK, KeyCode::KeyK),
-    (ClientKeyCode::KeyL, KeyCode::KeyL),
-    (ClientKeyCode::Enter, KeyCode::Enter),
-    (ClientKeyCode::ShiftLeft, KeyCode::ShiftLeft),
-    (ClientKeyCode::KeyZ, KeyCode::KeyZ),
-    (ClientKeyCode::KeyX, KeyCode::KeyX),
-    (ClientKeyCode::KeyC, KeyCode::KeyC),
-    (ClientKeyCode::KeyV, KeyCode::KeyV),
-    (ClientKeyCode::KeyB, KeyCode::KeyB),
-    (ClientKeyCode::KeyN, KeyCode::KeyN),
-    (ClientKeyCode::KeyM, KeyCode::KeyM),
-    (ClientKeyCode::ShiftRight, KeyCode::ShiftRight),
-    (ClientKeyCode::ControlLeft, KeyCode::ControlLeft),
-    (ClientKeyCode::AltLeft, KeyCode::AltLeft),
-    (ClientKeyCode::Space, KeyCode::Space),
-    (ClientKeyCode::AltRight, KeyCode::AltRight),
-    (ClientKeyCode::ControlRight, KeyCode::ControlRight),
-    (ClientKeyCode::ArrowLeft, KeyCode::ArrowLeft),
-    (ClientKeyCode::ArrowUp, KeyCode::ArrowUp),
-    (ClientKeyCode::ArrowDown, KeyCode::ArrowDown),
-    (ClientKeyCode::ArrowRight, KeyCode::ArrowRight),
-];
-
-fn runtime_key_code(configured: ClientKeyCode) -> KeyCode {
-    KEY_CODE_PAIRS
-        .iter()
-        .find_map(|(config, runtime)| (*config == configured).then_some(*runtime))
-        .expect("every configured key code must have a runtime mapping")
-}
-
-fn runtime_action(configured: ClientMovementAction) -> MovementAction {
-    match configured {
-        ClientMovementAction::MoveUp => MovementAction::MoveUp,
-        ClientMovementAction::MoveDown => MovementAction::MoveDown,
-        ClientMovementAction::MoveLeft => MovementAction::MoveLeft,
-        ClientMovementAction::MoveRight => MovementAction::MoveRight,
-        ClientMovementAction::MoveForward => MovementAction::MoveForward,
-        ClientMovementAction::MoveBackward => MovementAction::MoveBackward,
-    }
+fn runtime_input_key(configured: ClientInputKey) -> PhysicalInput {
+    use ClientInputKey::*;
+    let key = match configured {
+        MouseLeft => return PhysicalInput::Mouse(MouseButton::Left),
+        MouseRight => return PhysicalInput::Mouse(MouseButton::Right),
+        MouseMiddle => return PhysicalInput::Mouse(MouseButton::Middle),
+        Digit0 => KeyCode::Digit0,
+        Digit1 => KeyCode::Digit1,
+        Digit2 => KeyCode::Digit2,
+        Digit3 => KeyCode::Digit3,
+        Digit4 => KeyCode::Digit4,
+        Digit5 => KeyCode::Digit5,
+        Digit6 => KeyCode::Digit6,
+        Digit7 => KeyCode::Digit7,
+        Digit8 => KeyCode::Digit8,
+        Digit9 => KeyCode::Digit9,
+        Backspace => KeyCode::Backspace,
+        Tab => KeyCode::Tab,
+        KeyQ => KeyCode::KeyQ,
+        KeyW => KeyCode::KeyW,
+        KeyE => KeyCode::KeyE,
+        KeyR => KeyCode::KeyR,
+        KeyT => KeyCode::KeyT,
+        KeyY => KeyCode::KeyY,
+        KeyU => KeyCode::KeyU,
+        KeyI => KeyCode::KeyI,
+        KeyO => KeyCode::KeyO,
+        KeyP => KeyCode::KeyP,
+        CapsLock => KeyCode::CapsLock,
+        KeyA => KeyCode::KeyA,
+        KeyS => KeyCode::KeyS,
+        KeyD => KeyCode::KeyD,
+        KeyF => KeyCode::KeyF,
+        KeyG => KeyCode::KeyG,
+        KeyH => KeyCode::KeyH,
+        KeyJ => KeyCode::KeyJ,
+        KeyK => KeyCode::KeyK,
+        KeyL => KeyCode::KeyL,
+        Enter => KeyCode::Enter,
+        ShiftLeft => KeyCode::ShiftLeft,
+        KeyZ => KeyCode::KeyZ,
+        KeyX => KeyCode::KeyX,
+        KeyC => KeyCode::KeyC,
+        KeyV => KeyCode::KeyV,
+        KeyB => KeyCode::KeyB,
+        KeyN => KeyCode::KeyN,
+        KeyM => KeyCode::KeyM,
+        ShiftRight => KeyCode::ShiftRight,
+        ControlLeft => KeyCode::ControlLeft,
+        AltLeft => KeyCode::AltLeft,
+        Space => KeyCode::Space,
+        AltRight => KeyCode::AltRight,
+        ControlRight => KeyCode::ControlRight,
+        ArrowLeft => KeyCode::ArrowLeft,
+        ArrowUp => KeyCode::ArrowUp,
+        ArrowDown => KeyCode::ArrowDown,
+        ArrowRight => KeyCode::ArrowRight,
+        F1 => KeyCode::F1,
+    };
+    PhysicalInput::Key(key)
 }
 
 #[cfg(test)]
@@ -143,22 +138,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn missing_dev_mode_defaults_to_false() {
-        let config: ClientConfig = toml::from_str("[network]").unwrap();
-        assert!(!config.dev_mode);
+    fn defaults_resolve_against_builtin_input_registry() {
+        let settings = ClientSettingsConfig::default();
+        let bindings = runtime_input_bindings(&settings, &InputRegistry::builtin()).unwrap();
+        assert_eq!(bindings.iter().count(), settings.input_bindings.len());
     }
 
     #[test]
-    fn missing_settings_deserialize_to_the_shared_defaults() {
-        let config: ClientConfig = toml::from_str(
-            r#"
-            [network]
-            ca_verification = false
-            "#,
-        )
-        .expect("legacy client config should deserialize");
-
-        assert_eq!(config.settings, ClientSettingsConfig::default());
-        assert_eq!(config.network.endpoint.quic_port, 12358);
+    fn unknown_slots_are_rejected() {
+        let mut settings = ClientSettingsConfig::default();
+        settings.input_bindings[0].slot = "missing.slot".into();
+        assert!(runtime_input_bindings(&settings, &InputRegistry::builtin()).is_err());
     }
 }

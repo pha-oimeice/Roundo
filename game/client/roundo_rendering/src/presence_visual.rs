@@ -1,3 +1,5 @@
+//! Projects presence entities into lightweight render objects.
+
 use crate::{
     RenderMaterial, RenderMesh, RenderObject, RenderObjectId, RenderObjectSync, RenderObjects,
     RenderTransform, issue_render_object, remove_render_object, update_render_object_name,
@@ -9,6 +11,7 @@ use bevy::prelude::{
 use roundo_presence::{ClientJoinableWorld, ClientPlayerMarker};
 use std::collections::{HashMap, HashSet};
 
+/// Installs post-update synchronization before render extraction.
 pub struct PresenceVisualPlugin;
 
 impl Plugin for PresenceVisualPlugin {
@@ -19,10 +22,12 @@ impl Plugin for PresenceVisualPlugin {
 }
 
 #[derive(Resource, Default)]
+/// Maintains one render-object identity per observed ECS entity.
 struct PresenceVisualRegistry {
     objects: HashMap<Entity, RenderObjectId>,
 }
 
+// Synchronizes both player markers and joinable-world markers in one pass.
 fn sync_presence_visuals(
     mut registry: ResMut<PresenceVisualRegistry>,
     mut render_objects: ResMut<RenderObjects>,
@@ -31,6 +36,7 @@ fn sync_presence_visuals(
 ) {
     let mut observed = HashSet::new();
 
+    // Players use a compact warm-colored marker and respect presence visibility.
     for (entity, marker, transform, name) in &players {
         observed.insert(entity);
         let render_transform = RenderTransform::from(*transform);
@@ -52,6 +58,7 @@ fn sync_presence_visuals(
         }
     }
 
+    // Joinable worlds remain visible and use a distinct spherical marker.
     for (entity, _, transform, name) in &worlds {
         observed.insert(entity);
         let render_transform = RenderTransform::from(*transform);
@@ -75,6 +82,7 @@ fn sync_presence_visuals(
         }
     }
 
+    // Render objects outliving their source entity are removed in the same update.
     let removed = registry
         .objects
         .keys()

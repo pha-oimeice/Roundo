@@ -1,13 +1,31 @@
+//! Reconnecting QUIC client hosted on a dedicated Tokio runtime thread.
+
 use super::*;
 
+/// Handle for one reconnecting network client and its bounded outbound queues.
+///
+/// The worker reconnects until [`shutdown`](Self::shutdown) or drop. Application
+/// callbacks run on the networking runtime, not on the thread that owns this
+/// handle. The handle itself does not expose connection state.
 pub struct ClientNetwork {
-    stream0_outbound: mpsc::UnboundedSender<ClientMessage>,
-    stream1_outbound: mpsc::UnboundedSender<ClientMessage>,
+    stream0_outbound: mpsc::Sender<ClientMessage>,
+    stream1_outbound: mpsc::Sender<ClientMessage>,
     shutdown: watch::Sender<bool>,
     worker: std::sync::Mutex<Option<thread::JoinHandle<()>>>,
 }
 
 impl ClientNetwork {
+    /// Creates the Tokio runtime and starts a reconnecting worker thread.
+    ///
+    /// Success means only that the local runtime and queues were created. TLS
+    /// setup, dialing, and session negotiation happen asynchronously. Dial and
+    /// negotiation failures reach [`ClientHooks::on_connection_error`]; TLS
+    /// setup failure is logged and stops the worker. Configured queue capacities
+    /// are clamped to at least one item.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the Tokio runtime cannot be created.
     pub fn start(
         config: ClientNetworkConfig,
         hooks: Arc<dyn ClientHooks>,
@@ -23,8 +41,11 @@ impl ClientNetwork {
             .enable_all()
             .build()
             .map_err(NetworkError::from_display)?;
-        let (stream0_outbound, stream0_receiver) = mpsc::unbounded_channel();
-        let (stream1_outbound, stream1_receiver) = mpsc::unbounded_channel();
+        let admission = config.admission;
+        let (stream0_outbound, stream0_receiver) =
+            mpsc::channel(admission.capacity(StreamId::Stream0).max(1));
+        let (stream1_outbound, stream1_receiver) =
+            mpsc::channel(admission.capacity(StreamId::Stream1).max(1));
         let (shutdown, shutdown_receiver) = watch::channel(false);
         let worker = thread::spawn(move || {
             runtime.block_on(run_client(
@@ -44,6 +65,19 @@ impl ClientNetwork {
         })
     }
 
+    /// Attempts to enqueue one application message without blocking.
+    ///
+    /// Admission success guarantees only insertion into the selected local
+    /// queue; it does not imply an active connection or peer delivery. Messages
+    /// admitted while disconnected wait for a later session, but a message
+    /// already forwarded to a failed connection is not retried. Session-
+    /// negotiation messages cannot be submitted through this method.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the message belongs to another stream, the bounded
+    /// queue is full, or the worker has stopped. The converted message is not
+    /// returned on failure.
     pub fn send<Message>(&self, stream: StreamId, message: Message) -> Result<(), NetworkError>
     where
         Message: Into<ClientMessage>,
@@ -55,13 +89,19 @@ impl ClientNetwork {
                 "client message {message_kind} cannot be sent on {stream:?}"
             )));
         }
-        let result = match stream {
-            StreamId::Stream0 => self.stream0_outbound.send(message),
-            StreamId::Stream1 => self.stream1_outbound.send(message),
+        let admission = match stream {
+            StreamId::Stream0 => admit(&self.stream0_outbound, message),
+            StreamId::Stream1 => admit(&self.stream1_outbound, message),
         };
-        match result {
-            Ok(()) => Ok(()),
-            Err(_) => {
+        match admission {
+            AdmissionResult::Queued => Ok(()),
+            AdmissionResult::Saturated => {
+                log::warn!(
+                    "rejected client message: stream={stream:?}, message={message_kind}, reason=outbound_saturated"
+                );
+                Err(NetworkError::new("network outbound queue is saturated"))
+            }
+            AdmissionResult::Closed => {
                 log::warn!(
                     "failed to queue client message: stream={stream:?}, message={message_kind}, reason=network_client_stopped"
                 );
@@ -70,11 +110,17 @@ impl ClientNetwork {
         }
     }
 
-    /// Stops the network runtime and waits until reconnect and stream I/O have ended.
-    /// Calling it more than once is harmless.
+    /// Requests shutdown and waits for reconnect and stream I/O to end.
+    ///
+    /// This blocks the current OS thread while joining the worker. Calling it
+    /// more than once is harmless; dropping the handle performs the same step.
+    /// A worker panic is logged rather than propagated.
     pub fn shutdown(&self) {
         log::info!("network client shutdown requested");
-        let _ = self.shutdown.send(true);
+        let shutdown_result = self.shutdown.send(true);
+        if shutdown_result.is_err() {
+            log::debug!("network client shutdown receiver was already closed");
+        }
         let worker = self
             .worker
             .lock()
@@ -101,8 +147,8 @@ impl Drop for ClientNetwork {
 async fn run_client(
     config: ClientNetworkConfig,
     hooks: Arc<dyn ClientHooks>,
-    mut stream0_outbound: mpsc::UnboundedReceiver<ClientMessage>,
-    mut stream1_outbound: mpsc::UnboundedReceiver<ClientMessage>,
+    mut stream0_outbound: mpsc::Receiver<ClientMessage>,
+    mut stream1_outbound: mpsc::Receiver<ClientMessage>,
     mut shutdown: watch::Receiver<bool>,
 ) {
     let tls_config = match tls::create_client_tls_config(&config.certificate_policy) {
@@ -131,7 +177,11 @@ async fn run_client(
                 }
                 continue;
             }
-            result = establish_client_sessions(&config, Arc::clone(&tls_config)) => result,
+            result = establish_client_sessions(
+                &config,
+                Arc::clone(&tls_config),
+                hooks.resource_catalog_fingerprint(),
+            ) => result,
         };
         match establishment {
             Ok(sessions) => {
@@ -144,6 +194,7 @@ async fn run_client(
                 run_client_sessions(
                     sessions,
                     Arc::clone(&hooks),
+                    config.admission,
                     &mut stream0_outbound,
                     &mut stream1_outbound,
                     &mut shutdown,
@@ -188,12 +239,13 @@ struct ClientSessions {
 async fn establish_client_sessions(
     config: &ClientNetworkConfig,
     tls_config: Arc<rustls::ClientConfig>,
+    resource_fingerprint: ResourceCatalogFingerprint,
 ) -> Result<ClientSessions, NetworkError> {
     let endpoint = quic::client_endpoint(config.quic_address, tls_config)?;
-    let connection = quic::connect(&endpoint, config.quic_address, &config.server_name).await?;
+    let connection = quic::dial(&endpoint, config.quic_address, &config.server_name).await?;
     let streams = quic::establish_streams(&connection).await?;
     let established = ClientSession::new(streams.stream0)
-        .join_public_session()
+        .join_public_session(resource_fingerprint)
         .await
         .map_err(NetworkError::from_display)?;
     let session_info = established.session_info();
@@ -206,7 +258,7 @@ async fn establish_client_sessions(
         .enter_game()
         .await
         .map_err(NetworkError::from_display)?;
-    let stream1 = ClientResourceSession::open(streams.stream1)
+    let stream1 = ClientResourceSession::initialize(streams.stream1)
         .await
         .map_err(NetworkError::from_display)?;
     Ok(ClientSessions {
@@ -220,8 +272,9 @@ async fn establish_client_sessions(
 async fn run_client_sessions(
     sessions: ClientSessions,
     hooks: Arc<dyn ClientHooks>,
-    stream0_outbound: &mut mpsc::UnboundedReceiver<ClientMessage>,
-    stream1_outbound: &mut mpsc::UnboundedReceiver<ClientMessage>,
+    admission: TransportAdmissionPolicy,
+    stream0_outbound: &mut mpsc::Receiver<ClientMessage>,
+    stream1_outbound: &mut mpsc::Receiver<ClientMessage>,
     shutdown: &mut watch::Receiver<bool>,
 ) {
     let ClientSessions {
@@ -230,8 +283,14 @@ async fn run_client_sessions(
         stream0,
         stream1,
     } = sessions;
-    let mut stream0 = ConnectionIo::spawn(stream0.into_connection());
-    let mut stream1 = ConnectionIo::spawn(stream1.into_connection());
+    let mut stream0 = ConnectionIo::spawn(
+        stream0.into_connection(),
+        admission.capacity(StreamId::Stream0),
+    );
+    let mut stream1 = ConnectionIo::spawn(
+        stream1.into_connection(),
+        admission.capacity(StreamId::Stream1),
+    );
     loop {
         tokio::select! {
             changed = shutdown.changed() => {
@@ -243,7 +302,7 @@ async fn run_client_sessions(
             message = stream0_outbound.recv() => match message {
                 Some(message) => {
                     let message_kind = client_message_kind(&message);
-                    if !stream0.send(message) {
+                    if stream0.admit_message(message) != AdmissionResult::Queued {
                         log::warn!("failed to forward client stream0 message: message={message_kind}, reason=connection_writer_stopped");
                         break;
                     }
@@ -253,7 +312,7 @@ async fn run_client_sessions(
             message = stream1_outbound.recv() => match message {
                 Some(message) => {
                     let message_kind = client_message_kind(&message);
-                    if !stream1.send(message) {
+                    if stream1.admit_message(message) != AdmissionResult::Queued {
                         log::warn!("failed to forward client stream1 message: message={message_kind}, reason=connection_writer_stopped");
                         break;
                     }
@@ -300,7 +359,7 @@ async fn run_client_sessions(
     }
     stream0.shutdown();
     stream1.shutdown();
-    connection.close(quinn::VarInt::from_u32(0), b"client session closed");
+    let () = connection.close(quinn::VarInt::from_u32(0), b"client session closed");
     drop(stream0);
     drop(stream1);
     endpoint.wait_idle().await;
@@ -310,13 +369,13 @@ fn client_message_stream(message: &ClientMessage) -> Option<StreamId> {
     match message {
         ClientMessage::Game(_) => Some(StreamId::Stream0),
         ClientMessage::Resource(_) => Some(StreamId::Stream1),
-        ClientMessage::JoinPublicSession | ClientMessage::Ready { .. } => None,
+        ClientMessage::JoinPublicSession { .. } | ClientMessage::Ready { .. } => None,
     }
 }
 
 fn client_message_kind(message: &ClientMessage) -> &'static str {
     match message {
-        ClientMessage::JoinPublicSession => "JoinPublicSession",
+        ClientMessage::JoinPublicSession { .. } => "JoinPublicSession",
         ClientMessage::Ready { .. } => "Ready",
         ClientMessage::Game(message) => message.kind(),
         ClientMessage::Resource(message) => message.kind(),

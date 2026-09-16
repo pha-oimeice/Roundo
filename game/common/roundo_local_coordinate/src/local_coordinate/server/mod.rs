@@ -1,3 +1,5 @@
+//! Authoritative procedural-coordinate streaming and network-facing IPC contracts.
+
 mod generation;
 mod systems;
 
@@ -33,21 +35,33 @@ use roundo_toolbox::{
 };
 use std::collections::{HashMap, HashSet, VecDeque};
 
+/// Identity assigned to the plugin's default generated coordinate.
 pub const DEFAULT_PCG_LOCAL_COORDINATE_ID: LocalCoordinateId = LocalCoordinateId(1);
 const MAX_CHUNKS_GENERATED_PER_TICK: usize = 16;
 const MAX_CHUNK_GENERATION_JOBS_IN_FLIGHT: usize = 32;
 const MAX_CHUNKS_EVICTED_PER_TICK: usize = 32;
 const PHYSICS_CHUNK_RADIUS: f64 = 4.0;
+/// Distance beyond a Chunk boundary required before streaming changes its
+/// snapped observation Chunk. The symmetric dead band prevents boundary
+/// jitter from repeatedly replacing a large subscription frontier.
+const STREAMING_CHUNK_HYSTERESIS: f64 = CHUNK_EDGE_LENGTH as f64 * 0.125;
 const MAX_CHUNK_RESPONSES_PER_TICK_PER_CONNECTION: usize = 16;
 const MAX_DERIVED_SVO_RESULTS_PER_TICK: usize = 16;
 const MAX_DERIVED_SVO_JOBS_IN_FLIGHT: usize = 32;
 
+/// Variable-update ordering boundaries for server streaming work.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, SystemSet)]
 pub enum LocalCoordinateServerSet {
+    /// Consumes commands and worker generation results before index rebuilding.
     Prepare,
+    /// Advertises versions and publishes derived payloads after index rebuilding.
     Commit,
 }
 
+/// Clonable network-facing endpoint for coordinate commands and events.
+///
+/// Clones share the plugin's two unbounded in-process queues. Sending is
+/// non-blocking and does not wait for command application or payload generation.
 pub type LocalCoordinateServerIpc =
     CrossbeamThreadPipeEndpointA<LocalCoordinateServerCommand, LocalCoordinateServerEvent>;
 
@@ -63,34 +77,27 @@ pub struct LocalCoordinateObserver {
 #[derive(Resource, Default)]
 pub struct LocalCoordinateObservationInput {
     observers: Vec<LocalCoordinateObserver>,
-    scene_extents: HashMap<SceneId, [f32; 3]>,
 }
 
 impl LocalCoordinateObservationInput {
-    pub fn replace(
-        &mut self,
-        observers: impl IntoIterator<Item = LocalCoordinateObserver>,
-        scene_extents: impl IntoIterator<Item = (SceneId, [f32; 3])>,
-    ) {
+    /// Replaces the complete observer snapshot while preserving input order.
+    ///
+    /// The streaming systems consume the new snapshot during a subsequent
+    /// [`Update`]. Duplicate player IDs are not rejected; when streaming builds
+    /// its player-keyed snapshot, the last matching observer wins.
+    pub fn replace(&mut self, observers: impl IntoIterator<Item = LocalCoordinateObserver>) {
         self.observers.clear();
         self.observers.extend(observers);
-        self.scene_extents.clear();
-        self.scene_extents.extend(
-            scene_extents
-                .into_iter()
-                .filter(|(_, extent)| extent.iter().all(|axis| axis.is_finite() && *axis > 0.0)),
-        );
     }
 
     fn observers(&self) -> &[LocalCoordinateObserver] {
         &self.observers
     }
-
-    fn scene_extent(&self, scene_id: SceneId) -> Option<[f32; 3]> {
-        self.scene_extents.get(&scene_id).copied()
-    }
 }
 
+/// Installs generated coordinates, bounded worker pipelines, and streaming IPC.
+///
+/// Cloning shares the IPC queues but copies generator configuration.
 #[derive(Clone)]
 pub struct LocalCoordinateServerPlugin {
     pipe: CrossbeamThreadPipe<LocalCoordinateServerCommand, LocalCoordinateServerEvent>,
@@ -98,6 +105,7 @@ pub struct LocalCoordinateServerPlugin {
 }
 
 impl LocalCoordinateServerPlugin {
+    /// Creates a plugin with one scene-S1 superflat coordinate at height zero.
     pub fn new() -> Self {
         Self {
             pipe: CrossbeamThreadPipe::new(),
@@ -108,6 +116,7 @@ impl LocalCoordinateServerPlugin {
         }
     }
 
+    /// Creates a plugin whose only generated coordinate uses `generator`.
     pub fn with_generator(generator: SuperflatGenerator) -> Self {
         Self {
             pipe: CrossbeamThreadPipe::new(),
@@ -118,6 +127,10 @@ impl LocalCoordinateServerPlugin {
         }
     }
 
+    /// Adds or replaces a generated coordinate configuration by identity.
+    ///
+    /// Replacement preserves the existing coordinate's scene selection; a new
+    /// entry defaults to [`SceneId::S1`]. This only configures future app setup.
     pub fn with_generated_coordinate(
         mut self,
         local_coordinate_id: LocalCoordinateId,
@@ -136,6 +149,7 @@ impl LocalCoordinateServerPlugin {
         self
     }
 
+    /// Returns an endpoint sharing this plugin's command and event queues.
     pub fn ipc(&self) -> LocalCoordinateServerIpc {
         self.pipe.endpoint_a()
     }
@@ -147,6 +161,7 @@ impl Default for LocalCoordinateServerPlugin {
     }
 }
 
+/// Marks an authoritative coordinate backed by deterministic procedural generation.
 #[derive(Component, Clone, Copy, Debug)]
 pub struct PcgLocalCoordinate {
     pub id: LocalCoordinateId,
@@ -155,6 +170,7 @@ pub struct PcgLocalCoordinate {
 }
 
 impl PcgLocalCoordinate {
+    /// Creates a generated coordinate in [`SceneId::S1`].
     pub const fn new(id: LocalCoordinateId, generator: SuperflatGenerator) -> Self {
         Self {
             id,
@@ -163,31 +179,36 @@ impl PcgLocalCoordinate {
         }
     }
 
+    /// Assigns the scene whose observers may request this coordinate.
     pub const fn in_scene(mut self, scene_id: SceneId) -> Self {
         self.scene_id = scene_id;
         self
     }
 }
 
+/// Connection-scoped demand submitted by the network adapter.
 #[derive(Clone, Debug)]
 pub enum LocalCoordinateServerCommand {
+    /// Starts or replaces a connection's subscription for one player identity.
     SubscribePlayer {
         connection_id: ConnectionId,
         player_id: PlayerId,
     },
-    UnsubscribePlayer {
-        connection_id: ConnectionId,
-    },
+    /// Removes subscription, requested distance, and in-flight derived jobs.
+    UnsubscribePlayer { connection_id: ConnectionId },
+    /// Requests payloads for versions previously advertised to this connection.
     RequestChunks {
         connection_id: ConnectionId,
         chunks: Vec<ChunkId>,
     },
+    /// Stores a clamped chunk radius, including before subscription exists.
     SetChunkViewDistance {
         connection_id: ConnectionId,
         chunks: u16,
     },
 }
 
+/// Connection-addressed lifecycle, version, and payload output.
 #[derive(Clone, Debug)]
 pub enum LocalCoordinateServerEvent {
     Spawned {
@@ -214,6 +235,10 @@ pub enum LocalCoordinateServerEvent {
     },
 }
 
+/// Server-owned generation, subscription, version, and worker bookkeeping.
+///
+/// This resource is observable for diagnostics; mutation is owned by the
+/// streaming systems so its indexes remain mutually consistent.
 #[derive(Resource)]
 pub struct LocalCoordinateServerWorld {
     loaded_chunks: HashMap<LocalCoordinateId, HashMap<ChunkCoordinate, GeneratedChunk>>,
@@ -222,6 +247,8 @@ pub struct LocalCoordinateServerWorld {
     generation_worker: ChunkGenerationWorker,
     chunk_versions: HashMap<ChunkId, UpdateVersion>,
     observation_by_player: HashMap<PlayerId, ObservationRegion>,
+    /// Last committed world-space streaming Chunk for each observed player.
+    observer_streaming_chunks: HashMap<PlayerId, ChunkCoordinate>,
     subscriptions: HashMap<ConnectionId, PlayerSubscription>,
     requested_view_distances: HashMap<ConnectionId, u16>,
     derived_svo_jobs: HashMap<(ConnectionId, ChunkId), UpdateVersion>,
@@ -237,6 +264,7 @@ impl Default for LocalCoordinateServerWorld {
             generation_worker: ChunkGenerationWorker::spawn(),
             chunk_versions: HashMap::new(),
             observation_by_player: HashMap::new(),
+            observer_streaming_chunks: HashMap::new(),
             subscriptions: HashMap::new(),
             requested_view_distances: HashMap::new(),
             derived_svo_jobs: HashMap::new(),
@@ -246,22 +274,25 @@ impl Default for LocalCoordinateServerWorld {
 }
 
 impl LocalCoordinateServerWorld {
+    /// Borrows a retained generated chunk, or returns `None` if not loaded.
     pub fn chunk(
         &self,
         local_coordinate_id: LocalCoordinateId,
         coordinate: ChunkCoordinate,
     ) -> Option<&GeneratedChunk> {
-        self.loaded_chunks
-            .get(&local_coordinate_id)?
-            .get(&coordinate)
+        let chunks = self.loaded_chunks.get(&local_coordinate_id)?;
+        return chunks.get(&coordinate);
     }
 
+    /// Returns the number of retained generated chunks for one coordinate.
     pub fn loaded_chunk_count(&self, local_coordinate_id: LocalCoordinateId) -> usize {
-        self.loaded_chunks
-            .get(&local_coordinate_id)
-            .map_or(0, HashMap::len)
+        let chunks = self.loaded_chunks.get(&local_coordinate_id);
+        chunks.map_or(0, HashMap::len)
     }
 
+    /// Returns the number of coordinate IDs with generation bookkeeping entries.
+    ///
+    /// An entry may currently contain zero loaded chunks.
     pub fn coordinate_count(&self) -> usize {
         self.loaded_chunks.len()
     }

@@ -4,7 +4,6 @@
 pub mod game_session;
 mod pg_pool;
 mod sql_rows;
-pub mod user;
 
 #[allow(unused_imports)]
 pub use self::pg_pool::{PG_POOL, get_pg_pool};

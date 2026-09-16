@@ -1,5 +1,8 @@
+//! Materializes logical render objects as Bevy entities and assets.
+
 use super::*;
 
+// Synchronization runs after transforms and before rendering extraction.
 impl Plugin for RenderObjectPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<Assets<Mesh>>()
@@ -16,8 +19,10 @@ impl Plugin for RenderObjectPlugin {
 }
 
 #[derive(Component)]
+/// Marks entities owned exclusively by the render-object runtime.
 struct RenderObjectEntity;
 
+/// Runtime handles and applied revisions for one logical object.
 struct RuntimeObject {
     entity: Entity,
     mesh: Handle<Mesh>,
@@ -30,10 +35,12 @@ struct RuntimeObject {
 }
 
 #[derive(Resource, Default)]
+/// Maps stable object identities to their Bevy runtime state.
 struct RenderObjectRuntime {
     objects: HashMap<RenderObjectId, RuntimeObject>,
 }
 
+// Reconciles removals, creations, and revision-scoped updates.
 fn sync_render_objects(
     mut commands: Commands,
     render_objects: Res<RenderObjects>,
@@ -41,6 +48,7 @@ fn sync_render_objects(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
+    // Runtime entities own their mesh and material assets.
     let removed = runtime
         .objects
         .keys()
@@ -48,15 +56,21 @@ fn sync_render_objects(
         .copied()
         .collect::<Vec<_>>();
     for id in removed {
-        let object = runtime
-            .objects
-            .remove(&id)
-            .expect("collected runtime render object must exist");
+        let removed_object = runtime.objects.remove(&id);
+        let object = removed_object.expect("collected runtime render object must exist");
         commands.entity(object.entity).despawn();
-        meshes.remove(object.mesh.id());
-        materials.remove(object.material.id());
+        let removed_mesh = meshes.remove(object.mesh.id());
+        let removed_material = materials.remove(object.material.id());
+        if removed_mesh.is_none() || removed_material.is_none() {
+            bevy::log::warn!(
+                "Render Object runtime assets were already absent: id={id:?}, mesh_present={}, material_present={}",
+                removed_mesh.is_some(),
+                removed_material.is_some()
+            );
+        }
     }
 
+    // New objects are fully materialized before incremental revision checks.
     for (&id, entry) in &render_objects.objects {
         let Some(runtime_object) = runtime.objects.get_mut(&id) else {
             let mesh = meshes.add(entry.object.mesh.as_bevy().clone());
@@ -89,6 +103,7 @@ fn sync_render_objects(
             continue;
         };
 
+        // Each property revision avoids replacing unrelated Bevy components.
         if runtime_object.name_revision != entry.name_revision {
             commands
                 .entity(runtime_object.entity)
@@ -102,6 +117,7 @@ fn sync_render_objects(
                 .insert((transform, GlobalTransform::from(transform)));
             runtime_object.transform_revision = entry.transform_revision;
         }
+        // Preserve handles when the backing asset remains available.
         if runtime_object.mesh_revision != entry.mesh_revision {
             if let Some(mut mesh) = meshes.get_mut(&runtime_object.mesh) {
                 *mesh = entry.object.mesh.as_bevy().clone();
@@ -113,6 +129,7 @@ fn sync_render_objects(
             }
             runtime_object.mesh_revision = entry.mesh_revision;
         }
+        // Recreate externally removed assets without changing object identity.
         if runtime_object.material_revision != entry.material_revision {
             if let Some(mut material) = materials.get_mut(&runtime_object.material) {
                 *material = entry.object.material.as_bevy().clone();
@@ -133,6 +150,7 @@ fn sync_render_objects(
     }
 }
 
+// Logical visibility maps directly to explicit Bevy visibility.
 fn visibility(visible: bool) -> Visibility {
     if visible {
         Visibility::Visible
@@ -192,25 +210,17 @@ mod tests {
         assert_eq!(updated_entity, entity);
         assert_eq!(updated_mesh, mesh);
         assert_eq!(updated_material, material);
-        assert_eq!(
-            app.world()
-                .resource::<Assets<Mesh>>()
-                .get(&mesh)
-                .unwrap()
-                .count_vertices(),
-            6
-        );
+        let mesh_asset = app.world().resource::<Assets<Mesh>>().get(&mesh).unwrap();
+        assert_eq!(mesh_asset.count_vertices(), 6);
 
         remove_render_object(&mut app.world_mut().resource_mut::<RenderObjects>(), id);
         app.update();
         assert!(app.world().get_entity(entity).is_err());
-        assert!(app.world().resource::<Assets<Mesh>>().get(&mesh).is_none());
-        assert!(
-            app.world()
-                .resource::<Assets<StandardMaterial>>()
-                .get(&material)
-                .is_none()
-        );
+        let mesh_asset = app.world().resource::<Assets<Mesh>>().get(&mesh);
+        let materials = app.world().resource::<Assets<StandardMaterial>>();
+        let material_asset = materials.get(&material);
+        assert!(mesh_asset.is_none());
+        assert!(material_asset.is_none());
     }
 
     fn test_object(vertex_count: usize) -> RenderObject {

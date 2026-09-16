@@ -1,8 +1,12 @@
+//! Client chunk-stream ingestion, validation, caching, and ECS application.
+
 use super::*;
 
+// The chained systems preserve command, decode, and application ordering.
 impl Plugin for LocalCoordinateClientPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins(LocalCoordinateBasePlugin)
+            .init_resource::<AtomicVoxelRegistry>()
             .init_resource::<LocalCoordinateClientWorld>()
             .init_resource::<ClientChunkViewDistance>()
             .insert_resource(LocalCoordinateClientPipe(self.pipe.endpoint_b()))
@@ -25,15 +29,18 @@ impl Plugin for LocalCoordinateClientPlugin {
 }
 
 #[derive(Resource, Clone)]
+/// ECS-side endpoint for coordinate commands and client requests.
 struct LocalCoordinateClientPipe(
     CrossbeamThreadPipeEndpointB<LocalCoordinateClientCommand, LocalCoordinateClientEvent>,
 );
 
+/// Immutable decoded SVO retained with its authoritative version.
 pub(super) struct CachedClientChunk {
     server_version: UpdateVersion,
     svo: Arc<VoxelChunkSvo>,
 }
 
+/// Latest-wins chunk mutation waiting for its coordinate entity.
 pub(super) enum PendingChunkUpdate {
     Load {
         chunk: ChunkVersion,
@@ -45,19 +52,26 @@ pub(super) enum PendingChunkUpdate {
     },
 }
 
+// Publishes only changed, already-clamped view distances.
 fn publish_chunk_view_distance(
     distance: Res<ClientChunkViewDistance>,
     pipe: Res<LocalCoordinateClientPipe>,
 ) {
     if distance.is_changed() {
-        let _ = pipe
+        let chunks = distance.chunks();
+        if pipe
             .0
-            .try_send(LocalCoordinateClientEvent::SetChunkViewDistance {
-                chunks: distance.chunks(),
-            });
+            .try_send(LocalCoordinateClientEvent::SetChunkViewDistance { chunks })
+            .is_err()
+        {
+            log::error!(
+                "cannot publish client Chunk view distance: chunks={chunks}, reason=client_bridge_closed"
+            );
+        }
     }
 }
 
+// Applies a bounded batch of lifecycle and chunk transport commands.
 fn ingest_commands(
     mut commands: Commands,
     pipe: Res<LocalCoordinateClientPipe>,
@@ -70,12 +84,18 @@ fn ingest_commands(
         };
 
         match command {
+            // A session boundary invalidates every prior coordinate and version.
             LocalCoordinateClientCommand::BeginSession => {
-                let _ = pipe
+                let chunks = distance.chunks();
+                if pipe
                     .0
-                    .try_send(LocalCoordinateClientEvent::SetChunkViewDistance {
-                        chunks: distance.chunks(),
-                    });
+                    .try_send(LocalCoordinateClientEvent::SetChunkViewDistance { chunks })
+                    .is_err()
+                {
+                    log::error!(
+                        "cannot initialize client Chunk view distance: chunks={chunks}, reason=client_bridge_closed"
+                    );
+                }
                 for entity in world.coordinates.drain().map(|(_, entity)| entity) {
                     commands.entity(entity).despawn();
                 }
@@ -107,15 +127,28 @@ fn ingest_commands(
             LocalCoordinateClientCommand::VersionUpdates(chunks) => {
                 ingest_version_updates(&mut commands, &pipe, &mut world, chunks);
             }
+            // Payloads are decoded only when they match the requested version.
             LocalCoordinateClientCommand::LoadChunk { chunk, payload } => {
                 let key = chunk.id();
                 if world.requested_server_versions.get(&key) != Some(&chunk.version) {
                     continue;
                 }
-                world
+                if world
                     .derived_svo
-                    .submit(DerivedSvoJob::Decode { chunk, payload });
+                    .submit(DerivedSvoJob::Decode { chunk, payload })
+                    .is_err()
+                {
+                    let removed_request = world.requested_server_versions.remove(&key);
+                    debug_assert_eq!(removed_request, Some(chunk.version));
+                    log::error!(
+                        "cannot queue client Chunk decode: local_coordinate_id={}, coordinate={:?}, version={}, reason=derived_svo_worker_closed",
+                        chunk.local_coordinate_id.0,
+                        chunk.coordinate,
+                        chunk.version.value()
+                    );
+                }
             }
+            // Unload retains cached data while removing active state.
             LocalCoordinateClientCommand::UnloadChunk {
                 local_coordinate_id,
                 coordinate,
@@ -124,8 +157,13 @@ fn ingest_commands(
                     local_coordinate_id,
                     coordinate,
                 };
-                world.active_server_versions.remove(&key);
-                world.requested_server_versions.remove(&key);
+                let removed_active = world.active_server_versions.remove(&key);
+                let removed_request = world.requested_server_versions.remove(&key);
+                log::trace!(
+                    "queued client Chunk unload: chunk={key:?}, had_active_version={}, had_pending_request={}",
+                    removed_active.is_some(),
+                    removed_request.is_some()
+                );
                 queue_pending_chunk_update(
                     &mut world,
                     PendingChunkUpdate::Unload {
@@ -138,8 +176,10 @@ fn ingest_commands(
     }
 }
 
+// Validates decoded voxel IDs before publishing chunks to ECS state.
 fn collect_derived_svo_results(
     mut commands: Commands,
+    voxels: Option<Res<AtomicVoxelRegistry>>,
     mut world: ResMut<LocalCoordinateClientWorld>,
 ) {
     for _ in 0..MAX_CHUNK_UPDATES_APPLIED_PER_FRAME {
@@ -152,7 +192,23 @@ fn collect_derived_svo_results(
                 if world.requested_server_versions.get(&key) != Some(&chunk.version) {
                     continue;
                 }
-                world.requested_server_versions.remove(&key);
+                let removed_request = world.requested_server_versions.remove(&key);
+                debug_assert_eq!(removed_request, Some(chunk.version));
+                let builtin;
+                let voxels = if let Some(voxels) = voxels.as_deref() {
+                    voxels
+                } else {
+                    builtin = AtomicVoxelRegistry::builtin();
+                    &builtin
+                };
+                if let Some(unknown) = first_unknown_voxel(&svo, voxels) {
+                    log::error!(
+                        "discarding Chunk {:?}: server sent unknown atomic voxel ID {}",
+                        key,
+                        unknown.0
+                    );
+                    continue;
+                }
                 let svo = Arc::new(svo);
                 world.cached_chunks.insert(
                     key,
@@ -170,7 +226,14 @@ fn collect_derived_svo_results(
                 chunk,
                 error,
             } => {
-                world.requested_server_versions.remove(&chunk.id());
+                let removed_request = world.requested_server_versions.remove(&chunk.id());
+                if removed_request != Some(chunk.version) {
+                    log::debug!(
+                        "received failure for inactive client Chunk derivation: chunk={:?}, failed_version={}",
+                        chunk.id(),
+                        chunk.version.value()
+                    );
+                }
                 log::warn!(
                     "failed to derive client chunk SVO: local_coordinate_id={}, coordinate={:?}, error={error}",
                     chunk.local_coordinate_id.0,
@@ -186,6 +249,7 @@ fn collect_derived_svo_results(
     }
 }
 
+// Reuses matching cache entries and requests only unknown versions.
 fn ingest_version_updates(
     commands: &mut Commands,
     pipe: &LocalCoordinateClientPipe,
@@ -199,7 +263,16 @@ fn ingest_version_updates(
         if let Some(cached) = world.cached_chunks.get(&key)
             && cached.server_version == chunk.version
         {
-            world.requested_server_versions.remove(&key);
+            let superseded_request = world.requested_server_versions.remove(&key);
+            if let Some(version) = superseded_request
+                && version != chunk.version
+            {
+                log::trace!(
+                    "cancelled obsolete client Chunk request after cache hit: chunk={key:?}, requested_version={}, cached_version={}",
+                    version.value(),
+                    chunk.version.value()
+                );
+            }
             if world.active_server_versions.get(&key) != Some(&chunk.version) {
                 world.active_server_versions.insert(key, chunk.version);
                 let svo = Arc::clone(&cached.svo);
@@ -214,12 +287,20 @@ fn ingest_version_updates(
     }
 
     if !requests.is_empty() {
-        let _ = pipe
+        let request_count = requests.len();
+        if pipe
             .0
-            .try_send(LocalCoordinateClientEvent::RequestChunks(requests));
+            .try_send(LocalCoordinateClientEvent::RequestChunks(requests))
+            .is_err()
+        {
+            log::error!(
+                "cannot publish client Chunk requests: chunk_count={request_count}, reason=client_bridge_closed"
+            );
+        }
     }
 }
 
+// Lazily creates a static coordinate root for incoming chunks.
 fn ensure_coordinate(
     commands: &mut Commands,
     world: &mut LocalCoordinateClientWorld,
@@ -240,6 +321,28 @@ fn ensure_coordinate(
         })
 }
 
+// Rejects nonempty voxel IDs absent from the loaded resource registry.
+fn first_unknown_voxel(
+    svo: &roundo_algorithm::tree::BreadthFirstLosslessSvo<AtomicVoxelId>,
+    voxels: &AtomicVoxelRegistry,
+) -> Option<AtomicVoxelId> {
+    let edge = crate::local_coordinate::data::CHUNK_EDGE_LENGTH as u32;
+    for z in 0..edge {
+        for y in 0..edge {
+            for x in 0..edge {
+                let voxel = *svo
+                    .value_at_coordinates([x, y, z])
+                    .expect("decoded Chunk SVO has the fixed local-coordinate depth");
+                if voxel != EMPTY_VOXEL_ID && voxels.definition(voxel).is_none() {
+                    return Some(voxel);
+                }
+            }
+        }
+    }
+    None
+}
+
+// Applies a bounded update batch; unavailable entities are retried later.
 fn apply_pending_chunk_updates(
     mut world: ResMut<LocalCoordinateClientWorld>,
     mut local_coordinates: Query<&mut LocalCoordinate>,
@@ -272,6 +375,7 @@ fn apply_pending_chunk_updates(
     }
 }
 
+// Replaces older pending work for the same chunk identity.
 fn queue_pending_chunk_update(world: &mut LocalCoordinateClientWorld, update: PendingChunkUpdate) {
     let id = pending_chunk_id(&update);
     world
@@ -280,6 +384,7 @@ fn queue_pending_chunk_update(world: &mut LocalCoordinateClientWorld, update: Pe
     world.pending_chunk_updates.push_back(update);
 }
 
+// Normalizes load and unload variants to one chunk key.
 fn pending_chunk_id(update: &PendingChunkUpdate) -> ChunkId {
     match update {
         PendingChunkUpdate::Load { chunk, .. } => chunk.id(),
@@ -293,6 +398,7 @@ fn pending_chunk_id(update: &PendingChunkUpdate) -> ChunkId {
     }
 }
 
+// Extracts the coordinate owner without cloning update payloads.
 fn pending_local_coordinate_id(update: &PendingChunkUpdate) -> LocalCoordinateId {
     match update {
         PendingChunkUpdate::Load { chunk, .. } => chunk.local_coordinate_id,
@@ -303,6 +409,7 @@ fn pending_local_coordinate_id(update: &PendingChunkUpdate) -> LocalCoordinateId
     }
 }
 
+// Server-derived chunks are read-only locally, so transient dirty sets are cleared.
 fn discard_client_chunk_changes(mut local_coordinates: Query<&mut LocalCoordinate>) {
     for mut local_coordinate in &mut local_coordinates {
         local_coordinate.changed_chunks.clear();

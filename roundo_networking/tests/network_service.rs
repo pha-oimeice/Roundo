@@ -5,7 +5,8 @@ use roundo_networking::protocol::{
 };
 use roundo_networking::{
     CertificatePolicy, ClientHooks, ClientNetwork, ClientNetworkConfig, HookFuture, PublicSession,
-    ServerHooks, ServerNetwork, ServerNetworkConfig, StreamId,
+    ResourceCatalogFingerprint, ServerHooks, ServerNetwork, ServerNetworkConfig, StreamId,
+    TransportAdmissionPolicy,
 };
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
@@ -24,6 +25,7 @@ async fn client_and_server_exchange_messages_over_prioritized_quic_streams() {
     let server = ServerNetwork::start(
         server_config(certificate_directory.clone()),
         Arc::new(TestServerHooks {
+            resource_fingerprint: ResourceCatalogFingerprint([7; 32]),
             connected_sender,
             client_message_sender,
             client_resource_sender,
@@ -40,8 +42,10 @@ async fn client_and_server_exchange_messages_over_prioritized_quic_streams() {
             server_name: "localhost".to_string(),
             certificate_policy: CertificatePolicy::TrustOnFirstUse,
             reconnect_delay: Duration::from_millis(10),
+            admission: TransportAdmissionPolicy::default(),
         },
         Arc::new(TestClientHooks {
+            resource_fingerprint: ResourceCatalogFingerprint([7; 32]),
             server_message_sender,
             server_resource_sender,
             connection_error_sender,
@@ -57,14 +61,14 @@ async fn client_and_server_exchange_messages_over_prioritized_quic_streams() {
         command: PlayerControllerCommand::Movement3D(ControllerCommand {
             sequence: 7,
             action: Movement3DAction {
-                translation_delta: [1.0, 0.0, 0.0],
+                direction: [1.0, 0.0, 0.0],
             },
         }),
     };
-    assert!(client.send(StreamId::Stream1, request.clone()).is_err());
-    client
-        .send(StreamId::Stream0, request.clone())
-        .expect("connected client should send game message");
+    let wrong_stream = client.send(StreamId::Stream1, request.clone());
+    assert!(wrong_stream.is_err());
+    let send_result = client.send(StreamId::Stream0, request.clone());
+    send_result.expect("connected client should send game message");
     let (received_connection_id, received_session, received_message) =
         receive(client_message_receiver).await;
     assert_eq!(received_connection_id, connection_id);
@@ -84,9 +88,8 @@ async fn client_and_server_exchange_messages_over_prioritized_quic_streams() {
     assert_eq!(receive(server_message_receiver).await, outbound);
 
     let resource_request = ClientResourceMessage::RequestLocalCoordinateChunks { chunks: vec![] };
-    client
-        .send(StreamId::Stream1, resource_request.clone())
-        .expect("connected client should send resource message");
+    let send_result = client.send(StreamId::Stream1, resource_request.clone());
+    send_result.expect("connected client should send resource message");
     let (received_connection_id, received_session, received_message) =
         receive(client_resource_receiver).await;
     assert_eq!(received_connection_id, connection_id);
@@ -104,7 +107,53 @@ async fn client_and_server_exchange_messages_over_prioritized_quic_streams() {
     let _ = std::fs::remove_dir_all(certificate_directory);
 }
 
+#[tokio::test]
+async fn incompatible_resource_catalog_is_rejected_before_session_connection() {
+    let (connected_sender, connected_receiver) = channel();
+    let (client_message_sender, _) = channel();
+    let (client_resource_sender, _) = channel();
+    let certificate_directory = test_certificate_directory();
+    let server = ServerNetwork::start(
+        server_config(certificate_directory.clone()),
+        Arc::new(TestServerHooks {
+            resource_fingerprint: ResourceCatalogFingerprint([1; 32]),
+            connected_sender,
+            client_message_sender,
+            client_resource_sender,
+        }),
+    )
+    .expect("network server should start");
+    let (server_message_sender, _) = channel();
+    let (server_resource_sender, _) = channel();
+    let (connection_error_sender, connection_error_receiver) = channel();
+    let client = ClientNetwork::start(
+        ClientNetworkConfig {
+            quic_address: server.addresses().quic_address,
+            server_name: "localhost".to_string(),
+            certificate_policy: CertificatePolicy::TrustOnFirstUse,
+            reconnect_delay: Duration::from_secs(60),
+            admission: TransportAdmissionPolicy::default(),
+        },
+        Arc::new(TestClientHooks {
+            resource_fingerprint: ResourceCatalogFingerprint([2; 32]),
+            server_message_sender,
+            server_resource_sender,
+            connection_error_sender,
+        }),
+    )
+    .expect("network client should start");
+
+    let error = receive(connection_error_receiver).await;
+    assert!(!error.is_empty());
+    assert!(connected_receiver.try_recv().is_err());
+
+    client.shutdown();
+    server.shutdown();
+    let _ = std::fs::remove_dir_all(certificate_directory);
+}
+
 struct TestServerHooks {
+    resource_fingerprint: ResourceCatalogFingerprint,
     connected_sender: Sender<(ConnectionId, UserSession)>,
     client_message_sender: Sender<(ConnectionId, UserSession, ClientGameMessage)>,
     client_resource_sender: Sender<(ConnectionId, UserSession, ClientResourceMessage)>,
@@ -113,6 +162,10 @@ struct TestServerHooks {
 impl ServerHooks for TestServerHooks {
     fn initialize(&self) -> HookFuture<()> {
         Box::pin(async { Ok(()) })
+    }
+
+    fn resource_catalog_fingerprint(&self) -> ResourceCatalogFingerprint {
+        self.resource_fingerprint
     }
 
     fn public_session(&self) -> HookFuture<PublicSession> {
@@ -129,7 +182,11 @@ impl ServerHooks for TestServerHooks {
     }
 
     fn on_session_connected(&self, connection_id: ConnectionId, user_session: UserSession) {
-        let _ = self.connected_sender.send((connection_id, user_session));
+        let notification = self.connected_sender.send((connection_id, user_session));
+        assert!(
+            notification.is_ok(),
+            "connected-event test receiver was dropped"
+        );
     }
 
     fn on_session_disconnected(&self, _: ConnectionId, _: UserSession) {}
@@ -140,9 +197,12 @@ impl ServerHooks for TestServerHooks {
         user_session: UserSession,
         message: ClientGameMessage,
     ) {
-        let _ = self
-            .client_message_sender
-            .send((connection_id, user_session, message));
+        let sender = &self.client_message_sender;
+        let notification = sender.send((connection_id, user_session, message));
+        assert!(
+            notification.is_ok(),
+            "game-message test receiver was dropped"
+        );
     }
 
     fn on_client_resource_message(
@@ -151,29 +211,49 @@ impl ServerHooks for TestServerHooks {
         user_session: UserSession,
         message: ClientResourceMessage,
     ) {
-        let _ = self
-            .client_resource_sender
-            .send((connection_id, user_session, message));
+        let sender = &self.client_resource_sender;
+        let notification = sender.send((connection_id, user_session, message));
+        assert!(
+            notification.is_ok(),
+            "resource-message test receiver was dropped"
+        );
     }
 }
 
 struct TestClientHooks {
+    resource_fingerprint: ResourceCatalogFingerprint,
     server_message_sender: Sender<ServerGameMessage>,
     server_resource_sender: Sender<ServerResourceMessage>,
     connection_error_sender: Sender<String>,
 }
 
 impl ClientHooks for TestClientHooks {
+    fn resource_catalog_fingerprint(&self) -> ResourceCatalogFingerprint {
+        self.resource_fingerprint
+    }
+
     fn on_server_game_message(&self, message: ServerGameMessage) {
-        let _ = self.server_message_sender.send(message);
+        let notification = self.server_message_sender.send(message);
+        assert!(
+            notification.is_ok(),
+            "server-message test receiver was dropped"
+        );
     }
 
     fn on_server_resource_message(&self, message: ServerResourceMessage) {
-        let _ = self.server_resource_sender.send(message);
+        let notification = self.server_resource_sender.send(message);
+        assert!(
+            notification.is_ok(),
+            "server-resource test receiver was dropped"
+        );
     }
 
     fn on_connection_error(&self, error: &roundo_networking::NetworkError) {
-        let _ = self.connection_error_sender.send(error.to_string());
+        let notification = self.connection_error_sender.send(error.to_string());
+        assert!(
+            notification.is_ok(),
+            "connection-error test receiver was dropped"
+        );
     }
 }
 
@@ -212,6 +292,7 @@ fn server_config(certificate_directory: PathBuf) -> ServerNetworkConfig {
         certificate_directory,
         server_alternative_names: vec!["localhost".to_string()],
         generate_self_signed_certificate: true,
+        admission: TransportAdmissionPolicy::default(),
     }
 }
 

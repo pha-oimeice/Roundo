@@ -1,3 +1,5 @@
+//! Authoritative transform representation for local-coordinate entities.
+
 use bevy::{
     prelude::{Changed, Component, IntoScheduleConfigs, Quat, Query, Transform, Vec3},
     transform::TransformSystems,
@@ -5,6 +7,7 @@ use bevy::{
 
 #[derive(Component, Clone, Copy, Debug, PartialEq)]
 #[require(Transform)]
+/// Transform copied into Bevy's propagation graph after authoritative changes.
 pub struct LocalCoordinateTransform {
     pub translation: Vec3,
     pub rotation: Quat,
@@ -12,12 +15,14 @@ pub struct LocalCoordinateTransform {
 }
 
 impl LocalCoordinateTransform {
+    /// Identity transform used by static generated coordinates.
     pub const IDENTITY: Self = Self {
         translation: Vec3::ZERO,
         rotation: Quat::IDENTITY,
         scale: Vec3::ONE,
     };
 
+    /// Constructs an unrotated, unit-scale transform.
     pub const fn from_translation(translation: Vec3) -> Self {
         Self {
             translation,
@@ -25,6 +30,7 @@ impl LocalCoordinateTransform {
         }
     }
 
+    /// Constructs a transform from explicit translation, rotation, and scale.
     pub const fn from_parts(translation: Vec3, rotation: Quat, scale: Vec3) -> Self {
         Self {
             translation,
@@ -33,6 +39,7 @@ impl LocalCoordinateTransform {
         }
     }
 
+    /// Replaces scale while preserving translation and rotation.
     pub fn with_scale(mut self, scale: Vec3) -> Self {
         self.scale = scale;
         self
@@ -53,6 +60,7 @@ impl Default for LocalCoordinateTransform {
     }
 }
 
+/// Updates engine transforms before hierarchy propagation.
 pub(crate) fn derive_bevy_transforms(
     mut transforms: Query<
         (&LocalCoordinateTransform, &mut Transform),
@@ -64,6 +72,7 @@ pub(crate) fn derive_bevy_transforms(
     }
 }
 
+/// Orders authoritative transform derivation in the post-update schedule.
 pub(crate) fn configure_transform_derivation(app: &mut bevy::prelude::App) {
     app.add_systems(
         bevy::prelude::PostUpdate,

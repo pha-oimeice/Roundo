@@ -16,7 +16,7 @@ impl<const L: usize> BitMask<L> {
         }
         index as usize
     }
-    pub fn get(&self, index: i32) -> bool {
+    pub fn bit(&self, index: i32) -> bool {
         let index = Self::check_index(index);
         let byte_index = index >> 3;
         let bit_index = index & 7;

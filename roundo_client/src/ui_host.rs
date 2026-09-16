@@ -9,32 +9,28 @@ use bevy::{
     input::ButtonInput,
     prelude::{
         Camera, Camera2d, Camera3d, ClearColorConfig, Color, Commands, Component, Entity,
-        IntoScheduleConfigs, KeyCode, Message, MessageReader, MessageWriter, MouseButton, Query,
-        Res, ResMut, Resource, Startup, Update, With, Without,
+        IntoScheduleConfigs, KeyCode, MessageReader, MessageWriter, MouseButton, Query, Res,
+        ResMut, Resource, Startup, Update, With, Without,
     },
     window::{CursorGrabMode, CursorOptions, PrimaryWindow, Window},
 };
 use roundo_cli::client_network::{ClientConnectionStatus, ClientNetworkManager};
-use roundo_marionette::{ClientKeyBindings, ClientMarionetteInputSettings, ClientPlayerController};
+use roundo_marionette::{
+    ClientInputBindings, ClientMarionetteInputSettings, ClientPlayerController, InputRegistry,
+};
 use roundo_presence::ClientPresenceSettings;
 use roundo_webui::{
     RecoveryAction, RecoveryActionRequest, UiCommandSource, UiLifecycleManager, UiLifecycleState,
     UiNavigationExecutor,
 };
 
-/// Requests activation or deactivation of the player-bound game camera.
-/// UI-state application emits this intent; the camera adapter owns the Bevy
-/// camera mutation separately.
-#[derive(Clone, Copy, Debug, Message)]
-struct CameraActivationMessage {
-    active: bool,
-}
-
-/// The last UI state whose host declarations were applied. This makes UI
-/// transition effects edge-triggered even if unrelated systems mark the UI
-/// resource as changed during a frame.
+/// The last UI projection applied to the host adapters.
+///
+/// The key makes cursor, controller, and camera updates edge-triggered even when
+/// unrelated systems mark lifecycle state as changed. These adapter mutations
+/// run sequentially in one ECS system; they are not a rollback-capable transaction.
 #[derive(Default, Resource)]
-struct AppliedUiState(Option<(Option<roundo_webui::UiInstanceId>, bool)>);
+struct AppliedHostProjection(Option<(Option<roundo_webui::UiInstanceId>, bool)>);
 
 /// A full-window 2D camera which clears the render target while game rendering
 /// is disabled. Keeping it active in Web UI mode prevents old world pixels
@@ -45,8 +41,7 @@ struct UiClearCamera;
 pub struct ClientWebUiHostPlugin;
 impl bevy::prelude::Plugin for ClientWebUiHostPlugin {
     fn build(&self, app: &mut bevy::prelude::App) {
-        app.init_resource::<AppliedUiState>()
-            .add_message::<CameraActivationMessage>()
+        app.init_resource::<AppliedHostProjection>()
             .add_systems(Startup, spawn_ui_clear_camera)
             .add_systems(
                 Update,
@@ -54,8 +49,7 @@ impl bevy::prelude::Plugin for ClientWebUiHostPlugin {
                     apply_recovery_action,
                     sync_authoritative_root,
                     clear_webui_focus_on_background_click,
-                    apply_ui_resource,
-                    apply_camera_activation,
+                    apply_host_projection,
                     escape_opens_pause,
                     sync_runtime_settings,
                 )
@@ -70,7 +64,8 @@ fn apply_recovery_action(
     mut manager: ResMut<UiLifecycleManager>,
     mut app_exit: MessageWriter<AppExit>,
 ) {
-    for request in actions.read() {
+    let recovery_requests = actions.read();
+    for request in recovery_requests {
         match request.0 {
             // Retry preserves its existing meaning: retry the failed configured
             // Root UI transaction. It does not alter connection authority.
@@ -87,7 +82,7 @@ fn apply_recovery_action(
                 network.disconnect();
             }
             RecoveryAction::Quit => {
-                app_exit.write(AppExit::Success);
+                let _exit_message = app_exit.write(AppExit::Success);
             }
         }
     }
@@ -157,10 +152,12 @@ fn sync_authoritative_root(
         connection.status
     );
     match navigation.replace_root(&mut manager, expected) {
-        Ok(roundo_webui::UiRootReplacement::Pending(instance)) => log::info!(
-            "Configured {expected:?} Root UI staged transactionally: pending_instance={}; {previous:?} Root remains live until commit",
-            instance.get()
-        ),
+        Ok(roundo_webui::UiRootReplacement::Pending(instance)) => {
+            let instance_id = instance.value();
+            log::info!(
+                "Configured {expected:?} Root UI staged transactionally: pending_instance={instance_id}; {previous:?} Root remains live until commit"
+            )
+        }
         Ok(roundo_webui::UiRootReplacement::Completed(destroyed)) => log::info!(
             "Client UI Root replaced without a configured Root UI: {previous:?} -> {expected:?}; destroyed_instances={}",
             destroyed.len()
@@ -190,22 +187,23 @@ fn clear_webui_focus_on_background_click(
     }
 }
 
-fn apply_ui_resource(
+fn apply_host_projection(
     state: Res<UiLifecycleManager>,
-    mut applied: ResMut<AppliedUiState>,
+    mut applied: ResMut<AppliedHostProjection>,
     mut controller: ResMut<ClientPlayerController>,
     mut windows: Query<(&mut Window, &mut CursorOptions), With<PrimaryWindow>>,
-    mut camera_activation: MessageWriter<CameraActivationMessage>,
+    mut cameras: Query<(Entity, &mut Camera), (With<Camera3d>, Without<UiClearCamera>)>,
+    mut clear_cameras: Query<&mut Camera, With<UiClearCamera>>,
 ) {
     let connected = state.lifecycle_state() == UiLifecycleState::Connected;
     let focused = state.focused_declaration();
-    let state_key = (focused.map(|value| value.instance), connected);
-    if applied.0 == Some(state_key) {
+    let projection_key = (focused.map(|value| value.instance), connected);
+    if applied.0 == Some(projection_key) {
         return;
     }
+
     let game_input = connected && focused.is_none();
     controller.set_input_enabled(game_input);
-    camera_activation.write(CameraActivationMessage { active: connected });
     for (mut window, mut cursor) in &mut windows {
         cursor.visible = !game_input;
         cursor.grab_mode = if game_input {
@@ -218,7 +216,13 @@ fn apply_ui_resource(
             window.set_cursor_position(Some(center));
         }
     }
-    applied.0 = Some(state_key);
+    for (entity, mut camera) in &mut cameras {
+        camera.is_active = connected && controller.is_bound_to(entity);
+    }
+    for mut clear_camera in &mut clear_cameras {
+        clear_camera.is_active = !connected;
+    }
+    applied.0 = Some(projection_key);
 }
 
 fn spawn_ui_clear_camera(mut commands: Commands) {
@@ -234,37 +238,22 @@ fn spawn_ui_clear_camera(mut commands: Commands) {
     ));
 }
 
-/// The only system that changes Bevy camera activation in response to UI mode.
-fn apply_camera_activation(
-    mut messages: MessageReader<CameraActivationMessage>,
-    controller: Res<ClientPlayerController>,
-    mut cameras: Query<(Entity, &mut Camera), (With<Camera3d>, Without<UiClearCamera>)>,
-    mut clear_cameras: Query<&mut Camera, With<UiClearCamera>>,
-) {
-    for message in messages.read() {
-        log::debug!("Applying game camera activation: active={}", message.active);
-        for (entity, mut camera) in &mut cameras {
-            camera.is_active = message.active && controller.is_bound_to(entity);
-        }
-        for mut clear_camera in &mut clear_cameras {
-            // The clear camera renders an otherwise empty 2D pass with a black
-            // clear color, replacing every prior world pixel in Web UI mode.
-            clear_camera.is_active = !message.active;
-        }
-    }
-}
-
 fn sync_runtime_settings(
     config: Res<roundo_cli::ClientConfigStore>,
     mut input: ResMut<ClientMarionetteInputSettings>,
-    mut bindings: ResMut<ClientKeyBindings>,
+    registry: Res<InputRegistry>,
+    mut bindings: ResMut<ClientInputBindings>,
     mut presence: ResMut<ClientPresenceSettings>,
     mut chunk_view_distance: ResMut<roundo_local_coordinate::ClientChunkViewDistance>,
     mut targeting: ResMut<ClientVoxelRaycastSettings>,
 ) {
     input.mouse_sensitivity = config.0.settings.controls.mouse_sensitivity;
     input.camera_move_speed = config.0.settings.camera.move_speed;
-    *bindings = crate::config::runtime_key_bindings(&config.0.settings);
+    input.player_movement_prediction = config.0.settings.controls.player_movement_prediction;
+    match crate::config::runtime_input_bindings(&config.0.settings, &registry) {
+        Ok(updated) => *bindings = updated,
+        Err(error) => log::error!("cannot apply input bindings: {error}"),
+    }
     presence.set_joinable_world_radius(config.0.settings.world.joinable_world_radius);
     let configured_view_distance = config.0.settings.world.chunk_view_distance as u16;
     if chunk_view_distance.chunks() != configured_view_distance {
@@ -292,7 +281,7 @@ fn escape_opens_pause(
             return;
         }
     };
-    if let Err(error) = navigation.open(&mut state, UiCommandSource::Host, target) {
+    if let Err(error) = navigation.navigate(&mut state, UiCommandSource::Host, target) {
         log::error!("cannot open pause UI: {error}");
     }
 }

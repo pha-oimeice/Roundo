@@ -1,9 +1,12 @@
+//! Deterministic three-dimensional maze generation from a seed and radius.
+
 use super::GeneratedVoxel;
 use rand::{RngExt, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 use std::collections::VecDeque;
 
 /// Generates the solid cells of a three-dimensional cuboid maze.
+/// Generates solid boundary voxels around the largest connected open region.
 pub fn generate_maze(seed: u64, radius: i16) -> Vec<GeneratedVoxel> {
     assert!(radius >= 2, "radius must be greater than 1");
 
@@ -27,6 +30,7 @@ pub fn generate_maze(seed: u64, radius: i16) -> Vec<GeneratedVoxel> {
     voxels
 }
 
+// Carves a seeded depth-first maze on odd lattice coordinates.
 fn generate_occupancy(seed: u64, size: usize) -> Vec<Vec<Vec<bool>>> {
     assert!(size >= 3);
 
@@ -78,6 +82,7 @@ fn generate_occupancy(seed: u64, size: usize) -> Vec<Vec<Vec<bool>>> {
     maze
 }
 
+// Removes disconnected cavities so every retained cell is traversable.
 fn keep_largest_open_region(maze: &mut [Vec<Vec<bool>>]) {
     let size = maze.len();
     let mut visited = vec![vec![vec![false; size]; size]; size];
@@ -138,6 +143,7 @@ fn keep_largest_open_region(maze: &mut [Vec<Vec<bool>>]) {
     }
 }
 
+// Opens selected internal walls to reduce strictly linear paths.
 fn add_loops(maze: &mut [Vec<Vec<bool>>], rng: &mut ChaCha8Rng) {
     let size = maze.len();
     for _ in 0..size * size * size / 200 {
@@ -163,6 +169,7 @@ fn add_loops(maze: &mut [Vec<Vec<bool>>], rng: &mut ChaCha8Rng) {
     }
 }
 
+// Adds exterior openings reachable from the retained region.
 fn add_boundary_exits(maze: &mut [Vec<Vec<bool>>], rng: &mut ChaCha8Rng) {
     let size = maze.len();
     for _ in 0..6.max(size / 4) {
@@ -180,6 +187,7 @@ fn add_boundary_exits(maze: &mut [Vec<Vec<bool>>], rng: &mut ChaCha8Rng) {
     }
 }
 
+// Applies signed neighbor offsets after callers enforce interior bounds.
 fn offset_index(position: (usize, usize, usize), offset: (i32, i32, i32)) -> (usize, usize, usize) {
     (
         (position.0 as i32 + offset.0) as usize,
