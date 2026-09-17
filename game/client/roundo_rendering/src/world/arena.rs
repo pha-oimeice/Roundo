@@ -7,7 +7,7 @@ use bevy::render::{
     renderer::RenderDevice,
 };
 
-use super::GENERATED_VERTEX_SIZE;
+use super::GENERATED_QUAD_SIZE;
 
 // Segments grow independently while remaining under the global byte budget.
 const DEFAULT_SEGMENT_BYTES: u64 = 64 * 1024 * 1024;
@@ -68,7 +68,7 @@ impl GeometryArena {
         render_device: &RenderDevice,
         requested_bytes: u64,
     ) -> Option<GeometryAllocation> {
-        let size = align_up(requested_bytes.max(GENERATED_VERTEX_SIZE), self.alignment)?;
+        let size = align_up(requested_bytes.max(GENERATED_QUAD_SIZE), self.alignment)?;
         for (segment_index, segment) in self.segments.iter_mut().enumerate() {
             if let Some(allocation) = allocate_from_ranges(&mut segment.free, segment_index, size) {
                 return Some(allocation);
@@ -110,8 +110,14 @@ impl GeometryArena {
     /// Panics if `allocation` did not originate from this arena. A freed
     /// allocation may still address its retained segment but no longer owns its
     /// range and must not be used for rendering.
-    pub(super) fn buffer(&self, allocation: GeometryAllocation) -> &Buffer {
-        &self.segments[allocation.segment].buffer
+    /// Number of physical device-local segments currently reserved.
+    pub(super) fn segment_count(&self) -> usize {
+        self.segments.len()
+    }
+
+    /// Returns one segment buffer for batched rendering.
+    pub(super) fn segment_buffer(&self, segment: usize) -> &Buffer {
+        &self.segments[segment].buffer
     }
 
     /// Frees one live allocation and coalesces adjacent free ranges.

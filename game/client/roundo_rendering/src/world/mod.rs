@@ -5,9 +5,15 @@
 //! replacement has been generated, read back, allocated, and made resident.
 
 mod arena;
+#[cfg(test)]
 mod lod;
+mod svo_arena;
 
 use arena::{GeometryAllocation, GeometryArena};
+use svo_arena::{SvoAllocation, SvoArena};
+
+#[cfg(test)]
+use bevy::prelude::Vec4;
 
 use bevy::{
     asset::{embedded_asset, load_embedded_asset},
@@ -17,7 +23,7 @@ use bevy::{
     },
     prelude::{
         App, Commands, Component, DetectChanges, Entity, GlobalTransform, IVec4,
-        IntoScheduleConfigs, Mat4, Query, Ref, Res, ResMut, Resource, UVec4, Vec4,
+        IntoScheduleConfigs, Mat4, Query, Ref, Res, ResMut, Resource, UVec4,
     },
     render::{
         Extract, ExtractSchedule, Render, RenderApp, RenderStartup, RenderSystems,
@@ -25,13 +31,12 @@ use bevy::{
         extract_resource::{ExtractResource, ExtractResourcePlugin},
         render_resource::{
             BindGroup, BindGroupEntries, BindGroupLayoutDescriptor, BindGroupLayoutEntries,
-            BindingResource, BlendState, Buffer, BufferBinding, BufferInitDescriptor, BufferSize,
-            BufferUsages, CachedComputePipelineId, CachedRenderPipelineId, ColorTargetState,
-            ColorWrites, CompareFunction, ComputePassDescriptor, ComputePipelineDescriptor,
-            DepthStencilState, Face, FragmentState, FrontFace, MapMode, MultisampleState,
-            PipelineCache, PolygonMode, PrimitiveState, PrimitiveTopology, RenderPassDescriptor,
-            RenderPipelineDescriptor, ShaderStages, ShaderType, StencilState, StoreOp,
-            TextureFormat, VertexState,
+            BlendState, Buffer, BufferInitDescriptor, BufferUsages, CachedComputePipelineId,
+            CachedRenderPipelineId, ColorTargetState, ColorWrites, CompareFunction,
+            ComputePassDescriptor, ComputePipelineDescriptor, DepthStencilState, Face,
+            FragmentState, FrontFace, MultisampleState, PipelineCache, PolygonMode, PrimitiveState,
+            PrimitiveTopology, RenderPassDescriptor, RenderPipelineDescriptor, ShaderStages,
+            ShaderType, StencilState, StoreOp, TextureFormat, VertexState,
             binding_types::{storage_buffer, storage_buffer_read_only, uniform_buffer},
         },
         renderer::{RenderContext, RenderDevice, RenderQueue, ViewQuery},
@@ -50,7 +55,7 @@ use std::{
     collections::{HashMap, HashSet},
     sync::{
         Arc,
-        atomic::{AtomicU8, AtomicU64, Ordering},
+        atomic::{AtomicU64, Ordering},
     },
     time::Instant,
 };
@@ -58,37 +63,29 @@ use std::{
 /// Default deterministic seed used by the voxel material shader.
 pub const DEFAULT_WORLD_MATERIAL_SEED: u32 = 0xDEAD_BEEF;
 const DEFAULT_GEOMETRY_BUDGET_BYTES: u64 = 1024 * 1024 * 1024;
+const DEFAULT_SVO_BUDGET_BYTES: u64 = 1024 * 1024 * 1024;
 const CHUNK_EDGE: u32 = CHUNK_EDGE_LENGTH as u32;
 const FACE_PLANE_COUNT: u32 = 6 * CHUNK_EDGE;
 const MAX_CHUNK_LOD: u8 = CHUNK_EDGE.ilog2() as u8;
 // The GPU ABI and dispatch topology below intentionally model one fixed 16³ cube.
 // Fail compilation instead of silently drifting into a 16²×height representation.
 const _: () = assert!(CHUNK_EDGE == 16 && MAX_CHUNK_LOD == 4);
-const GENERATED_VERTEX_SIZE: u64 = 16;
-const DEFAULT_GEOMETRY_BUILD_BUDGET_BYTES: u64 = 16 * 1024 * 1024;
-const DEFAULT_MAX_GEOMETRY_BUILDS_PER_FRAME: u32 = 32;
-// Bit offsets for the complete 16³ → 8³ → 4³ → 2³ → 1³ occupancy pyramid.
-const OCCUPANCY_MIP_LEVEL_OFFSETS: [u32; 5] = [0, 4096, 4608, 4672, 4680];
-const OCCUPANCY_MIP_CELL_COUNT: u32 = 4681;
-const OCCUPANCY_MIP_WORD_COUNT: usize = OCCUPANCY_MIP_CELL_COUNT.div_ceil(u32::BITS) as usize;
-
+const GENERATED_QUAD_SIZE: u64 = 16;
+// Fixed descriptor capacity keeps GPU visibility ownership independent from
+// resident-set size changes. A paged descriptor arena will replace this limit.
+const MAX_GPU_CHUNK_DESCRIPTORS: u32 = 262_144;
+const MAX_GPU_GEOMETRY_SEGMENTS: u32 = 16;
 /// Render-world budgets and deterministic material input.
 ///
 /// Callers should configure this resource before the renderer initializes.
-/// Runtime changes do not retroactively rebuild every resident chunk, and the
-/// geometry arena retains the total-reservation limit used when it is first
-/// created. Zero budgets are valid and can prevent new geometry from becoming
-/// resident without evicting an older complete mesh.
+/// Runtime changes do not resize existing arena segments; the geometry arena
+/// retains the total-reservation limit used when it is first created.
 #[derive(Clone, Copy, Debug, ExtractResource, Resource)]
 pub struct WorldRenderSettings {
     /// Seed mixed into deterministic material/color selection for newly prepared chunks.
     pub material_seed: u32,
     /// Maximum total bytes reserved by retained geometry-arena segments.
     pub geometry_budget_bytes: u64,
-    /// Maximum generated-geometry bytes admitted during one render frame.
-    pub geometry_build_budget_bytes: u64,
-    /// Maximum geometry count/emit dispatches admitted in one render frame.
-    pub max_geometry_builds_per_frame: u32,
 }
 
 impl Default for WorldRenderSettings {
@@ -96,8 +93,6 @@ impl Default for WorldRenderSettings {
         Self {
             material_seed: DEFAULT_WORLD_MATERIAL_SEED,
             geometry_budget_bytes: DEFAULT_GEOMETRY_BUDGET_BYTES,
-            geometry_build_budget_bytes: DEFAULT_GEOMETRY_BUILD_BUDGET_BYTES,
-            max_geometry_builds_per_frame: DEFAULT_MAX_GEOMETRY_BUILDS_PER_FRAME,
         }
     }
 }
@@ -110,10 +105,7 @@ pub struct WorldRenderPlugin;
 
 impl bevy::prelude::Plugin for WorldRenderPlugin {
     fn build(&self, app: &mut App) {
-        embedded_asset!(app, "shaders/world_common.wgsl");
         embedded_asset!(app, "shaders/world_cull_lod.wgsl");
-        embedded_asset!(app, "shaders/world_face_mask.wgsl");
-        embedded_asset!(app, "shaders/world_greedy_count.wgsl");
         embedded_asset!(app, "shaders/world_greedy_emit.wgsl");
         embedded_asset!(app, "shaders/world_vertex.wgsl");
         embedded_asset!(app, "shaders/world_fragment.wgsl");
@@ -267,16 +259,18 @@ fn extract_loaded_chunks(
 struct WorldResidency {
     chunks: HashMap<ChunkId, ResidentChunk>,
     local_transforms: HashMap<LocalCoordinateId, [f32; 16]>,
-    lod_contexts: HashMap<LocalCoordinateId, lod::LodContext>,
     geometry_dirty: HashSet<ChunkId>,
-    build_needed: HashSet<ChunkId>,
     geometry_arena: Option<GeometryArena>,
+    svo_arena: Option<SvoArena>,
     retired: Vec<RetiredChunk>,
     retired_geometry: Vec<RetiredGeometry>,
     upload_count: u64,
     completed_submission_epoch: Arc<AtomicU64>,
     stats: WorldRenderStats,
-    pending_count: Option<PendingGeometryCount>,
+    gpu_culling: Option<GpuCulling>,
+    next_gpu_slot: u32,
+    free_gpu_slots: Vec<u32>,
+    slot_chunks: Vec<Option<ChunkId>>,
 }
 
 #[derive(Default)]
@@ -284,18 +278,16 @@ struct WorldRenderStats {
     last_report_epoch: u64,
     geometry_builds: u64,
     geometry_budget_rejections: u64,
-    active_evictions: u64,
     compute_cpu_micros: u64,
 }
 
 struct ResidentChunk {
     revision: u64,
-    occupancy_mip: Buffer,
-    uniform: Buffer,
-    geometry: Option<ResidentGeometry>,
-    desired_lod: u8,
-    desired_key: Option<GeometryKey>,
-    pending_key: Option<GeometryKey>,
+    gpu_slot: u32,
+    material_seed: u32,
+    coordinate: [i64; 3],
+    svo: SvoAllocation,
+    geometries: [Option<ResidentGeometry>; MAX_CHUNK_LOD as usize + 1],
     world_from_chunk: [f32; 16],
 }
 
@@ -310,21 +302,11 @@ struct ResidentGeometry {
     key: GeometryKey,
     allocated_bytes: u64,
     allocation: GeometryAllocation,
-    indirect: Buffer,
-    compute_bind_group: BindGroup,
-    render_bind_group: BindGroup,
-}
-
-struct PendingGeometryCount {
-    entries: Vec<(ChunkId, GeometryKey)>,
-    readback: Buffer,
-    stride: u64,
-    status: Arc<AtomicU8>,
 }
 
 struct RetiredChunk {
     retired_at_epoch: u64,
-    _chunk: ResidentChunk,
+    chunk: ResidentChunk,
 }
 
 struct RetiredGeometry {
@@ -333,8 +315,43 @@ struct RetiredGeometry {
 }
 
 #[derive(Clone, Copy, ShaderType)]
-struct GpuGeneratedVertex {
-    position_and_face: Vec4,
+struct GpuPackedSvoNode {
+    words: UVec4,
+}
+
+#[derive(Clone, Copy, ShaderType)]
+struct GpuCullDescriptor {
+    world_from_chunk: Mat4,
+    chunk_coordinate: IVec4,
+    draws: [UVec4; MAX_CHUNK_LOD as usize + 1],
+    metadata: UVec4,
+    svo: UVec4,
+    neighbor_slots: [UVec4; 2],
+}
+
+#[derive(Clone, Copy, ShaderType)]
+struct GpuBuildPass {
+    svo_segment: u32,
+    geometry_segment: u32,
+    descriptor_count: u32,
+    reserved: u32,
+}
+
+struct GpuCulling {
+    descriptors: Buffer,
+    visible_draws: Buffer,
+    segment_counts: Buffer,
+    quad_counts: Buffer,
+    boundary_rows: Buffer,
+    bind_group: BindGroup,
+    render_segment_bind_groups: Vec<BindGroup>,
+    build_bind_groups: Vec<Vec<BindGroup>>,
+    build_slots: Buffer,
+}
+
+#[derive(Clone, Copy, ShaderType)]
+struct GpuGeneratedQuad {
+    data: UVec4,
 }
 
 #[derive(Clone, Copy, ShaderType)]
@@ -342,20 +359,17 @@ struct GpuDrawIndirect {
     words: UVec4,
 }
 
-#[derive(Clone, Copy, ShaderType)]
-struct WorldChunkUniform {
-    world_from_chunk: Mat4,
-    svo: UVec4,
-    chunk_coordinate: IVec4,
-    neighbor_svo: [UVec4; 6],
-}
-
 #[derive(Resource)]
 struct WorldPipelines {
     compute_layout: BindGroupLayoutDescriptor,
     view_layout: BindGroupLayoutDescriptor,
     render_layout: BindGroupLayoutDescriptor,
+    prepare_boundary: CachedComputePipelineId,
+    reset_geometry: CachedComputePipelineId,
     compute: CachedComputePipelineId,
+    finalize_builds: CachedComputePipelineId,
+    cull: CachedComputePipelineId,
+    cull_layout: BindGroupLayoutDescriptor,
     vertex_shader: bevy::prelude::Handle<bevy::shader::Shader>,
     fragment_shader: bevy::prelude::Handle<bevy::shader::Shader>,
 }
@@ -370,15 +384,12 @@ fn init_world_pipelines(
         &BindGroupLayoutEntries::sequential(
             ShaderStages::COMPUTE,
             (
-                storage_buffer_read_only::<u32>(false),
-                storage_buffer::<GpuGeneratedVertex>(false),
-                storage_buffer::<GpuDrawIndirect>(false),
-                uniform_buffer::<WorldChunkUniform>(false),
-                storage_buffer_read_only::<u32>(false),
-                storage_buffer_read_only::<u32>(false),
-                storage_buffer_read_only::<u32>(false),
-                storage_buffer_read_only::<u32>(false),
-                storage_buffer_read_only::<u32>(false),
+                storage_buffer_read_only::<GpuPackedSvoNode>(false),
+                storage_buffer::<GpuGeneratedQuad>(false),
+                storage_buffer::<GpuCullDescriptor>(false),
+                storage_buffer::<u32>(false),
+                storage_buffer::<u32>(false),
+                uniform_buffer::<GpuBuildPass>(false),
                 storage_buffer_read_only::<u32>(false),
             ),
         ),
@@ -395,28 +406,58 @@ fn init_world_pipelines(
         &BindGroupLayoutEntries::sequential(
             ShaderStages::VERTEX | ShaderStages::FRAGMENT,
             (
-                storage_buffer_read_only::<GpuGeneratedVertex>(false),
-                uniform_buffer::<WorldChunkUniform>(false),
+                storage_buffer_read_only::<GpuGeneratedQuad>(false),
+                storage_buffer_read_only::<GpuCullDescriptor>(false),
+            ),
+        ),
+    );
+    let cull_layout = BindGroupLayoutDescriptor::new(
+        "world GPU culling",
+        &BindGroupLayoutEntries::sequential(
+            ShaderStages::COMPUTE,
+            (
+                storage_buffer::<GpuCullDescriptor>(false),
+                storage_buffer::<GpuDrawIndirect>(false),
+                storage_buffer::<u32>(false),
             ),
         ),
     );
     let compute_shader =
         load_embedded_asset!(asset_server.as_ref(), "shaders/world_greedy_emit.wgsl");
+    let cull_shader = load_embedded_asset!(asset_server.as_ref(), "shaders/world_cull_lod.wgsl");
+    let cull = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
+        label: Some(Cow::Borrowed("world parallel Chunk culling")),
+        layout: vec![view_layout.clone(), cull_layout.clone()],
+        shader: cull_shader,
+        entry_point: Some(Cow::Borrowed("main")),
+        ..Default::default()
+    });
     let vertex_shader = load_embedded_asset!(asset_server.as_ref(), "shaders/world_vertex.wgsl");
     let fragment_shader =
         load_embedded_asset!(asset_server.as_ref(), "shaders/world_fragment.wgsl");
-    let compute = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
-        label: Some(Cow::Borrowed("world SVO greedy meshing")),
-        layout: vec![compute_layout.clone()],
-        shader: compute_shader,
-        entry_point: Some(Cow::Borrowed("mesh_chunk")),
-        ..Default::default()
-    });
+    let build_pipeline = |label: &'static str, entry: &'static str| {
+        pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
+            label: Some(Cow::Borrowed(label)),
+            layout: vec![compute_layout.clone()],
+            shader: compute_shader.clone(),
+            entry_point: Some(Cow::Borrowed(entry)),
+            ..Default::default()
+        })
+    };
+    let prepare_boundary = build_pipeline("world SVO boundary summaries", "prepare_boundary");
+    let reset_geometry = build_pipeline("world geometry reset", "reset_geometry");
+    let compute = build_pipeline("world SVO greedy meshing", "mesh_chunks");
+    let finalize_builds = build_pipeline("world geometry commit", "finalize_builds");
     commands.insert_resource(WorldPipelines {
         compute_layout,
         view_layout,
         render_layout,
+        prepare_boundary,
+        reset_geometry,
         compute,
+        finalize_builds,
+        cull,
+        cull_layout,
         vertex_shader,
         fragment_shader,
     });
@@ -459,6 +500,12 @@ fn prepare_residency(
     residency
         .geometry_arena
         .get_or_insert_with(|| GeometryArena::new(&render_device, settings.geometry_budget_bytes));
+    residency
+        .svo_arena
+        .get_or_insert_with(|| SvoArena::new(&render_device, DEFAULT_SVO_BUDGET_BYTES));
+    residency
+        .gpu_culling
+        .get_or_insert_with(|| create_gpu_culling(&render_device, &pipeline_cache, &pipelines));
     for change in &extracted.changes {
         let ExtractedChunkChange::Transform {
             local_coordinate_id,
@@ -470,6 +517,7 @@ fn prepare_residency(
         residency
             .local_transforms
             .insert(*local_coordinate_id, *world_from_local);
+        let cull_descriptors = residency.gpu_culling.as_ref().unwrap().descriptors.clone();
         for (id, resident) in &mut residency.chunks {
             if id.local_coordinate_id != *local_coordinate_id {
                 continue;
@@ -477,7 +525,7 @@ fn prepare_residency(
             let updated = transformed_chunk_matrix(*world_from_local, id.coordinate);
             if resident.world_from_chunk != updated {
                 resident.world_from_chunk = updated;
-                render_queue.write_buffer(&resident.uniform, 0, &world_matrix_bytes(updated));
+                write_chunk_transform(&render_queue, &cull_descriptors, resident);
             }
         }
     }
@@ -488,7 +536,14 @@ fn prepare_residency(
         };
         mark_chunk_and_neighbors_dirty(&mut residency.geometry_dirty, *id);
         if let Some(mut previous) = residency.chunks.remove(id) {
-            if let Some(geometry) = previous.geometry.take() {
+            residency.slot_chunks[previous.gpu_slot as usize] = None;
+            residency.free_gpu_slots.push(previous.gpu_slot);
+            clear_gpu_draw(
+                &render_queue,
+                residency.gpu_culling.as_ref().unwrap(),
+                previous.gpu_slot,
+            );
+            for geometry in previous.geometries.iter_mut().filter_map(Option::take) {
                 residency.retired_geometry.push(RetiredGeometry {
                     retired_at_epoch: epoch,
                     geometry,
@@ -496,7 +551,7 @@ fn prepare_residency(
             }
             residency.retired.push(RetiredChunk {
                 retired_at_epoch: epoch,
-                _chunk: previous,
+                chunk: previous,
             });
         }
     }
@@ -515,55 +570,92 @@ fn prepare_residency(
             observed.revision,
             observed.world_from_chunk,
         );
+        let cull_descriptors = residency.gpu_culling.as_ref().unwrap().descriptors.clone();
         if let Some(resident) = residency.chunks.get_mut(&observed.id) {
             match update {
                 ResidentUpdate::Unchanged => continue,
                 ResidentUpdate::Transform => {
                     resident.world_from_chunk = observed.world_from_chunk;
-                    let matrix = world_matrix_bytes(observed.world_from_chunk);
-                    render_queue.write_buffer(&resident.uniform, 0, &matrix);
+                    write_chunk_transform(&render_queue, &cull_descriptors, resident);
                     continue;
                 }
                 ResidentUpdate::Replace => {}
             }
         }
 
-        let mut replacement = resident_chunk(&render_device, observed, settings.material_seed);
+        let reused_gpu_slot = residency.chunks.contains_key(&observed.id);
+        let gpu_slot = if let Some(resident) = residency.chunks.get(&observed.id) {
+            resident.gpu_slot
+        } else if let Some(slot) = residency.free_gpu_slots.pop() {
+            slot
+        } else {
+            let slot = residency.next_gpu_slot;
+            assert!(
+                slot < MAX_GPU_CHUNK_DESCRIPTORS,
+                "world GPU Chunk descriptor capacity exhausted"
+            );
+            residency.next_gpu_slot += 1;
+            slot
+        };
+        let packed_svo = observed.svo.pack_with(|voxel| voxel.0);
+        let svo = residency
+            .svo_arena
+            .as_mut()
+            .unwrap()
+            .upload(&render_device, &render_queue, &packed_svo.node_bytes())
+            .expect("packed SVO arena budget must cover the loaded set");
+        let mut replacement = resident_chunk(
+            &render_device,
+            observed,
+            settings.material_seed,
+            gpu_slot,
+            svo,
+        );
         residency.upload_count = residency.upload_count.wrapping_add(1);
         if let Some(mut previous) = residency.chunks.remove(&observed.id) {
             // Keep the last complete surface visible while the new revision waits
             // for geometry admission. It is deliberately key-mismatched and will
             // therefore never be mistaken for geometry of the new voxel content.
-            if let Some(mut fallback) = previous.geometry.take() {
-                let geometry_buffer = residency
-                    .geometry_arena
-                    .as_ref()
-                    .expect("geometry arena is initialized before residency replacement")
-                    .buffer(fallback.allocation)
-                    .clone();
-                fallback.render_bind_group = create_render_bind_group(
-                    &render_device,
-                    &pipeline_cache,
-                    &pipelines,
-                    &geometry_buffer,
-                    fallback.allocation,
-                    &replacement.uniform,
-                );
-                replacement.geometry = Some(fallback);
+            for (replacement_lod, previous_lod) in replacement
+                .geometries
+                .iter_mut()
+                .zip(previous.geometries.iter_mut())
+            {
+                *replacement_lod = previous_lod.take();
             }
             residency.retired.push(RetiredChunk {
                 retired_at_epoch: epoch,
-                _chunk: previous,
+                chunk: previous,
             });
         }
+        if !reused_gpu_slot {
+            clear_gpu_draw(
+                &render_queue,
+                residency.gpu_culling.as_ref().unwrap(),
+                replacement.gpu_slot,
+            );
+        }
+        if residency.slot_chunks.len() <= gpu_slot as usize {
+            residency.slot_chunks.resize(gpu_slot as usize + 1, None);
+        }
+        residency.slot_chunks[gpu_slot as usize] = Some(observed.id);
         residency.chunks.insert(observed.id, replacement);
         mark_chunk_and_neighbors_dirty(&mut residency.geometry_dirty, observed.id);
     }
 
     let completed_epoch = residency.completed_submission_epoch.load(Ordering::Acquire);
-    residency
-        .retired
-        .retain(|retired| retired.retired_at_epoch > completed_epoch);
+    let retired_chunks = std::mem::take(&mut residency.retired);
+    for retired in retired_chunks {
+        if retired.retired_at_epoch <= completed_epoch {
+            residency
+                .svo_arena
+                .as_mut()
+                .unwrap()
+                .free(retired.chunk.svo);
+        } else {
+            residency.retired.push(retired);
+        }
+    }
     let retired_geometry = std::mem::take(&mut residency.retired_geometry);
     let mut pending_retirement = Vec::with_capacity(retired_geometry.len());
     for retired in retired_geometry {
@@ -587,61 +679,188 @@ fn prepare_residency(
     });
 }
 
+fn create_gpu_culling(
+    render_device: &RenderDevice,
+    pipeline_cache: &PipelineCache,
+    pipelines: &WorldPipelines,
+) -> GpuCulling {
+    let descriptor_size = u64::from(MAX_GPU_CHUNK_DESCRIPTORS) * 224;
+    let draw_size =
+        u64::from(MAX_GPU_CHUNK_DESCRIPTORS) * u64::from(MAX_GPU_GEOMETRY_SEGMENTS) * 16;
+    let descriptors =
+        render_device.create_buffer(&bevy::render::render_resource::BufferDescriptor {
+            label: Some("world Chunk descriptors"),
+            size: descriptor_size,
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+    let visible_draws =
+        render_device.create_buffer(&bevy::render::render_resource::BufferDescriptor {
+            label: Some("world compact GPU-visible indirect draws"),
+            size: draw_size,
+            usage: BufferUsages::STORAGE | BufferUsages::INDIRECT,
+            mapped_at_creation: false,
+        });
+    let segment_counts =
+        render_device.create_buffer(&bevy::render::render_resource::BufferDescriptor {
+            label: Some("world visible draw counts by geometry segment"),
+            size: u64::from(MAX_GPU_GEOMETRY_SEGMENTS) * 4,
+            usage: BufferUsages::STORAGE | BufferUsages::INDIRECT | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+    let quad_counts =
+        render_device.create_buffer(&bevy::render::render_resource::BufferDescriptor {
+            label: Some("world GPU quad counters"),
+            size: u64::from(MAX_GPU_CHUNK_DESCRIPTORS) * 5 * 4,
+            usage: BufferUsages::STORAGE,
+            mapped_at_creation: false,
+        });
+    let boundary_rows =
+        render_device.create_buffer(&bevy::render::render_resource::BufferDescriptor {
+            label: Some("world Chunk boundary occupancy rows"),
+            size: u64::from(MAX_GPU_CHUNK_DESCRIPTORS) * 96 * 4,
+            usage: BufferUsages::STORAGE,
+            mapped_at_creation: false,
+        });
+    let build_slots =
+        render_device.create_buffer(&bevy::render::render_resource::BufferDescriptor {
+            label: Some("world dirty GPU build slots"),
+            size: u64::from(MAX_GPU_CHUNK_DESCRIPTORS) * 4,
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+    let bind_group = render_device.create_bind_group(
+        Some("world GPU culling bind group"),
+        &pipeline_cache.get_bind_group_layout(&pipelines.cull_layout),
+        &BindGroupEntries::sequential((
+            descriptors.as_entire_binding(),
+            visible_draws.as_entire_binding(),
+            segment_counts.as_entire_binding(),
+        )),
+    );
+    GpuCulling {
+        descriptors,
+        visible_draws,
+        segment_counts,
+        quad_counts,
+        boundary_rows,
+        bind_group,
+        render_segment_bind_groups: Vec::new(),
+        build_bind_groups: Vec::new(),
+        build_slots,
+    }
+}
+
+fn write_cull_descriptor(
+    render_queue: &RenderQueue,
+    descriptors: &Buffer,
+    chunk: &ResidentChunk,
+    chunks: &HashMap<ChunkId, ResidentChunk>,
+    id: ChunkId,
+) {
+    let draws = std::array::from_fn(|lod| {
+        chunk.geometries[lod]
+            .as_ref()
+            .map_or(UVec4::ZERO, |geometry| {
+                UVec4::new(
+                    0,
+                    u32::try_from(geometry.allocation.offset / GENERATED_QUAD_SIZE * 6)
+                        .expect("geometry quad offset fits the indirect ABI"),
+                    u32::try_from(geometry.allocation.segment)
+                        .expect("geometry segment index fits the descriptor ABI"),
+                    0,
+                )
+            })
+    });
+    let descriptor = GpuCullDescriptor {
+        world_from_chunk: Mat4::from_cols_array(&chunk.world_from_chunk),
+        chunk_coordinate: IVec4::new(
+            chunk.coordinate[0] as i32,
+            chunk.coordinate[1] as i32,
+            chunk.coordinate[2] as i32,
+            0,
+        ),
+        draws,
+        metadata: UVec4::new(1, chunk.material_seed, 0, chunk.revision as u32),
+        svo: UVec4::new(
+            u32::try_from(chunk.svo.offset / 16).expect("SVO node offset fits GPU ABI"),
+            u32::try_from(chunk.svo.size / 16).expect("SVO node count fits GPU ABI"),
+            u32::try_from(chunk.svo.segment).expect("SVO segment fits GPU ABI"),
+            1,
+        ),
+        neighbor_slots: [
+            UVec4::from_array(std::array::from_fn(|face| {
+                neighbor_id(id, CHUNK_NEIGHBOR_OFFSETS[face])
+                    .and_then(|neighbor| chunks.get(&neighbor))
+                    .map_or(u32::MAX, |neighbor| neighbor.gpu_slot)
+            })),
+            UVec4::new(
+                neighbor_id(id, CHUNK_NEIGHBOR_OFFSETS[4])
+                    .and_then(|neighbor| chunks.get(&neighbor))
+                    .map_or(u32::MAX, |neighbor| neighbor.gpu_slot),
+                neighbor_id(id, CHUNK_NEIGHBOR_OFFSETS[5])
+                    .and_then(|neighbor| chunks.get(&neighbor))
+                    .map_or(u32::MAX, |neighbor| neighbor.gpu_slot),
+                u32::MAX,
+                u32::MAX,
+            ),
+        ],
+    };
+    let mut bytes = Vec::with_capacity(224);
+    for value in descriptor.world_from_chunk.to_cols_array() {
+        bytes.extend_from_slice(&value.to_le_bytes());
+    }
+    for value in descriptor.chunk_coordinate.to_array() {
+        bytes.extend_from_slice(&value.to_le_bytes());
+    }
+    for draw in descriptor.draws {
+        for value in draw.to_array() {
+            bytes.extend_from_slice(&value.to_le_bytes());
+        }
+    }
+    for value in descriptor.metadata.to_array() {
+        bytes.extend_from_slice(&value.to_le_bytes());
+    }
+    for value in descriptor.svo.to_array() {
+        bytes.extend_from_slice(&value.to_le_bytes());
+    }
+    for neighbors in descriptor.neighbor_slots {
+        for value in neighbors.to_array() {
+            bytes.extend_from_slice(&value.to_le_bytes());
+        }
+    }
+    render_queue.write_buffer(descriptors, u64::from(chunk.gpu_slot) * 224, &bytes);
+}
+
+fn write_chunk_transform(render_queue: &RenderQueue, descriptors: &Buffer, chunk: &ResidentChunk) {
+    render_queue.write_buffer(
+        descriptors,
+        u64::from(chunk.gpu_slot) * 224,
+        &world_matrix_bytes(chunk.world_from_chunk),
+    );
+}
+
+fn clear_gpu_draw(render_queue: &RenderQueue, culling: &GpuCulling, slot: u32) {
+    render_queue.write_buffer(&culling.descriptors, u64::from(slot) * 224, &[0; 224]);
+}
+
 fn resident_chunk(
     render_device: &RenderDevice,
     observed: &ExtractedChunk,
     material_seed: u32,
+    gpu_slot: u32,
+    svo: SvoAllocation,
 ) -> ResidentChunk {
-    let occupancy_words = build_occupancy_mip(|x, y, z| {
-        observed
-            .svo
-            .value_at_coordinates([x, y, z])
-            .is_some_and(|voxel| voxel.0 != 0)
-    });
-    let occupancy_bytes = occupancy_words
-        .iter()
-        .flat_map(|word| word.to_le_bytes())
-        .collect::<Vec<_>>();
-    let occupancy_mip = render_device.create_buffer_with_data(&BufferInitDescriptor {
-        label: Some("world chunk 16-cubed occupancy mip"),
-        contents: &occupancy_bytes,
-        usage: BufferUsages::STORAGE,
-    });
-    let uniform_bytes = chunk_uniform_bytes(observed, material_seed);
-    let uniform = render_device.create_buffer_with_data(&BufferInitDescriptor {
-        label: Some("world chunk uniform"),
-        contents: &uniform_bytes,
-        usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
-    });
+    let _ = render_device;
     ResidentChunk {
         revision: observed.revision,
-        occupancy_mip,
-        uniform,
-        geometry: None,
-        desired_lod: 0,
-        desired_key: None,
-        pending_key: None,
+        gpu_slot,
+        material_seed,
+        coordinate: observed.id.coordinate,
+        svo,
+        geometries: std::array::from_fn(|_| None),
         world_from_chunk: observed.world_from_chunk,
     }
-}
-
-fn chunk_uniform_bytes(observed: &ExtractedChunk, material_seed: u32) -> Vec<u8> {
-    let mut bytes = world_matrix_bytes(observed.world_from_chunk);
-    bytes.reserve(32);
-    let metadata = [0, u32::from(MAX_CHUNK_LOD), 0, material_seed];
-    for value in metadata {
-        bytes.extend_from_slice(&value.to_le_bytes());
-    }
-    for value in observed.id.coordinate {
-        bytes.extend_from_slice(&(value as i32).to_le_bytes());
-    }
-    bytes.extend_from_slice(&0_i32.to_le_bytes());
-    for _ in 0..6 {
-        for value in [0_u32; 4] {
-            bytes.extend_from_slice(&value.to_le_bytes());
-        }
-    }
-    bytes
 }
 
 fn local_matrix_from_chunk(world_from_chunk: [f32; 16], coordinate: [i64; 3]) -> [f32; 16] {
@@ -670,60 +889,7 @@ fn world_matrix_bytes(matrix: [f32; 16]) -> Vec<u8> {
     bytes
 }
 
-fn occupancy_mip_index(lod: u8, x: u32, y: u32, z: u32) -> u32 {
-    let edge = CHUNK_EDGE >> lod;
-    OCCUPANCY_MIP_LEVEL_OFFSETS[usize::from(lod)] + (z * edge + y) * edge + x
-}
-
-fn mip_bit(words: &[u32], index: u32) -> bool {
-    words[index as usize / u32::BITS as usize] & (1 << (index % u32::BITS)) != 0
-}
-
-fn set_mip_bit(words: &mut [u32], index: u32) {
-    words[index as usize / u32::BITS as usize] |= 1 << (index % u32::BITS);
-}
-
-fn build_occupancy_mip(mut occupied: impl FnMut(u32, u32, u32) -> bool) -> Vec<u32> {
-    let mut words = vec![0_u32; OCCUPANCY_MIP_WORD_COUNT];
-    for z in 0..CHUNK_EDGE {
-        for y in 0..CHUNK_EDGE {
-            for x in 0..CHUNK_EDGE {
-                if occupied(x, y, z) {
-                    set_mip_bit(&mut words, occupancy_mip_index(0, x, y, z));
-                }
-            }
-        }
-    }
-    for lod in 1..=MAX_CHUNK_LOD {
-        let edge = CHUNK_EDGE >> lod;
-        for z in 0..edge {
-            for y in 0..edge {
-                for x in 0..edge {
-                    let occupied = (0..2).any(|dz| {
-                        (0..2).any(|dy| {
-                            (0..2).any(|dx| {
-                                mip_bit(
-                                    &words,
-                                    occupancy_mip_index(
-                                        lod - 1,
-                                        x * 2 + dx,
-                                        y * 2 + dy,
-                                        z * 2 + dz,
-                                    ),
-                                )
-                            })
-                        })
-                    });
-                    if occupied {
-                        set_mip_bit(&mut words, occupancy_mip_index(lod, x, y, z));
-                    }
-                }
-            }
-        }
-    }
-    words
-}
-
+#[cfg(test)]
 fn indirect_bytes() -> [u8; 16] {
     let mut bytes = [0_u8; 16];
     bytes[4..8].copy_from_slice(&1_u32.to_le_bytes());
@@ -731,13 +897,14 @@ fn indirect_bytes() -> [u8; 16] {
 }
 
 fn world_compute(
-    view: ViewQuery<(&ExtractedView, &ExtractedCamera)>,
+    view: ViewQuery<(&ExtractedView, &ExtractedCamera, &ViewUniformOffset)>,
+    view_bind_group: Res<WorldViewBindGroup>,
     extracted: Res<ExtractedChunks>,
     pipelines: Res<WorldPipelines>,
     pipeline_cache: Res<PipelineCache>,
     render_device: Res<RenderDevice>,
     render_queue: Res<RenderQueue>,
-    settings: Res<WorldRenderSettings>,
+    _settings: Res<WorldRenderSettings>,
     mut residency: ResMut<WorldResidency>,
     mut context: RenderContext,
 ) {
@@ -745,275 +912,215 @@ fn world_compute(
         return;
     }
     let started = Instant::now();
-    let (view, camera) = view.into_inner();
-    let viewport_height = camera
-        .physical_viewport_size
-        .or(camera.physical_target_size)
-        .map_or(1.0, |size| size.y.max(1) as f32);
-    let camera_position = view.world_from_view.translation();
-    let projection_scale = view.clip_from_view.y_axis.y;
-    let Some(pipeline) = pipeline_cache.get_compute_pipeline(pipelines.compute) else {
+    let (_, _, view_offset) = view.into_inner();
+    let (
+        Some(boundary_pipeline),
+        Some(reset_pipeline),
+        Some(mesh_pipeline),
+        Some(finalize_pipeline),
+    ) = (
+        pipeline_cache.get_compute_pipeline(pipelines.prepare_boundary),
+        pipeline_cache.get_compute_pipeline(pipelines.reset_geometry),
+        pipeline_cache.get_compute_pipeline(pipelines.compute),
+        pipeline_cache.get_compute_pipeline(pipelines.finalize_builds),
+    )
+    else {
         return;
     };
 
-    // LOD is a view-direction-independent state. Recompute it only when the
-    // camera crosses a Chunk boundary or projection/scale changes; rotation does
-    // not alter LodContext.
-    let next_lod_contexts = residency
-        .local_transforms
-        .iter()
-        .filter_map(|(id, transform)| {
-            lod::context(
-                *transform,
-                camera_position,
-                viewport_height,
-                projection_scale,
-            )
-            .map(|context| (*id, context))
-        })
-        .collect::<HashMap<_, _>>();
-    let changed_contexts = next_lod_contexts
-        .iter()
-        .filter_map(|(id, context)| {
-            (residency.lod_contexts.get(id) != Some(context)).then_some(*id)
-        })
-        .collect::<HashSet<_>>();
-    let lod_updates = residency
-        .chunks
-        .iter()
-        .filter(|(id, _)| changed_contexts.contains(&id.local_coordinate_id))
-        .map(|(id, chunk)| {
-            let lod_context = next_lod_contexts.get(&id.local_coordinate_id);
-            let selected = lod_context.map_or(0, |context| {
-                lod::selected_lod(
-                    id.coordinate,
-                    context,
-                    chunk.geometry.as_ref().map(|geometry| geometry.key.lod),
-                )
-            });
-            (*id, selected)
-        })
-        .collect::<Vec<_>>();
-    residency.lod_contexts = next_lod_contexts;
-    for (id, selected) in lod_updates {
-        if residency.chunks[&id].desired_lod != selected {
-            residency.chunks.get_mut(&id).unwrap().desired_lod = selected;
-            mark_chunk_and_neighbors_dirty(&mut residency.geometry_dirty, id);
-        }
-    }
-
-    let dirty_geometry = std::mem::take(&mut residency.geometry_dirty);
-    for id in dirty_geometry {
-        let Some(chunk) = residency.chunks.get(&id) else {
-            let was_pending = residency.build_needed.remove(&id);
-            bevy::log::trace!(
-                "discarded build marker for absent Chunk: chunk={id:?}, was_pending={was_pending}"
-            );
+    let dirty = std::mem::take(&mut residency.geometry_dirty);
+    let mut prepared_build_slots = Vec::with_capacity(dirty.len());
+    for id in dirty {
+        if !residency.chunks.contains_key(&id) {
             continue;
-        };
-        let key = GeometryKey {
-            source_revision: chunk.revision,
-            lod: chunk.desired_lod,
-            boundary_signature: chunk_boundary_signature(id, &residency.chunks),
-        };
-        let matches = chunk
-            .geometry
-            .as_ref()
-            .is_some_and(|geometry| geometry.key == key);
-        residency.chunks.get_mut(&id).unwrap().desired_key = Some(key);
-        if matches {
-            let _was_pending = residency.build_needed.remove(&id);
-        } else {
-            residency.build_needed.insert(id);
         }
-    }
-
-    if let Some(pending) = residency.pending_count.as_ref()
-        && pending.status.load(Ordering::Acquire) == 0
-    {
-        pending.status.store(1, Ordering::Release);
-        let completion = Arc::clone(&pending.status);
-        pending
-            .readback
-            .slice(..)
-            .map_async(MapMode::Read, move |result| {
-                completion.store(if result.is_ok() { 2 } else { 3 }, Ordering::Release);
-            });
-    }
-    let counted_geometry = match residency.pending_count.as_ref() {
-        Some(pending) if pending.status.load(Ordering::Acquire) == 2 => {
-            let pending = residency.pending_count.take().unwrap();
-            let mapped = pending.readback.slice(..).get_mapped_range();
-            let counts = pending
-                .entries
-                .iter()
-                .enumerate()
-                .map(|(index, (id, key))| {
-                    let offset = index * pending.stride as usize;
-                    let count = u32::from_le_bytes(mapped[offset..offset + 4].try_into().unwrap());
-                    (*id, *key, count)
-                })
-                .collect::<Vec<_>>();
-            drop(mapped);
-            pending.readback.unmap();
-            Some(counts)
-        }
-        Some(pending) if pending.status.load(Ordering::Acquire) == 3 => {
-            let pending = residency.pending_count.take().unwrap();
-            for (id, key) in pending.entries {
-                if let Some(chunk) = residency.chunks.get_mut(&id)
-                    && chunk.pending_key == Some(key)
-                {
-                    chunk.pending_key = None;
-                }
+        let mut complete = true;
+        for lod in 0..=MAX_CHUNK_LOD {
+            let index = lod as usize;
+            let bytes = geometry_bytes_for_quads(maximum_quads(lod));
+            if residency.chunks[&id].geometries[index].is_none() {
+                let Some(allocation) = residency
+                    .geometry_arena
+                    .as_mut()
+                    .unwrap()
+                    .allocate(&render_device, bytes)
+                else {
+                    complete = false;
+                    residency.stats.geometry_budget_rejections += 1;
+                    break;
+                };
+                let revision = residency.chunks[&id].revision;
+                let boundary_signature = chunk_boundary_signature(id, &residency.chunks, lod);
+                residency.chunks.get_mut(&id).unwrap().geometries[index] = Some(ResidentGeometry {
+                    key: GeometryKey {
+                        source_revision: revision,
+                        lod,
+                        boundary_signature,
+                    },
+                    allocated_bytes: bytes,
+                    allocation,
+                });
+                residency.stats.geometry_builds += 1;
+            } else {
+                let revision = residency.chunks[&id].revision;
+                let signature = chunk_boundary_signature(id, &residency.chunks, lod);
+                residency.chunks.get_mut(&id).unwrap().geometries[index]
+                    .as_mut()
+                    .unwrap()
+                    .key = GeometryKey {
+                    source_revision: revision,
+                    lod,
+                    boundary_signature: signature,
+                };
             }
-            bevy::log::error!("world geometry count readback failed");
-            None
         }
-        _ => None,
-    };
-
-    let mut allocated_bytes = geometry_allocated_bytes(&residency.chunks);
-    let mut frame_build_bytes = 0_u64;
-    let mut admitted = Vec::new();
-    for (id, key, maximum_vertices) in counted_geometry.into_iter().flatten() {
-        if let Some(chunk) = residency.chunks.get_mut(&id)
-            && chunk.pending_key == Some(key)
-        {
-            chunk.pending_key = None;
-        }
-        let desired_chunk = residency.chunks.get(&id);
-        if desired_chunk.and_then(|chunk| chunk.desired_key) != Some(key) {
-            continue;
-        }
-        let new_bytes = geometry_bytes_for_vertices(maximum_vertices);
-        if frame_build_bytes.saturating_add(new_bytes) > settings.geometry_build_budget_bytes {
-            residency.stats.geometry_budget_rejections += 1;
-            continue;
-        }
-        let replaced_bytes = residency.chunks[&id]
-            .geometry
-            .as_ref()
-            .map_or(0, |geometry| geometry.allocated_bytes);
-        let required_bytes = allocated_bytes
-            .saturating_sub(replaced_bytes)
-            .saturating_add(new_bytes);
-        if required_bytes > settings.geometry_budget_bytes {
-            residency.stats.geometry_budget_rejections += 1;
-            continue;
-        }
-
-        let requested_vertex_bytes = u64::from(maximum_vertices.max(1)) * GENERATED_VERTEX_SIZE;
-        let reusable_allocation = residency.chunks[&id]
-            .geometry
-            .as_ref()
-            .map(|geometry| geometry.allocation)
-            .filter(|allocation| allocation.size >= requested_vertex_bytes);
-        let (allocation, reused_allocation) = if let Some(allocation) = reusable_allocation {
-            (allocation, true)
+        if complete {
+            prepared_build_slots.push(residency.chunks[&id].gpu_slot);
+            write_cull_descriptor(
+                &render_queue,
+                &residency.gpu_culling.as_ref().unwrap().descriptors,
+                &residency.chunks[&id],
+                &residency.chunks,
+                id,
+            );
         } else {
-            let Some(allocation) = residency
-                .geometry_arena
-                .as_mut()
-                .expect("geometry arena is initialized during prepare")
-                .allocate(&render_device, requested_vertex_bytes)
-            else {
-                residency.stats.geometry_budget_rejections += 1;
-                continue;
-            };
-            (allocation, false)
-        };
-        let geometry_buffer = residency
-            .geometry_arena
-            .as_ref()
-            .expect("geometry arena is initialized during prepare")
-            .buffer(allocation)
-            .clone();
-        let neighbor_metadata = neighbor_svo_bytes(id, &residency.chunks, key.lod);
-        render_queue.write_buffer(&residency.chunks[&id].uniform, 96, &neighbor_metadata);
-        let geometry = create_geometry(
+            residency.geometry_dirty.insert(id);
+        }
+    }
+
+    {
+        let WorldResidency {
+            geometry_arena,
+            svo_arena,
+            gpu_culling,
+            ..
+        } = &mut *residency;
+        sync_render_segment_bind_groups(
             &render_device,
             &pipeline_cache,
             &pipelines,
-            &geometry_buffer,
-            allocation,
-            id,
-            &residency.chunks,
-            key.lod,
-            key.boundary_signature,
-            maximum_vertices,
+            geometry_arena.as_ref().unwrap(),
+            gpu_culling.as_mut().unwrap(),
         );
-        let previous = {
-            let chunk = residency.chunks.get_mut(&id).unwrap();
-            render_queue.write_buffer(&chunk.uniform, 72, &maximum_vertices.to_le_bytes());
-            render_queue.write_buffer(&chunk.uniform, 92, &i32::from(key.lod).to_le_bytes());
-            chunk.geometry.replace(geometry)
-        };
-        allocated_bytes = required_bytes;
-        if let Some(previous) = previous
-            && !reused_allocation
-        {
-            residency.retired_geometry.push(RetiredGeometry {
-                retired_at_epoch: extracted.epoch,
-                geometry: previous,
-            });
-        }
-        frame_build_bytes = frame_build_bytes.saturating_add(new_bytes);
-        residency.stats.geometry_builds += 1;
-        let was_pending = residency.build_needed.remove(&id);
-        debug_assert!(
-            was_pending,
-            "admitted geometry build must have been pending"
+        sync_build_bind_groups(
+            &render_device,
+            &pipeline_cache,
+            &pipelines,
+            svo_arena.as_ref().unwrap(),
+            geometry_arena.as_ref().unwrap(),
+            gpu_culling.as_mut().unwrap(),
         );
-        admitted.push(id);
     }
 
-    if residency.pending_count.is_none() {
-        let mut chunks_to_count = residency
-            .build_needed
-            .iter()
-            .filter_map(|id| {
-                let chunk = residency.chunks.get(id)?;
-                let key = chunk.desired_key?;
-                (chunk.pending_key != Some(key)).then_some((
-                    *id,
-                    key,
-                    chunk_distance_squared(chunk.world_from_chunk, camera_position),
-                ))
-            })
+    let descriptor_count = residency.next_gpu_slot;
+    let build_count = prepared_build_slots.len() as u32;
+    if build_count > 0 {
+        let padded_count = build_count.div_ceil(64) * 64;
+        prepared_build_slots.resize(padded_count as usize, u32::MAX);
+        let bytes = prepared_build_slots
+            .into_iter()
+            .flat_map(u32::to_le_bytes)
             .collect::<Vec<_>>();
-        chunks_to_count.sort_by(|left, right| {
-            left.2
-                .total_cmp(&right.2)
-                .then_with(|| chunk_id_key(left.0).cmp(&chunk_id_key(right.0)))
-        });
-        chunks_to_count.truncate(settings.max_geometry_builds_per_frame as usize);
-        if !chunks_to_count.is_empty() {
-            schedule_geometry_count(
-                chunks_to_count,
-                &render_device,
-                &render_queue,
-                &pipeline_cache,
-                &pipelines,
-                &mut residency,
-                &mut context,
-            );
+        render_queue.write_buffer(
+            &residency.gpu_culling.as_ref().unwrap().build_slots,
+            0,
+            &bytes,
+        );
+    }
+    let svo_segments = residency.svo_arena.as_ref().unwrap().segment_count();
+    let geometry_segments = residency.geometry_arena.as_ref().unwrap().segment_count();
+    if build_count > 0 && geometry_segments > 0 {
+        {
+            let mut pass = context
+                .command_encoder()
+                .begin_compute_pass(&ComputePassDescriptor {
+                    label: Some("world GPU boundary summary build"),
+                    timestamp_writes: None,
+                });
+            pass.set_pipeline(boundary_pipeline);
+            for svo in 0..svo_segments {
+                pass.set_bind_group(
+                    0,
+                    &residency.gpu_culling.as_ref().unwrap().build_bind_groups[svo][0],
+                    &[],
+                );
+                pass.dispatch_workgroups(96, build_count, 1);
+            }
+        }
+        {
+            let mut pass = context
+                .command_encoder()
+                .begin_compute_pass(&ComputePassDescriptor {
+                    label: Some("world GPU geometry reset"),
+                    timestamp_writes: None,
+                });
+            pass.set_pipeline(reset_pipeline);
+            for svo in 0..svo_segments {
+                for geometry in 0..geometry_segments {
+                    pass.set_bind_group(
+                        0,
+                        &residency.gpu_culling.as_ref().unwrap().build_bind_groups[svo][geometry],
+                        &[],
+                    );
+                    pass.dispatch_workgroups(build_count.div_ceil(64), 1, 1);
+                }
+            }
+        }
+        {
+            let mut pass = context
+                .command_encoder()
+                .begin_compute_pass(&ComputePassDescriptor {
+                    label: Some("world GPU packed-SVO greedy meshing"),
+                    timestamp_writes: None,
+                });
+            pass.set_pipeline(mesh_pipeline);
+            for svo in 0..svo_segments {
+                for geometry in 0..geometry_segments {
+                    pass.set_bind_group(
+                        0,
+                        &residency.gpu_culling.as_ref().unwrap().build_bind_groups[svo][geometry],
+                        &[],
+                    );
+                    let (x, y, z) = geometry_build_dispatch(build_count);
+                    pass.dispatch_workgroups(x, y, z);
+                }
+            }
+        }
+        {
+            let mut pass = context
+                .command_encoder()
+                .begin_compute_pass(&ComputePassDescriptor {
+                    label: Some("world GPU geometry commit"),
+                    timestamp_writes: None,
+                });
+            pass.set_pipeline(finalize_pipeline);
+            for svo in 0..svo_segments {
+                pass.set_bind_group(
+                    0,
+                    &residency.gpu_culling.as_ref().unwrap().build_bind_groups[svo][0],
+                    &[],
+                );
+                pass.dispatch_workgroups(build_count.div_ceil(64), 1, 1);
+            }
         }
     }
 
-    if !admitted.is_empty() {
+    render_queue.write_buffer(
+        &residency.gpu_culling.as_ref().unwrap().segment_counts,
+        0,
+        &[0; MAX_GPU_GEOMETRY_SEGMENTS as usize * 4],
+    );
+    if let Some(cull_pipeline) = pipeline_cache.get_compute_pipeline(pipelines.cull) {
         let mut pass = context
             .command_encoder()
             .begin_compute_pass(&ComputePassDescriptor {
-                label: Some("world occupancy mip LOD and greedy meshing"),
+                label: Some("world parallel GPU frustum culling and LOD selection"),
                 timestamp_writes: None,
             });
-        pass.set_pipeline(pipeline);
-        for id in &admitted {
-            let geometry = residency.chunks[id].geometry.as_ref().unwrap();
-            pass.set_bind_group(0, &geometry.compute_bind_group, &[]);
-            pass.dispatch_workgroups(FACE_PLANE_COUNT, 1, 1);
-        }
+        pass.set_pipeline(cull_pipeline);
+        pass.set_bind_group(0, &view_bind_group.0, &[view_offset.offset]);
+        pass.set_bind_group(1, &residency.gpu_culling.as_ref().unwrap().bind_group, &[]);
+        pass.dispatch_workgroups(descriptor_count.div_ceil(64), 1, 1);
     }
 
     residency.stats.compute_cpu_micros = residency
@@ -1026,21 +1133,15 @@ fn world_compute(
         >= 120
     {
         bevy::log::debug!(
-            "world render: resident={}, visible={}, drawable={}, builds={}, budget_rejections={}, active_evictions={}, active_mib={}, compute_cpu_us={} (120-frame window)",
+            "world render: resident={}, drawable={}, builds={}, budget_rejections={}, active_mib={}, compute_cpu_us={} (120-frame window)",
             residency.chunks.len(),
             residency
                 .chunks
                 .values()
-                .filter(|chunk| chunk_visible(view, chunk.world_from_chunk))
-                .count(),
-            residency
-                .chunks
-                .values()
-                .filter(|chunk| chunk.geometry.is_some())
+                .filter(|chunk| chunk.geometries.iter().any(Option::is_some))
                 .count(),
             residency.stats.geometry_builds,
             residency.stats.geometry_budget_rejections,
-            residency.stats.active_evictions,
             geometry_active_bytes(&residency.chunks) / (1024 * 1024),
             residency.stats.compute_cpu_micros,
         );
@@ -1051,199 +1152,96 @@ fn world_compute(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn schedule_geometry_count(
-    chunks_to_count: Vec<(ChunkId, GeometryKey, f32)>,
-    render_device: &RenderDevice,
-    render_queue: &RenderQueue,
-    pipeline_cache: &PipelineCache,
-    pipelines: &WorldPipelines,
-    residency: &mut WorldResidency,
-    context: &mut RenderContext,
-) {
-    let stride = u64::from(render_device.limits().min_storage_buffer_offset_alignment).max(16);
-    let buffer_size = stride * chunks_to_count.len() as u64;
-    let count_buffer = render_device.create_buffer_with_data(&BufferInitDescriptor {
-        label: Some("world geometry counts"),
-        contents: &vec![0; buffer_size as usize],
-        usage: BufferUsages::STORAGE | BufferUsages::COPY_SRC,
-    });
-    let readback = render_device.create_buffer(&bevy::render::render_resource::BufferDescriptor {
-        label: Some("world geometry count readback"),
-        size: buffer_size,
-        usage: BufferUsages::COPY_DST | BufferUsages::MAP_READ,
-        mapped_at_creation: false,
-    });
-    let dummy_vertices =
-        render_device.create_buffer(&bevy::render::render_resource::BufferDescriptor {
-            label: Some("world geometry count dummy vertex"),
-            size: GENERATED_VERTEX_SIZE,
-            usage: BufferUsages::STORAGE,
-            mapped_at_creation: false,
-        });
-    let layout = pipeline_cache.get_bind_group_layout(&pipelines.compute_layout);
-    let mut bind_groups = Vec::with_capacity(chunks_to_count.len());
-    for (index, (id, key, _)) in chunks_to_count.iter().enumerate() {
-        let neighbor_metadata = neighbor_svo_bytes(*id, &residency.chunks, key.lod);
-        let chunk = &residency.chunks[id];
-        render_queue.write_buffer(&chunk.uniform, 72, &0_u32.to_le_bytes());
-        render_queue.write_buffer(&chunk.uniform, 92, &i32::from(key.lod).to_le_bytes());
-        render_queue.write_buffer(&chunk.uniform, 96, &neighbor_metadata);
-        let neighbors = chunk_neighbors(*id, &residency.chunks);
-        bind_groups.push(render_device.create_bind_group(
-            Some("world geometry count bind group"),
-            &layout,
-            &BindGroupEntries::sequential((
-                chunk.occupancy_mip.as_entire_binding(),
-                dummy_vertices.as_entire_binding(),
-                buffer_range_binding(&count_buffer, index as u64 * stride, 16),
-                chunk.uniform.as_entire_binding(),
-                neighbors[0].occupancy_mip.as_entire_binding(),
-                neighbors[1].occupancy_mip.as_entire_binding(),
-                neighbors[2].occupancy_mip.as_entire_binding(),
-                neighbors[3].occupancy_mip.as_entire_binding(),
-                neighbors[4].occupancy_mip.as_entire_binding(),
-                neighbors[5].occupancy_mip.as_entire_binding(),
-            )),
-        ));
-    }
-
-    let pipeline = pipeline_cache
-        .get_compute_pipeline(pipelines.compute)
-        .expect("geometry count is scheduled only after the compute pipeline is ready");
-    {
-        let mut pass = context
-            .command_encoder()
-            .begin_compute_pass(&ComputePassDescriptor {
-                label: Some("world exact geometry count"),
-                timestamp_writes: None,
-            });
-        pass.set_pipeline(pipeline);
-        for bind_group in &bind_groups {
-            pass.set_bind_group(0, bind_group, &[]);
-            pass.dispatch_workgroups(FACE_PLANE_COUNT, 1, 1);
-        }
-    }
-    context
-        .command_encoder()
-        .copy_buffer_to_buffer(&count_buffer, 0, &readback, 0, buffer_size);
-
-    // Mapping begins on the following render frame, after this frame's copy
-    // command has been submitted. wgpu rejects submitting a buffer while a map
-    // request is already pending.
-    let status = Arc::new(AtomicU8::new(0));
-    let entries = chunks_to_count
-        .into_iter()
-        .map(|(id, key, _)| {
-            residency.chunks.get_mut(&id).unwrap().pending_key = Some(key);
-            (id, key)
-        })
-        .collect();
-    residency.pending_count = Some(PendingGeometryCount {
-        entries,
-        readback,
-        stride,
-        status,
-    });
-}
-
-fn geometry_allocated_bytes(chunks: &HashMap<ChunkId, ResidentChunk>) -> u64 {
-    geometry_active_bytes(chunks)
-}
-
 fn geometry_active_bytes(chunks: &HashMap<ChunkId, ResidentChunk>) -> u64 {
     chunks
         .values()
-        .filter_map(|chunk| chunk.geometry.as_ref())
+        .flat_map(|chunk| chunk.geometries.iter().filter_map(Option::as_ref))
         .map(|geometry| geometry.allocated_bytes)
         .sum()
 }
 
-fn create_geometry(
+fn sync_render_segment_bind_groups(
     render_device: &RenderDevice,
     pipeline_cache: &PipelineCache,
     pipelines: &WorldPipelines,
-    geometry_buffer: &Buffer,
-    allocation: GeometryAllocation,
-    id: ChunkId,
-    chunks: &HashMap<ChunkId, ResidentChunk>,
-    lod: u8,
-    boundary_signature: u64,
-    maximum_vertices: u32,
-) -> ResidentGeometry {
-    let chunk = &chunks[&id];
-    let indirect = render_device.create_buffer_with_data(&BufferInitDescriptor {
-        label: Some("world chunk indirect draw"),
-        contents: &indirect_bytes(),
-        usage: BufferUsages::STORAGE | BufferUsages::INDIRECT | BufferUsages::COPY_DST,
-    });
-    let neighbors = chunk_neighbors(id, chunks);
-    let compute_bind_group = render_device.create_bind_group(
-        Some("world chunk compute bind group"),
-        &pipeline_cache.get_bind_group_layout(&pipelines.compute_layout),
-        &BindGroupEntries::sequential((
-            chunk.occupancy_mip.as_entire_binding(),
-            geometry_binding(geometry_buffer, allocation),
-            indirect.as_entire_binding(),
-            chunk.uniform.as_entire_binding(),
-            neighbors[0].occupancy_mip.as_entire_binding(),
-            neighbors[1].occupancy_mip.as_entire_binding(),
-            neighbors[2].occupancy_mip.as_entire_binding(),
-            neighbors[3].occupancy_mip.as_entire_binding(),
-            neighbors[4].occupancy_mip.as_entire_binding(),
-            neighbors[5].occupancy_mip.as_entire_binding(),
-        )),
+    arena: &GeometryArena,
+    culling: &mut GpuCulling,
+) {
+    assert!(
+        arena.segment_count() <= MAX_GPU_GEOMETRY_SEGMENTS as usize,
+        "geometry arena exceeded the GPU batch segment ABI"
     );
-    let render_bind_group = create_render_bind_group(
-        render_device,
-        pipeline_cache,
-        pipelines,
-        geometry_buffer,
-        allocation,
-        &chunk.uniform,
-    );
-    ResidentGeometry {
-        key: GeometryKey {
-            source_revision: chunk.revision,
-            lod,
-            boundary_signature,
-        },
-        allocated_bytes: geometry_bytes_for_vertices(maximum_vertices),
-        allocation,
-        indirect,
-        compute_bind_group,
-        render_bind_group,
+    while culling.render_segment_bind_groups.len() < arena.segment_count() {
+        let segment = culling.render_segment_bind_groups.len();
+        culling
+            .render_segment_bind_groups
+            .push(render_device.create_bind_group(
+                Some("world batched geometry segment"),
+                &pipeline_cache.get_bind_group_layout(&pipelines.render_layout),
+                &BindGroupEntries::sequential((
+                    arena.segment_buffer(segment).as_entire_binding(),
+                    culling.descriptors.as_entire_binding(),
+                )),
+            ));
     }
 }
 
-fn buffer_range_binding(buffer: &Buffer, offset: u64, size: u64) -> BindingResource<'_> {
-    BindingResource::Buffer(BufferBinding {
-        buffer,
-        offset,
-        size: BufferSize::new(size),
-    })
-}
-
-fn geometry_binding(buffer: &Buffer, allocation: GeometryAllocation) -> BindingResource<'_> {
-    buffer_range_binding(buffer, allocation.offset, allocation.size)
-}
-
-fn create_render_bind_group(
+fn sync_build_bind_groups(
     render_device: &RenderDevice,
     pipeline_cache: &PipelineCache,
     pipelines: &WorldPipelines,
-    geometry_buffer: &Buffer,
-    allocation: GeometryAllocation,
-    uniform: &Buffer,
-) -> BindGroup {
-    render_device.create_bind_group(
-        Some("world chunk render bind group"),
-        &pipeline_cache.get_bind_group_layout(&pipelines.render_layout),
-        &BindGroupEntries::sequential((
-            geometry_binding(geometry_buffer, allocation),
-            uniform.as_entire_binding(),
-        )),
-    )
+    svo_arena: &SvoArena,
+    geometry_arena: &GeometryArena,
+    culling: &mut GpuCulling,
+) {
+    let dimensions_match = culling.build_bind_groups.len() == svo_arena.segment_count()
+        && culling
+            .build_bind_groups
+            .iter()
+            .all(|groups| groups.len() == geometry_arena.segment_count());
+    if dimensions_match {
+        return;
+    }
+    culling.build_bind_groups.clear();
+    let layout = pipeline_cache.get_bind_group_layout(&pipelines.compute_layout);
+    for svo_segment in 0..svo_arena.segment_count() {
+        let mut row = Vec::with_capacity(geometry_arena.segment_count());
+        for geometry_segment in 0..geometry_arena.segment_count() {
+            let pass = [
+                svo_segment as u32,
+                geometry_segment as u32,
+                MAX_GPU_CHUNK_DESCRIPTORS,
+                0,
+            ];
+            let bytes = pass
+                .into_iter()
+                .flat_map(u32::to_le_bytes)
+                .collect::<Vec<_>>();
+            let uniform = render_device.create_buffer_with_data(&BufferInitDescriptor {
+                label: Some("world GPU build pass parameters"),
+                contents: &bytes,
+                usage: BufferUsages::UNIFORM,
+            });
+            row.push(
+                render_device.create_bind_group(
+                    Some("world GPU batched geometry build"),
+                    &layout,
+                    &BindGroupEntries::sequential((
+                        svo_arena.segment_buffer(svo_segment).as_entire_binding(),
+                        geometry_arena
+                            .segment_buffer(geometry_segment)
+                            .as_entire_binding(),
+                        culling.descriptors.as_entire_binding(),
+                        culling.quad_counts.as_entire_binding(),
+                        culling.boundary_rows.as_entire_binding(),
+                        uniform.as_entire_binding(),
+                        culling.build_slots.as_entire_binding(),
+                    )),
+                ),
+            );
+        }
+        culling.build_bind_groups.push(row);
+    }
 }
 
 const CHUNK_NEIGHBOR_OFFSETS: [[i64; 3]; 6] = [
@@ -1275,44 +1273,13 @@ fn mark_chunk_and_neighbors_dirty(dirty: &mut HashSet<ChunkId>, id: ChunkId) {
     }
 }
 
-fn chunk_neighbors<'a>(
-    id: ChunkId,
-    chunks: &'a HashMap<ChunkId, ResidentChunk>,
-) -> [&'a ResidentChunk; 6] {
-    let fallback = &chunks[&id];
-    std::array::from_fn(|index| {
-        neighbor_id(id, CHUNK_NEIGHBOR_OFFSETS[index])
-            .and_then(|neighbor| {
-                let chunk = chunks.get(&neighbor);
-                chunk
-            })
-            .unwrap_or(fallback)
-    })
-}
-
-fn neighbor_svo_bytes(
+fn chunk_boundary_signature(
     id: ChunkId,
     chunks: &HashMap<ChunkId, ResidentChunk>,
-    self_lod: u8,
-) -> Vec<u8> {
-    let mut bytes = Vec::with_capacity(6 * 16);
-    for offset in CHUNK_NEIGHBOR_OFFSETS {
-        let neighbor = neighbor_id(id, offset).and_then(|neighbor| chunks.get(&neighbor));
-        let neighbor_lod = neighbor.map_or(self_lod, |chunk| chunk.desired_lod);
-        let metadata = neighbor.map_or([0, 0, 0, u32::from(self_lod)], |_| {
-            [0, u32::from(MAX_CHUNK_LOD), 1, u32::from(neighbor_lod)]
-        });
-        for value in metadata {
-            bytes.extend_from_slice(&value.to_le_bytes());
-        }
-    }
-    bytes
-}
-
-fn chunk_boundary_signature(id: ChunkId, chunks: &HashMap<ChunkId, ResidentChunk>) -> u64 {
+    _lod: u8,
+) -> u64 {
     boundary_signature_from_neighbors(id, |neighbor| {
-        let chunk = chunks.get(&neighbor);
-        chunk.map(|chunk| (chunk.revision, chunk.desired_lod))
+        chunks.get(&neighbor).map(|chunk| (chunk.revision, 0))
     })
 }
 
@@ -1336,10 +1303,23 @@ fn boundary_signature_from_neighbors(
         })
 }
 
-fn geometry_bytes_for_vertices(vertex_count: u32) -> u64 {
-    u64::from(vertex_count.max(1)) * GENERATED_VERTEX_SIZE + 16
+fn geometry_build_dispatch(build_count: u32) -> (u32, u32, u32) {
+    (5 * FACE_PLANE_COUNT, build_count, 1)
 }
 
+fn maximum_quads(lod: u8) -> u32 {
+    let grid = u32::from(CHUNK_EDGE >> lod);
+    // A checkerboard occupancy maximizes unmerged interior faces. Coarse LODs
+    // additionally retain six finest-resolution boundary planes so adjacent
+    // independently selected LODs always share the same edge tessellation.
+    3 * grid * grid * grid + 6 * (CHUNK_EDGE as u32 * CHUNK_EDGE as u32 / 2)
+}
+
+fn geometry_bytes_for_quads(quad_count: u32) -> u64 {
+    u64::from(quad_count.max(1)) * GENERATED_QUAD_SIZE
+}
+
+#[cfg(test)]
 fn aabb_intersects_clip(clip_from_chunk: Mat4) -> bool {
     let edge = CHUNK_EDGE as f32;
     let mut outside = [true; 6];
@@ -1359,22 +1339,7 @@ fn aabb_intersects_clip(clip_from_chunk: Mat4) -> bool {
     !outside.into_iter().any(|plane| plane)
 }
 
-fn chunk_visible(view: &ExtractedView, world_from_chunk: [f32; 16]) -> bool {
-    let clip_from_world = view
-        .clip_from_world
-        .unwrap_or_else(|| view.clip_from_view * view.world_from_view.to_matrix().inverse());
-    aabb_intersects_clip(clip_from_world * Mat4::from_cols_array(&world_from_chunk))
-}
-
-fn chunk_id_key(id: ChunkId) -> (u64, i64, i64, i64) {
-    (
-        id.local_coordinate_id.0,
-        id.coordinate[0],
-        id.coordinate[1],
-        id.coordinate[2],
-    )
-}
-
+#[cfg(test)]
 fn chunk_distance_squared(
     world_from_chunk: [f32; 16],
     camera_position: bevy::prelude::Vec3,
@@ -1485,7 +1450,6 @@ fn world_draw(
         &ViewDepthTexture,
         &ViewUniformOffset,
         &WorldViewPipeline,
-        &ExtractedView,
     )>,
     view_bind_group: Res<WorldViewBindGroup>,
     pipelines: Res<PipelineCache>,
@@ -1495,7 +1459,7 @@ fn world_draw(
     if residency.chunks.is_empty() {
         return;
     }
-    let (target, depth, view_offset, pipeline_id, extracted_view) = view.into_inner();
+    let (target, depth, view_offset, pipeline_id) = view.into_inner();
     let Some(pipeline) = pipelines.get_render_pipeline(pipeline_id.0) else {
         return;
     };
@@ -1510,15 +1474,19 @@ fn world_draw(
     });
     pass.set_render_pipeline(pipeline);
     pass.set_bind_group(0, &view_bind_group.0, &[view_offset.offset]);
-    for chunk in residency.chunks.values() {
-        if !chunk_visible(extracted_view, chunk.world_from_chunk) {
-            continue;
-        }
-        let Some(geometry) = &chunk.geometry else {
-            continue;
-        };
-        pass.set_bind_group(1, &geometry.render_bind_group, &[]);
-        pass.draw_indirect(&geometry.indirect, 0);
+    let culling = residency
+        .gpu_culling
+        .as_ref()
+        .expect("GPU culling exists while resident Chunks are drawable");
+    for (segment, bind_group) in culling.render_segment_bind_groups.iter().enumerate() {
+        pass.set_bind_group(1, bind_group, &[]);
+        pass.wgpu_pass().multi_draw_indirect_count(
+            &culling.visible_draws,
+            segment as u64 * u64::from(MAX_GPU_CHUNK_DESCRIPTORS) * 16,
+            &culling.segment_counts,
+            segment as u64 * 4,
+            MAX_GPU_CHUNK_DESCRIPTORS,
+        );
     }
 }
 
@@ -1527,12 +1495,35 @@ mod tests {
     use super::*;
 
     #[test]
+    fn dirty_geometry_dispatch_scales_with_changes_not_resident_chunks() {
+        assert_eq!(geometry_build_dispatch(0), (480, 0, 1));
+        assert_eq!(geometry_build_dispatch(7), (480, 7, 1));
+        // A 4096-Chunk resident set with seven changed descriptors still emits
+        // only seven Y workgroups; the old implementation emitted 4096.
+        assert_ne!(geometry_build_dispatch(7).1, 4096);
+    }
+
+    #[test]
+    fn fixed_quad_capacities_cover_checkerboard_and_boundary_planes() {
+        assert_eq!(maximum_quads(0), 13_056);
+        assert_eq!(maximum_quads(1), 2_304);
+        assert_eq!(maximum_quads(2), 960);
+        assert_eq!(maximum_quads(3), 792);
+        assert_eq!(maximum_quads(4), 771);
+        assert_eq!((0..=MAX_CHUNK_LOD).map(maximum_quads).sum::<u32>(), 17_883);
+    }
+
+    #[test]
+    fn gpu_chunk_descriptor_abi_has_expected_stride() {
+        assert_eq!(GpuCullDescriptor::min_size().get(), 224);
+        assert_eq!(GpuBuildPass::min_size().get(), 16);
+    }
+
+    #[test]
     fn material_seed_has_the_documented_default() {
         let settings = WorldRenderSettings::default();
         assert_eq!(settings.material_seed, 0xDEAD_BEEF);
         assert_eq!(settings.geometry_budget_bytes, 1024 * 1024 * 1024);
-        assert_eq!(settings.geometry_build_budget_bytes, 16 * 1024 * 1024);
-        assert_eq!(settings.max_geometry_builds_per_frame, 32);
     }
 
     #[test]
@@ -1564,24 +1555,6 @@ mod tests {
         assert_eq!(
             chunk_distance_squared(transform, bevy::prelude::Vec3::new(20.0, 20.0, 8.0)),
             32.0
-        );
-    }
-
-    #[test]
-    fn occupancy_mip_ors_two_by_two_by_two_children() {
-        let mip = build_occupancy_mip(|x, y, z| x == 3 && y == 7 && z == 5);
-        for lod in 0..=MAX_CHUNK_LOD {
-            let scale = 1_u32 << lod;
-            assert!(mip_bit(
-                &mip,
-                occupancy_mip_index(lod, 3 / scale, 7 / scale, 5 / scale)
-            ));
-        }
-        assert!(!mip_bit(&mip, occupancy_mip_index(1, 1, 7, 2)));
-        assert_eq!(mip.len(), OCCUPANCY_MIP_WORD_COUNT);
-        assert_eq!(
-            OCCUPANCY_MIP_CELL_COUNT,
-            16_u32.pow(3) + 8_u32.pow(3) + 4_u32.pow(3) + 2_u32.pow(3) + 1
         );
     }
 
@@ -1647,23 +1620,18 @@ mod tests {
     fn meshing_uses_cross_chunk_neighbors() {
         let shader = include_str!("shaders/world_greedy_emit.wgsl");
         assert!(
-            shader.contains("neighbor_chunks"),
+            shader.contains("neighbor_slots") && shader.contains("boundary_rows"),
             "meshing shader has no cross-chunk neighbor input"
         );
     }
 
     #[test]
-    fn lod_meshing_uses_a_cubic_occupancy_pyramid() {
+    fn lod_meshing_queries_the_packed_svo_on_gpu() {
         let shader = include_str!("shaders/world_greedy_emit.wgsl");
-        assert!(
-            shader.contains("OCCUPANCY_MIP_OFFSETS"),
-            "16³ chunks must query the complete cubic occupancy mip"
-        );
+        assert!(shader.contains("PackedSvoNode"));
+        assert!(shader.contains("node.reserved & 1u"));
         assert!(shader.contains("return vec3(16u >> lod)"));
-        assert!(
-            !shader.contains("occupied_voxel"),
-            "coarse meshing must not rescan fine SVO voxels"
-        );
+        assert!(!shader.contains("OCCUPANCY_MIP_OFFSETS"));
         assert!(!shader.contains("horizontal"));
     }
 }

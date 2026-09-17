@@ -7,7 +7,14 @@ use super::{CHUNK_EDGE, MAX_CHUNK_LOD};
 /// Multiplier applied only when crossing from a finer LOD to a coarser one.
 pub(super) const LOD_COARSENING_HYSTERESIS_RATIO: f32 = 1.125;
 
-/// Computes squared world-distance thresholds for one-pixel projected cells.
+/// Projected edge length at which the next coarser Cell becomes admissible.
+///
+/// Two pixels is the Nyquist-aligned threshold for the current hard-edged
+/// procedural colors. It also moves geometry reduction closer to the camera
+/// than the former one-pixel rule, reducing distant meshing and fragment detail.
+const LOD_PROJECTED_CELL_TARGET_PIXELS: f32 = 2.0;
+
+/// Computes squared world-distance thresholds for target-sized projected cells.
 ///
 /// Index zero is the LOD 0→1 boundary; each later index doubles cell edge
 /// length and therefore quadruples squared transition distance. The viewport
@@ -21,7 +28,7 @@ pub(super) fn lod_distance_thresholds_squared(
     std::array::from_fn(|index| {
         let lod = index as u8 + 1;
         let cell_world_size = ((1_u32 << lod) as f32) * effective_scale;
-        (cell_world_size * focal_pixels).powi(2)
+        (cell_world_size * focal_pixels / LOD_PROJECTED_CELL_TARGET_PIXELS).powi(2)
     })
 }
 
@@ -159,6 +166,7 @@ mod tests {
     #[test]
     fn thresholds_are_squared_and_double_in_distance_per_lod() {
         let thresholds = lod_distance_thresholds_squared(1080.0, 1.0, 1.0);
+        assert_eq!(thresholds[0], (2.0 * 540.0 / 2.0_f32).powi(2));
         for pair in thresholds.windows(2) {
             assert_eq!(pair[1], pair[0] * 4.0);
         }
@@ -166,7 +174,7 @@ mod tests {
 
     #[test]
     fn initial_selection_uses_the_theoretical_squared_boundaries() {
-        let viewport_height = 16.0;
+        let viewport_height = 32.0;
         let projection_scale = 2.0;
         assert_eq!(
             selected_lod(
@@ -192,7 +200,7 @@ mod tests {
 
     #[test]
     fn hysteresis_delays_coarsening_but_not_refinement() {
-        let viewport_height = 16.0;
+        let viewport_height = 32.0;
         let projection_scale = 2.0;
         assert_eq!(
             selected_lod(
