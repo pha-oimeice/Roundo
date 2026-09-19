@@ -3,7 +3,7 @@
 struct ChunkDescriptor {
     world_from_chunk: mat4x4<f32>,
     chunk_coordinate: vec4<i32>,
-    // Per LOD: vertex count, first vertex, geometry segment, reserved.
+    // Per LOD: vertex count, first vertex, geometry segment, allocated flag.
     draws: array<vec4<u32>, 5>,
     // active, material seed, previous selected LOD, source generation
     metadata: vec4<u32>,
@@ -26,37 +26,13 @@ struct DrawIndirect {
 const MAX_CHUNKS: u32 = 262144u;
 const MAX_SEGMENTS: u32 = 16u;
 
-fn selected_lod(world_from_chunk: mat4x4<f32>, committed: u32) -> u32 {
-    let axis_x = world_from_chunk[0].xyz;
-    let axis_y = world_from_chunk[1].xyz;
-    let axis_z = world_from_chunk[2].xyz;
-    let from_origin = view.world_position - world_from_chunk[3].xyz;
-    let local_camera = vec3(
-        dot(from_origin, axis_x) / dot(axis_x, axis_x),
-        dot(from_origin, axis_y) / dot(axis_y, axis_y),
-        dot(from_origin, axis_z) / dot(axis_z, axis_z),
-    );
-    let camera_from_target = floor(local_camera / 16.0);
-    let axis_scale = vec3(length(axis_x), length(axis_y), length(axis_z));
-    let physical_delta = camera_from_target * 16.0 * axis_scale;
-    let distance_squared = dot(physical_delta, physical_delta);
-    let effective_scale = max(axis_scale.x, max(axis_scale.y, axis_scale.z));
-    let focal_pixels = max(view.viewport.w, 1.0) * abs(view.clip_from_view[1][1]) * 0.5;
-    let coarsening = 1.125 * 1.125;
-    var lod = min(committed, 4u);
-    while (lod < 4u) {
-        let next_cell = f32(1u << (lod + 1u)) * effective_scale;
-        let threshold = next_cell * focal_pixels / 2.0;
-        if (distance_squared < threshold * threshold * coarsening) { break; }
-        lod += 1u;
-    }
-    while (lod > 0u) {
-        let cell = f32(1u << lod) * effective_scale;
-        let threshold = cell * focal_pixels / 2.0;
-        if (distance_squared >= threshold * threshold) { break; }
-        lod -= 1u;
-    }
-    return lod;
+fn selected_lod(_world_from_chunk: mat4x4<f32>, _committed: u32) -> u32 {
+    // The legacy coarse-occupancy model expands any nonempty subtree into a
+    // solid cube. It is not a valid Surface Proxy: thin superflat surfaces grow
+    // vertically and its boundary skirts become visible walls. Keep rendering
+    // on the exact LOD-0 model until the topology-safe QEF proxy path commits a
+    // replacement. Material LOD remains independently footprint-filtered.
+    return 0u;
 }
 
 fn chunk_visible(world_from_chunk: mat4x4<f32>) -> bool {
@@ -66,12 +42,15 @@ fn chunk_visible(world_from_chunk: mat4x4<f32>) -> bool {
             for (var x = 0u; x < 2u; x += 1u) {
                 let local = vec4<f32>(f32(x) * 16.0, f32(y) * 16.0, f32(z) * 16.0, 1.0);
                 let clip = view.clip_from_world * world_from_chunk * local;
-                outside[0] = outside[0] && clip.x < -clip.w;
-                outside[1] = outside[1] && clip.x > clip.w;
-                outside[2] = outside[2] && clip.y < -clip.w;
-                outside[3] = outside[3] && clip.y > clip.w;
-                outside[4] = outside[4] && clip.z < 0.0;
-                outside[5] = outside[5] && clip.z > clip.w;
+                // Keep a small homogeneous guard band so camera motion cannot
+                // toggle a far Chunk solely from f32 clip-plane roundoff.
+                let margin = max(abs(clip.w) * 1.0e-4, 1.0e-4);
+                outside[0] = outside[0] && clip.x < -clip.w - margin;
+                outside[1] = outside[1] && clip.x > clip.w + margin;
+                outside[2] = outside[2] && clip.y < -clip.w - margin;
+                outside[3] = outside[3] && clip.y > clip.w + margin;
+                outside[4] = outside[4] && clip.z < -margin;
+                outside[5] = outside[5] && clip.z > clip.w + margin;
             }
         }
     }

@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 /// Exact stream-0 application version required during session setup.
 pub const GAME_PROTOCOL_VERSION: u16 = 15;
 /// Exact stream-1 application version required during session setup.
-pub const RESOURCE_PROTOCOL_VERSION: u16 = 2;
+pub const RESOURCE_PROTOCOL_VERSION: u16 = 3;
 
 /// Logical QUIC stream role encoded as one wire byte during stream pairing.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
@@ -40,7 +40,18 @@ impl StreamId {
 identifier!(ConnectionId);
 identifier!(LocalCoordinateId);
 identifier!(PlayerId);
+identifier!(ChunkLoadingAnchorId);
 identifier!(JoinableWorldId);
+
+/// Read-only client projection of one server-owned rendering anchor.
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
+pub struct RenderingAnchorState {
+    pub id: ChunkLoadingAnchorId,
+    pub owner: PlayerId,
+    pub scene_id: SceneId,
+    pub position: [f64; 3],
+    pub radius_chunks: u16,
+}
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 pub struct UserId(pub i32);
@@ -308,6 +319,15 @@ impl From<ServerGameMessage> for ServerMessage {
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub enum ServerResourceMessage {
+    RenderingAnchorSpawned {
+        anchor: RenderingAnchorState,
+    },
+    RenderingAnchorUpdated {
+        anchor: RenderingAnchorState,
+    },
+    RenderingAnchorDespawned {
+        anchor_id: ChunkLoadingAnchorId,
+    },
     LocalCoordinateSpawned {
         local_coordinate_id: LocalCoordinateId,
     },
@@ -331,6 +351,9 @@ pub enum ServerResourceMessage {
 impl ServerResourceMessage {
     pub const fn kind(&self) -> &'static str {
         match self {
+            Self::RenderingAnchorSpawned { .. } => "RenderingAnchorSpawned",
+            Self::RenderingAnchorUpdated { .. } => "RenderingAnchorUpdated",
+            Self::RenderingAnchorDespawned { .. } => "RenderingAnchorDespawned",
             Self::LocalCoordinateSpawned { .. } => "LocalCoordinateSpawned",
             Self::LocalCoordinateDespawned { .. } => "LocalCoordinateDespawned",
             Self::LocalCoordinateChunkVersions { .. } => "LocalCoordinateChunkVersions",

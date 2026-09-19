@@ -3,8 +3,9 @@
 mod application;
 
 use crate::{
-    ClientCommandDefinition, ClientCommandPipe, MAX_JSON_COMMANDS_PER_UPDATE, TerminalInput,
-    UnixCommand, UnixCommandParseError, UnixCommandRegistry,
+    ClientCommandDefinition, ClientCommandPipe, ClientCommandSystemSet,
+    MAX_JSON_COMMANDS_PER_UPDATE, TerminalInput, UnixCommand, UnixCommandParseError,
+    UnixCommandRegistry,
 };
 use bevy::{
     app::AppExit,
@@ -14,7 +15,7 @@ use bevy::{
     },
 };
 use roundo_marionette::{ClientPlayerController, InputRegistry};
-use roundo_toolbox::request_response_pipe::{JsonSubmitError, RequestCall};
+use roundo_toolbox::request_response_pipe::{JsonSubmitError, RequestCall, ResponsePoll};
 use roundo_user_config::{ClientConfig, ClientInputBindingConfig, ClientInputKey, ServerEntry};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -1113,7 +1114,12 @@ impl Default for ClientUnixAdapter {
 
 /// Accepted terminal calls awaiting non-blocking response collection.
 #[derive(Resource, Default)]
-struct TerminalResponses(Vec<RequestCall<serde_json::Value>>);
+struct TerminalResponses(Vec<PendingTerminalResponse>);
+
+struct PendingTerminalResponse {
+    command: String,
+    call: RequestCall<serde_json::Value>,
+}
 
 /// Mutable in-memory client configuration used by command handlers.
 ///
@@ -1254,10 +1260,18 @@ fn open_external_url(url: &str) -> std::io::Result<()> {
     command.spawn().map(|_| ())
 }
 
+fn configure_webui_ipc_order(app: &mut App) {
+    app.configure_sets(
+        Update,
+        ClientCommandSystemSet::ExecuteAndPublish.before(roundo_webui::WebUiSystemSet::Platform),
+    );
+}
+
 /// Installs missing client resources and the ordered command/data systems.
 ///
 /// Preinserted command pipes and configuration stores are preserved.
 pub(super) fn configure(app: &mut App) {
+    configure_webui_ipc_order(app);
     if !app.world().contains_resource::<ClientCommandPipe>() {
         app.insert_resource(ClientCommandPipe::bounded(256));
     }
@@ -1280,7 +1294,8 @@ pub(super) fn configure(app: &mut App) {
             update_hud_cache,
             sync_subscribed_client_data,
         )
-            .chain(),
+            .chain()
+            .in_set(ClientCommandSystemSet::ExecuteAndPublish),
     );
 }
 
@@ -1596,12 +1611,17 @@ fn submit_terminal_request(
     responses: &mut TerminalResponses,
     request: serde_json::Value,
 ) -> Option<serde_json::Value> {
+    let command = request
+        .get("command")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
     match pipe
         .io()
         .submit(request, roundo_webui::UiCommandSource::Host)
     {
         Ok(call) => {
-            responses.0.push(call);
+            responses.0.push(PendingTerminalResponse { command, call });
             None
         }
         Err(JsonSubmitError::Full) => Some(terminal_error(
@@ -1622,17 +1642,19 @@ fn submit_terminal_request(
     }
 }
 
-/// Partitions calls into completed responses and handles still reporting `None`.
-///
-/// `RequestCall::try_result` conflates pending and disconnected response paths,
-/// so a disconnected call remains retained by this polling adapter.
+/// Partitions ready, pending, and permanently disconnected response paths.
 fn collect_terminal_responses(responses: &mut TerminalResponses) -> Vec<serde_json::Value> {
     let mut pending = Vec::new();
     let mut completed = Vec::new();
-    for call in std::mem::take(&mut responses.0) {
-        match call.try_result() {
-            Some(response) => completed.push(response),
-            None => pending.push(call),
+    for response in std::mem::take(&mut responses.0) {
+        match response.call.poll() {
+            ResponsePoll::Ready(value) => completed.push(value),
+            ResponsePoll::Pending => pending.push(response),
+            ResponsePoll::Disconnected => completed.push(terminal_error(
+                &response.command,
+                "internal_command_error",
+                "command response channel disconnected",
+            )),
         }
     }
     responses.0 = pending;
@@ -1655,10 +1677,42 @@ fn print_terminal_response(response: serde_json::Value) {
 #[cfg(test)]
 mod tests {
     use super::{CLIENT_COMMAND_CATALOG, CLIENT_COMMANDS, UiOpenArguments, validate_external_url};
+    use bevy::prelude::{App, IntoScheduleConfigs, ResMut, Resource, Update};
+
+    #[derive(Resource, Default)]
+    struct IpcScheduleTrace(Vec<&'static str>);
+
+    fn record_client_phase(mut trace: ResMut<IpcScheduleTrace>) {
+        trace.0.push("client");
+    }
+
+    fn record_webui_phase(mut trace: ResMut<IpcScheduleTrace>) {
+        trace.0.push("webui");
+    }
 
     fn assert_has_property(value: &serde_json::Value, name: &str) {
         let property = value.get(name);
         assert!(property.is_some(), "schema property `{name}` is missing");
+    }
+
+    #[test]
+    fn client_execution_and_data_publication_precede_webui_platform_work() {
+        let mut app = App::new();
+        super::configure_webui_ipc_order(&mut app);
+        app.init_resource::<IpcScheduleTrace>().add_systems(
+            Update,
+            (
+                record_webui_phase.in_set(roundo_webui::WebUiSystemSet::Platform),
+                record_client_phase.in_set(crate::ClientCommandSystemSet::ExecuteAndPublish),
+            ),
+        );
+
+        app.update();
+
+        assert_eq!(
+            app.world().resource::<IpcScheduleTrace>().0,
+            ["client", "webui"]
+        );
     }
 
     #[test]
@@ -1960,6 +2014,28 @@ mod tests {
         assert_eq!(command["arguments"], serde_json::json!({}));
         let injected_source = command.get("_roundo_source_instance");
         assert!(injected_source.is_none());
+    }
+
+    #[test]
+    fn terminal_completes_a_disconnected_response_path_with_typed_error() {
+        let pipe = crate::ClientCommandPipe::bounded(1);
+        let mut responses = super::TerminalResponses::default();
+        assert!(
+            super::submit_terminal_request(
+                &pipe,
+                &mut responses,
+                serde_json::json!({"version": 1, "command": "app.quit", "arguments": {}}),
+            )
+            .is_none()
+        );
+        let (_, reply) = pipe.try_receive().unwrap();
+        drop(reply);
+
+        let completed = super::collect_terminal_responses(&mut responses);
+        assert_eq!(completed.len(), 1);
+        assert_eq!(completed[0]["command"], "app.quit");
+        assert_eq!(completed[0]["error"]["code"], "internal_command_error");
+        assert!(responses.0.is_empty());
     }
 
     #[test]

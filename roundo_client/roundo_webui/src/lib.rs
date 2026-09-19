@@ -8,7 +8,7 @@ mod lifecycle;
 mod platform;
 mod registry;
 
-pub use composition::RoundoWebUiPlugin;
+pub use composition::{RoundoWebUiPlugin, WebUiSystemSet};
 pub use lifecycle::{
     FocusedUiDeclaration, PendingUiDescriptor, RecoveryAction, RecoveryActionRequest,
     RecoverySurface, UiBounds, UiCommandSource, UiInstance, UiInstanceId, UiLifecycleError,

@@ -4,12 +4,13 @@ use roundo_networking::connection::{
 };
 use roundo_networking::frame::{self, MAX_FRAME_SIZE};
 use roundo_networking::protocol::{
-    ChunkVersion, ClientGameMessage, ClientMessage, ClientResourceMessage, ControllerCommand,
-    DestroyBlockControllerAction, JoinableWorldId, LocalCoordinateId, Movement3DAction,
-    NearbyJoinableWorld, NearbyPlayer, PlaceBlockControllerAction, PlayerControllerCommand,
-    PlayerId, PlayerState, PresenceSnapshot, ProtocolErrorCode, ResourceCatalogFingerprint,
-    RotationSync, SceneId, SerializedPayload, ServerGameMessage, ServerMessage,
-    ServerResourceMessage, SessionId, SessionInfo, StreamId, UserId, UserSession,
+    ChunkLoadingAnchorId, ChunkVersion, ClientGameMessage, ClientMessage, ClientResourceMessage,
+    ControllerCommand, DestroyBlockControllerAction, JoinableWorldId, LocalCoordinateId,
+    Movement3DAction, NearbyJoinableWorld, NearbyPlayer, PlaceBlockControllerAction,
+    PlayerControllerCommand, PlayerId, PlayerState, PresenceSnapshot, ProtocolErrorCode,
+    RenderingAnchorState, ResourceCatalogFingerprint, RotationSync, SceneId, SerializedPayload,
+    ServerGameMessage, ServerMessage, ServerResourceMessage, SessionId, SessionInfo, StreamId,
+    UserId, UserSession,
 };
 use roundo_networking::session::{ClientSession, ServerSession, SessionState};
 use roundo_toolbox::UpdateVersion;
@@ -353,6 +354,15 @@ fn server_messages() -> Vec<ServerMessage> {
                     name: "Arda".to_string(),
                     translation: [0.0, 0.0, 0.0],
                 }],
+            },
+        }),
+        ServerMessage::Resource(ServerResourceMessage::RenderingAnchorSpawned {
+            anchor: RenderingAnchorState {
+                id: ChunkLoadingAnchorId(4),
+                owner: PlayerId(16),
+                scene_id: SceneId::S1,
+                position: [0.0; 3],
+                radius_chunks: 64,
             },
         }),
         ServerMessage::Resource(ServerResourceMessage::LocalCoordinateChunkVersions {

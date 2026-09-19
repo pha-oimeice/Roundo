@@ -99,10 +99,27 @@ fn ingest_commands(
                 for entity in world.coordinates.drain().map(|(_, entity)| entity) {
                     commands.entity(entity).despawn();
                 }
+                world.rendering_anchors.clear();
                 world.cached_chunks.clear();
                 world.active_server_versions.clear();
                 world.requested_server_versions.clear();
                 world.pending_chunk_updates.clear();
+            }
+            LocalCoordinateClientCommand::RenderingAnchorSpawned(anchor) => {
+                world.rendering_anchors.insert(anchor.id, anchor);
+            }
+            LocalCoordinateClientCommand::RenderingAnchorUpdated(anchor) => {
+                if let Some(current) = world.rendering_anchors.get_mut(&anchor.id) {
+                    *current = anchor;
+                } else {
+                    log::warn!(
+                        "received update for unknown rendering anchor: anchor_id={}",
+                        anchor.id.0
+                    );
+                }
+            }
+            LocalCoordinateClientCommand::RenderingAnchorDespawned(anchor_id) => {
+                world.rendering_anchors.remove(&anchor_id);
             }
             LocalCoordinateClientCommand::ResetRequests => {
                 world.requested_server_versions.clear();

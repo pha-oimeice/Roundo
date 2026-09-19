@@ -36,6 +36,17 @@ pub struct RequestResponseIo<Request, Response> {
 /// dequeued by the consumer.
 pub struct RequestCall<Response>(Receiver<Response>);
 
+/// Non-blocking state of one accepted request's private response channel.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub enum ResponsePoll<Response> {
+    /// The response sender still exists but has not sent a value.
+    Pending,
+    /// The one response value was received.
+    Ready(Response),
+    /// Every response sender was dropped without sending a value.
+    Disconnected,
+}
+
 /// Source-neutral JSON request adapter which limits serialized input before it
 /// can enter the shared request queue.
 #[derive(Clone)]
@@ -180,14 +191,24 @@ impl<Context, Response> ContextualJsonRequestResponseIo<Context, Response> {
 }
 
 impl<Response> RequestCall<Response> {
+    /// Observes whether the response is pending, ready, or permanently disconnected.
+    pub fn poll(&self) -> ResponsePoll<Response> {
+        match self.0.try_recv() {
+            Ok(value) => ResponsePoll::Ready(value),
+            Err(TryRecvError::Empty) => ResponsePoll::Pending,
+            Err(TryRecvError::Disconnected) => ResponsePoll::Disconnected,
+        }
+    }
+
     /// Attempts to receive the response without blocking.
     ///
-    /// `None` means either pending or disconnected; call sites needing that
-    /// distinction require a richer protocol.
+    /// This compatibility projection maps both pending and disconnected to
+    /// `None`. Long-lived polling adapters should use [`Self::poll`] so a lost
+    /// response sender cannot leave a request retained forever.
     pub fn try_result(&self) -> Option<Response> {
-        match self.0.try_recv() {
-            Ok(value) => Some(value),
-            Err(TryRecvError::Empty | TryRecvError::Disconnected) => None,
+        match self.poll() {
+            ResponsePoll::Ready(value) => Some(value),
+            ResponsePoll::Pending | ResponsePoll::Disconnected => None,
         }
     }
     /// Blocks the current OS thread until a response arrives or its sender drops.
@@ -220,6 +241,17 @@ mod tests {
         let io = pipe.io();
         let _ = io.submit(()).unwrap();
         assert!(matches!(io.submit(()), Err(SubmitError::Full)));
+    }
+
+    #[test]
+    fn accepted_call_exposes_response_sender_disconnect() {
+        let pipe = RequestResponsePipe::<(), ()>::bounded(1);
+        let io = pipe.io();
+        let call = io.submit(()).unwrap();
+        let (_, response) = pipe.try_receive().unwrap();
+        drop(response);
+
+        assert_eq!(call.poll(), ResponsePoll::Disconnected);
     }
 
     #[test]

@@ -5,11 +5,11 @@
 //! replacement has been generated, read back, allocated, and made resident.
 
 mod arena;
-#[cfg(test)]
-mod lod;
+mod surface_proxy;
 mod svo_arena;
 
 use arena::{GeometryAllocation, GeometryArena};
+use surface_proxy::{GpuQefReducePass, GpuQefSummary};
 use svo_arena::{SvoAllocation, SvoArena};
 
 #[cfg(test)]
@@ -67,6 +67,9 @@ const DEFAULT_SVO_BUDGET_BYTES: u64 = 1024 * 1024 * 1024;
 const CHUNK_EDGE: u32 = CHUNK_EDGE_LENGTH as u32;
 const FACE_PLANE_COUNT: u32 = 6 * CHUNK_EDGE;
 const MAX_CHUNK_LOD: u8 = CHUNK_EDGE.ilog2() as u8;
+// Invalid fixed-depth coarse cubes are not generated or selected while the
+// Surface Proxy path is under construction. Only exact LOD 0 is committed.
+const ACTIVE_LEGACY_GEOMETRY_LODS: u8 = 1;
 // The GPU ABI and dispatch topology below intentionally model one fixed 16³ cube.
 // Fail compilation instead of silently drifting into a 16²×height representation.
 const _: () = assert!(CHUNK_EDGE == 16 && MAX_CHUNK_LOD == 4);
@@ -107,6 +110,7 @@ impl bevy::prelude::Plugin for WorldRenderPlugin {
     fn build(&self, app: &mut App) {
         embedded_asset!(app, "shaders/world_cull_lod.wgsl");
         embedded_asset!(app, "shaders/world_greedy_emit.wgsl");
+        embedded_asset!(app, "shaders/world_surface_proxy.wgsl");
         embedded_asset!(app, "shaders/world_vertex.wgsl");
         embedded_asset!(app, "shaders/world_fragment.wgsl");
 
@@ -370,6 +374,8 @@ struct WorldPipelines {
     finalize_builds: CachedComputePipelineId,
     cull: CachedComputePipelineId,
     cull_layout: BindGroupLayoutDescriptor,
+    _surface_proxy_layout: BindGroupLayoutDescriptor,
+    _surface_proxy_reduce: CachedComputePipelineId,
     vertex_shader: bevy::prelude::Handle<bevy::shader::Shader>,
     fragment_shader: bevy::prelude::Handle<bevy::shader::Shader>,
 }
@@ -411,6 +417,16 @@ fn init_world_pipelines(
             ),
         ),
     );
+    let surface_proxy_layout = BindGroupLayoutDescriptor::new(
+        "world Surface Proxy QEF reduction",
+        &BindGroupLayoutEntries::sequential(
+            ShaderStages::COMPUTE,
+            (
+                storage_buffer::<GpuQefSummary>(false),
+                uniform_buffer::<GpuQefReducePass>(false),
+            ),
+        ),
+    );
     let cull_layout = BindGroupLayoutDescriptor::new(
         "world GPU culling",
         &BindGroupLayoutEntries::sequential(
@@ -425,6 +441,15 @@ fn init_world_pipelines(
     let compute_shader =
         load_embedded_asset!(asset_server.as_ref(), "shaders/world_greedy_emit.wgsl");
     let cull_shader = load_embedded_asset!(asset_server.as_ref(), "shaders/world_cull_lod.wgsl");
+    let surface_proxy_shader =
+        load_embedded_asset!(asset_server.as_ref(), "shaders/world_surface_proxy.wgsl");
+    let surface_proxy_reduce = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
+        label: Some(Cow::Borrowed("world Surface Proxy QEF depth reduction")),
+        layout: vec![surface_proxy_layout.clone()],
+        shader: surface_proxy_shader,
+        entry_point: Some(Cow::Borrowed("reduce_qef_depth")),
+        ..Default::default()
+    });
     let cull = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
         label: Some(Cow::Borrowed("world parallel Chunk culling")),
         layout: vec![view_layout.clone(), cull_layout.clone()],
@@ -458,6 +483,8 @@ fn init_world_pipelines(
         finalize_builds,
         cull,
         cull_layout,
+        _surface_proxy_layout: surface_proxy_layout,
+        _surface_proxy_reduce: surface_proxy_reduce,
         vertex_shader,
         fragment_shader,
     });
@@ -768,7 +795,7 @@ fn write_cull_descriptor(
                         .expect("geometry quad offset fits the indirect ABI"),
                     u32::try_from(geometry.allocation.segment)
                         .expect("geometry segment index fits the descriptor ABI"),
-                    0,
+                    1,
                 )
             })
     });
@@ -935,7 +962,7 @@ fn world_compute(
             continue;
         }
         let mut complete = true;
-        for lod in 0..=MAX_CHUNK_LOD {
+        for lod in 0..ACTIVE_LEGACY_GEOMETRY_LODS {
             let index = lod as usize;
             let bytes = geometry_bytes_for_quads(maximum_quads(lod));
             if residency.chunks[&id].geometries[index].is_none() {
@@ -1304,7 +1331,11 @@ fn boundary_signature_from_neighbors(
 }
 
 fn geometry_build_dispatch(build_count: u32) -> (u32, u32, u32) {
-    (5 * FACE_PLANE_COUNT, build_count, 1)
+    (
+        u32::from(ACTIVE_LEGACY_GEOMETRY_LODS) * FACE_PLANE_COUNT,
+        build_count,
+        1,
+    )
 }
 
 fn maximum_quads(lod: u8) -> u32 {
@@ -1327,12 +1358,13 @@ fn aabb_intersects_clip(clip_from_chunk: Mat4) -> bool {
         for y in [0.0, edge] {
             for x in [0.0, edge] {
                 let point = clip_from_chunk * Vec4::new(x, y, z, 1.0);
-                outside[0] &= point.x < -point.w;
-                outside[1] &= point.x > point.w;
-                outside[2] &= point.y < -point.w;
-                outside[3] &= point.y > point.w;
-                outside[4] &= point.z < 0.0;
-                outside[5] &= point.z > point.w;
+                let margin = (point.w.abs() * 1.0e-4).max(1.0e-4);
+                outside[0] &= point.x < -point.w - margin;
+                outside[1] &= point.x > point.w + margin;
+                outside[2] &= point.y < -point.w - margin;
+                outside[3] &= point.y > point.w + margin;
+                outside[4] &= point.z < -margin;
+                outside[5] &= point.z > point.w + margin;
             }
         }
     }
@@ -1496,8 +1528,8 @@ mod tests {
 
     #[test]
     fn dirty_geometry_dispatch_scales_with_changes_not_resident_chunks() {
-        assert_eq!(geometry_build_dispatch(0), (480, 0, 1));
-        assert_eq!(geometry_build_dispatch(7), (480, 7, 1));
+        assert_eq!(geometry_build_dispatch(0), (96, 0, 1));
+        assert_eq!(geometry_build_dispatch(7), (96, 7, 1));
         // A 4096-Chunk resident set with seven changed descriptors still emits
         // only seven Y workgroups; the old implementation emitted 4096.
         assert_ne!(geometry_build_dispatch(7).1, 4096);
@@ -1510,7 +1542,12 @@ mod tests {
         assert_eq!(maximum_quads(2), 960);
         assert_eq!(maximum_quads(3), 792);
         assert_eq!(maximum_quads(4), 771);
-        assert_eq!((0..=MAX_CHUNK_LOD).map(maximum_quads).sum::<u32>(), 17_883);
+        assert_eq!(
+            (0..ACTIVE_LEGACY_GEOMETRY_LODS)
+                .map(maximum_quads)
+                .sum::<u32>(),
+            13_056
+        );
     }
 
     #[test]
@@ -1531,6 +1568,17 @@ mod tests {
         let bytes = indirect_bytes();
         assert_eq!(u32::from_le_bytes(bytes[0..4].try_into().unwrap()), 0);
         assert_eq!(u32::from_le_bytes(bytes[4..8].try_into().unwrap()), 1);
+    }
+
+    #[test]
+    fn clip_culling_keeps_chunks_within_the_numerical_guard_band() {
+        let almost_on_left_plane = Mat4::from_cols(
+            Vec4::ZERO,
+            Vec4::ZERO,
+            Vec4::ZERO,
+            Vec4::new(-1.000_01, 0.0, 0.5, 1.0),
+        );
+        assert!(aabb_intersects_clip(almost_on_left_plane));
     }
 
     #[test]
@@ -1623,6 +1671,25 @@ mod tests {
             shader.contains("neighbor_slots") && shader.contains("boundary_rows"),
             "meshing shader has no cross-chunk neighbor input"
         );
+    }
+
+    #[test]
+    fn invalid_legacy_coarse_geometry_is_not_selected_during_proxy_migration() {
+        let cull = include_str!("shaders/world_cull_lod.wgsl");
+        let mesher = include_str!("shaders/world_greedy_emit.wgsl");
+        assert!(cull.contains("return 0u;"));
+        assert!(!mesher.contains("occupancy_lod - sampling_lod"));
+    }
+
+    #[test]
+    fn material_lod_uses_fragment_footprint_instead_of_geometry_lod() {
+        let shader = include_str!("shaders/world_fragment.wgsl");
+        assert!(shader.contains("fn interpolated_lod_color"));
+        assert!(shader.contains("fn material_footprint_lod"));
+        assert!(shader.contains("dpdx(local_position)"));
+        assert!(shader.contains("let material_lod = material_footprint_lod"));
+        assert!(shader.contains("MATERIAL_FOOTPRINT_LOD_BIAS: f32 = 1.25"));
+        assert!(!shader.contains("input.geometry_lod"));
     }
 
     #[test]

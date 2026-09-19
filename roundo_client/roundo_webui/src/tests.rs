@@ -1,6 +1,8 @@
 //! UI Registry、Lifecycle core 与平台 adapter 的公开 interface 回归测试。
 
 use super::*;
+#[cfg(target_os = "windows")]
+use crate::platform::resolve_pending_commands;
 use crate::platform::{
     claim_webview_creation_turn, data_sync_script, enqueue_webui_command, presentation_sync_order,
 };
@@ -337,6 +339,16 @@ fn initialization_script_installs_cross_definition_iframe_guard() {
     assert!(script.contains("roundo_bridge_ready"));
 }
 
+#[test]
+fn initialization_script_bounds_commands_activation_queue_and_subscriptions() {
+    let script = webui_initialization_script("owner.mod.main");
+    assert!(script.contains("MAX_IN_FLIGHT"));
+    assert!(script.contains("MAX_ACTIVATION_QUEUE"));
+    assert!(script.contains("MAX_SUBSCRIPTIONS"));
+    assert!(script.contains("postSubscription"));
+    assert!(script.contains("command_queue_full"));
+}
+
 #[cfg(target_os = "windows")]
 #[test]
 fn prefetch_prepares_only_the_initial_blank_webview() {
@@ -467,6 +479,63 @@ fn ipc_submits_the_inner_command_without_transport_fields() {
     assert_eq!(pending[0].request_id, 7);
     assert!(pending[0].call.is_some());
     assert!(pending[0].immediate.is_none());
+}
+
+#[cfg(target_os = "windows")]
+#[test]
+fn command_response_releases_pending_lock_before_webview_script_can_reenter_ipc() {
+    let pending = Arc::new(Mutex::new(Vec::new()));
+    enqueue_webui_command(
+        &None,
+        &pending,
+        None,
+        r#"{"request_id":7,"command":{"version":1,"command":"server.refresh","arguments":{}}}"#,
+    );
+    let reentrant_pending = Arc::clone(&pending);
+
+    assert!(resolve_pending_commands(
+        &pending,
+        move |request_id, command_name, result| {
+            assert_eq!(request_id, 7);
+            assert_eq!(command_name, "server.refresh");
+            assert_eq!(result["error"]["code"], "internal_command_error");
+            assert!(
+                reentrant_pending.try_lock().is_ok(),
+                "response evaluation may synchronously reenter IPC and must not retain the pending-command lock"
+            );
+        },
+    ));
+    assert!(pending.lock().unwrap().is_empty());
+}
+
+#[cfg(target_os = "windows")]
+#[test]
+fn disconnected_client_response_completes_webview_promise_with_typed_error() {
+    let pipe = RequestResponsePipe::<CommandTransport<UiCommandSource>, Value>::bounded(1);
+    let io = ContextualJsonRequestResponseIo::new(pipe.io());
+    let pending = Arc::new(Mutex::new(Vec::new()));
+    enqueue_webui_command(
+        &Some(io),
+        &pending,
+        None,
+        r#"{"request_id":9,"command":{"version":1,"command":"server.refresh","arguments":{}}}"#,
+    );
+    let (_, response) = pipe.try_receive().unwrap();
+    drop(response);
+
+    let mut resolved = None;
+    assert!(resolve_pending_commands(
+        &pending,
+        |request_id, command_name, result| {
+            resolved = Some((request_id, command_name.to_owned(), result));
+        },
+    ));
+    let (request_id, command_name, result) = resolved.unwrap();
+    assert_eq!(request_id, 9);
+    assert_eq!(command_name, "server.refresh");
+    assert_eq!(result["command"], "server.refresh");
+    assert_eq!(result["error"]["code"], "internal_command_error");
+    assert!(pending.lock().unwrap().is_empty());
 }
 
 #[test]
@@ -738,17 +807,64 @@ fn ignores_mods_without_webui_resources() {
 
 #[cfg(target_os = "windows")]
 #[test]
-fn webview_creation_waits_for_transactions_commands_and_a_safe_tick() {
-    let mut cooldown = false;
+fn webview_creation_waits_for_explicit_controller_and_script_transactions() {
+    let mut retirement_barrier = false;
 
-    assert!(!claim_webview_creation_turn(1, 0, false, &mut cooldown));
-    assert!(!claim_webview_creation_turn(0, 1, false, &mut cooldown));
-    assert!(!claim_webview_creation_turn(0, 0, true, &mut cooldown));
-    cooldown = true;
-    assert!(!claim_webview_creation_turn(0, 0, true, &mut cooldown));
-    assert!(cooldown, "pending commands must not consume the safe tick");
-    assert!(!claim_webview_creation_turn(0, 0, false, &mut cooldown));
-    assert!(claim_webview_creation_turn(0, 0, false, &mut cooldown));
+    assert!(!claim_webview_creation_turn(
+        1,
+        0,
+        false,
+        false,
+        &mut retirement_barrier
+    ));
+    assert!(!claim_webview_creation_turn(
+        0,
+        1,
+        false,
+        false,
+        &mut retirement_barrier
+    ));
+    assert!(!claim_webview_creation_turn(
+        0,
+        0,
+        true,
+        false,
+        &mut retirement_barrier
+    ));
+    assert!(!claim_webview_creation_turn(
+        0,
+        0,
+        false,
+        true,
+        &mut retirement_barrier
+    ));
+
+    retirement_barrier = true;
+    assert!(!claim_webview_creation_turn(
+        0,
+        0,
+        true,
+        false,
+        &mut retirement_barrier
+    ));
+    assert!(
+        retirement_barrier,
+        "command work must not consume the retirement barrier"
+    );
+    assert!(!claim_webview_creation_turn(
+        0,
+        0,
+        false,
+        false,
+        &mut retirement_barrier
+    ));
+    assert!(claim_webview_creation_turn(
+        0,
+        0,
+        false,
+        false,
+        &mut retirement_barrier
+    ));
 }
 
 fn vanilla_asset(path: &str) -> Option<String> {
@@ -809,7 +925,9 @@ fn server_selection_subscribes_to_client_owned_data_without_read_polling() {
         return;
     };
 
-    assert!(selection.contains("roundo.subscribe('client.servers', receiveServers)"));
+    assert!(
+        selection.contains("roundo.subscribe('client.servers', receiveServers);\nvoid refresh();")
+    );
     assert!(selection.contains("address: addressInput.value"));
     assert!(selection.contains("document.createElement('li')"));
     assert!(

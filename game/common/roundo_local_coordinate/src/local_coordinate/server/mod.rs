@@ -29,7 +29,9 @@ use bevy::prelude::{
     App, Commands, Component, GlobalTransform, IntoScheduleConfigs, Plugin, Query, Res, ResMut,
     Resource, Startup, SystemSet, Update,
 };
-use roundo_contracts::{ConnectionId, PlayerId, SceneId, SerializedPayload};
+use roundo_contracts::{
+    ChunkLoadingAnchorId, ConnectionId, PlayerId, RenderingAnchorState, SceneId, SerializedPayload,
+};
 use roundo_toolbox::{
     CrossbeamThreadPipe, CrossbeamThreadPipeEndpointA, CrossbeamThreadPipeEndpointB, UpdateVersion,
 };
@@ -41,10 +43,6 @@ const MAX_CHUNKS_GENERATED_PER_TICK: usize = 16;
 const MAX_CHUNK_GENERATION_JOBS_IN_FLIGHT: usize = 32;
 const MAX_CHUNKS_EVICTED_PER_TICK: usize = 32;
 const PHYSICS_CHUNK_RADIUS: f64 = 4.0;
-/// Distance beyond a Chunk boundary required before streaming changes its
-/// snapped observation Chunk. The symmetric dead band prevents boundary
-/// jitter from repeatedly replacing a large subscription frontier.
-const STREAMING_CHUNK_HYSTERESIS: f64 = CHUNK_EDGE_LENGTH as f64 * 0.125;
 const MAX_CHUNK_RESPONSES_PER_TICK_PER_CONNECTION: usize = 16;
 const MAX_DERIVED_SVO_RESULTS_PER_TICK: usize = 16;
 const MAX_DERIVED_SVO_JOBS_IN_FLIGHT: usize = 32;
@@ -64,36 +62,6 @@ pub enum LocalCoordinateServerSet {
 /// non-blocking and does not wait for command application or payload generation.
 pub type LocalCoordinateServerIpc =
     CrossbeamThreadPipeEndpointA<LocalCoordinateServerCommand, LocalCoordinateServerEvent>;
-
-/// Transport-independent observation facts consumed by Chunk streaming.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct LocalCoordinateObserver {
-    pub player_id: PlayerId,
-    pub scene_id: SceneId,
-    pub position: [f64; 3],
-}
-
-/// Stable input seam between a host's player/scene model and Chunk streaming.
-#[derive(Resource, Default)]
-pub struct LocalCoordinateObservationInput {
-    observers: Vec<LocalCoordinateObserver>,
-}
-
-impl LocalCoordinateObservationInput {
-    /// Replaces the complete observer snapshot while preserving input order.
-    ///
-    /// The streaming systems consume the new snapshot during a subsequent
-    /// [`Update`]. Duplicate player IDs are not rejected; when streaming builds
-    /// its player-keyed snapshot, the last matching observer wins.
-    pub fn replace(&mut self, observers: impl IntoIterator<Item = LocalCoordinateObserver>) {
-        self.observers.clear();
-        self.observers.extend(observers);
-    }
-
-    fn observers(&self) -> &[LocalCoordinateObserver] {
-        &self.observers
-    }
-}
 
 /// Installs generated coordinates, bounded worker pipelines, and streaming IPC.
 ///
@@ -211,6 +179,18 @@ pub enum LocalCoordinateServerCommand {
 /// Connection-addressed lifecycle, version, and payload output.
 #[derive(Clone, Debug)]
 pub enum LocalCoordinateServerEvent {
+    RenderingAnchorSpawned {
+        connection_id: ConnectionId,
+        anchor: RenderingAnchorState,
+    },
+    RenderingAnchorUpdated {
+        connection_id: ConnectionId,
+        anchor: RenderingAnchorState,
+    },
+    RenderingAnchorDespawned {
+        connection_id: ConnectionId,
+        anchor_id: ChunkLoadingAnchorId,
+    },
     Spawned {
         connection_id: ConnectionId,
         local_coordinate_id: LocalCoordinateId,
@@ -246,10 +226,9 @@ pub struct LocalCoordinateServerWorld {
     generation_jobs: HashSet<ChunkId>,
     generation_worker: ChunkGenerationWorker,
     chunk_versions: HashMap<ChunkId, UpdateVersion>,
-    observation_by_player: HashMap<PlayerId, ObservationRegion>,
-    /// Last committed world-space streaming Chunk for each observed player.
-    observer_streaming_chunks: HashMap<PlayerId, ChunkCoordinate>,
+    observation_by_anchor: HashMap<ChunkLoadingAnchorId, ObservationRegion>,
     subscriptions: HashMap<ConnectionId, PlayerSubscription>,
+    next_anchor_id: u64,
     requested_view_distances: HashMap<ConnectionId, u16>,
     derived_svo_jobs: HashMap<(ConnectionId, ChunkId), UpdateVersion>,
     derived_svo: DerivedSvoWorker,
@@ -263,9 +242,9 @@ impl Default for LocalCoordinateServerWorld {
             generation_jobs: HashSet::new(),
             generation_worker: ChunkGenerationWorker::spawn(),
             chunk_versions: HashMap::new(),
-            observation_by_player: HashMap::new(),
-            observer_streaming_chunks: HashMap::new(),
+            observation_by_anchor: HashMap::new(),
             subscriptions: HashMap::new(),
+            next_anchor_id: 1,
             requested_view_distances: HashMap::new(),
             derived_svo_jobs: HashMap::new(),
             derived_svo: DerivedSvoWorker::spawn("roundo-server-derived-svo"),

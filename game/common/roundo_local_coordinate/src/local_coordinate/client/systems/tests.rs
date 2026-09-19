@@ -20,6 +20,51 @@ fn add_ingest_systems(app: &mut App) {
     );
 }
 
+#[test]
+fn rendering_anchors_are_server_projected_and_removed_by_identity() {
+    let transport = CrossbeamThreadPipe::new();
+    let server_projection = transport.endpoint_a();
+    let mut app = App::new();
+    app.init_resource::<LocalCoordinateClientWorld>()
+        .init_resource::<ClientChunkViewDistance>()
+        .insert_resource(LocalCoordinateClientPipe(transport.endpoint_b()))
+        .add_systems(Update, ingest_commands);
+    let anchor = RenderingAnchorState {
+        id: ChunkLoadingAnchorId(7),
+        owner: roundo_contracts::PlayerId(3),
+        scene_id: roundo_contracts::SceneId::S1,
+        position: [0.0; 3],
+        radius_chunks: 64,
+    };
+
+    server_projection
+        .try_send(LocalCoordinateClientCommand::RenderingAnchorSpawned(anchor))
+        .unwrap();
+    app.update();
+    assert_eq!(
+        app.world()
+            .resource::<LocalCoordinateClientWorld>()
+            .rendering_anchors()
+            .copied()
+            .collect::<Vec<_>>(),
+        vec![anchor]
+    );
+
+    server_projection
+        .try_send(LocalCoordinateClientCommand::RenderingAnchorDespawned(
+            anchor.id,
+        ))
+        .unwrap();
+    app.update();
+    assert_eq!(
+        app.world()
+            .resource::<LocalCoordinateClientWorld>()
+            .rendering_anchors()
+            .count(),
+        0
+    );
+}
+
 fn wait_for_cached_chunk(app: &mut App) {
     for _ in 0..100 {
         app.update();

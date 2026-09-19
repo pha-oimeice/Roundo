@@ -23,7 +23,7 @@ struct VertexOutput {
     @location(0) local_position: vec3<f32>,
     @location(1) world_normal: vec3<f32>,
     @location(2) @interpolate(flat) face: u32,
-    @location(3) @interpolate(flat) lod: u32,
+    @location(3) @interpolate(flat) geometry_lod: u32,
     @location(4) @interpolate(flat) chunk_coordinate: vec3<i32>,
     @location(5) @interpolate(flat) material_seed: u32,
 }
@@ -88,7 +88,7 @@ fn vertex(
     output.local_position = local_position;
     output.world_normal = world_normal;
     output.face = face;
-    output.lod = lod;
+    output.geometry_lod = lod;
     output.chunk_coordinate = chunk.chunk_coordinate.xyz;
     output.material_seed = chunk.metadata.y;
     return output;

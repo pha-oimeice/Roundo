@@ -15,7 +15,6 @@ impl Plugin for LocalCoordinateServerPlugin {
                 self.generated_coordinates.clone(),
             ))
             .init_resource::<LocalCoordinateServerWorld>()
-            .init_resource::<LocalCoordinateObservationInput>()
             .insert_resource(LocalCoordinateServerPipe(self.pipe.endpoint_b()))
             .configure_sets(
                 Update,
@@ -61,8 +60,7 @@ struct LocalCoordinateServerPipe(
 
 /// Per-connection view and the exact state last advertised to that connection.
 pub(super) struct PlayerSubscription {
-    player_id: PlayerId,
-    view_distance_chunks: u16,
+    anchor: RenderingAnchorState,
     spawned_coordinates: HashSet<LocalCoordinateId>,
     advertised_chunks: HashMap<ChunkId, UpdateVersion>,
     pending_requests: VecDeque<ChunkId>,
@@ -81,12 +79,12 @@ pub(super) struct ObservationRegion {
 
 /// Incremental generation/eviction plan for one procedural coordinate.
 ///
-/// `signature` suppresses replanning while snapped observer chunks and radii are
+/// `signature` suppresses replanning while exact anchor positions and radii are
 /// unchanged. Pending work is nearest-first at plan creation; later queue order
 /// is retained until the signature changes.
 #[derive(Default)]
 pub(super) struct GenerationPlan {
-    signature: Vec<([i64; 3], u16)>,
+    signature: Vec<([u64; 3], u16)>,
     desired: HashSet<ChunkCoordinate>,
     pending: VecDeque<ChunkCoordinate>,
     evicting: VecDeque<ChunkCoordinate>,
@@ -111,7 +109,6 @@ fn spawn_generated_local_coordinates(
 // Reconciles commands and observations, then admits bounded nearest-first PCG work.
 fn prepare_player_chunks(
     pipe: Res<LocalCoordinateServerPipe>,
-    observation_input: Res<LocalCoordinateObservationInput>,
     mut world: ResMut<LocalCoordinateServerWorld>,
     mut physics_interests: ResMut<LocalCoordinatePhysicsInterests>,
     mut local_coordinates: Query<(&PcgLocalCoordinate, &GlobalTransform, &mut LocalCoordinate)>,
@@ -122,25 +119,62 @@ fn prepare_player_chunks(
                 connection_id,
                 player_id,
             } => {
-                let requested_distance = world.requested_view_distances.get(&connection_id);
-                let view_distance_chunks = requested_distance
+                let radius_chunks = world
+                    .requested_view_distances
+                    .get(&connection_id)
                     .copied()
                     .unwrap_or(DEFAULT_CHUNK_VIEW_DISTANCE);
+                let anchor = RenderingAnchorState {
+                    id: ChunkLoadingAnchorId(world.next_anchor_id),
+                    owner: player_id,
+                    scene_id: SceneId::S1,
+                    position: [0.0; 3],
+                    radius_chunks,
+                };
+                world.next_anchor_id = world.next_anchor_id.saturating_add(1);
                 world.subscriptions.insert(
                     connection_id,
                     PlayerSubscription {
-                        player_id,
-                        view_distance_chunks,
+                        anchor,
                         spawned_coordinates: HashSet::new(),
                         advertised_chunks: HashMap::new(),
                         pending_requests: VecDeque::new(),
                     },
                 );
+                if pipe
+                    .0
+                    .try_send(LocalCoordinateServerEvent::RenderingAnchorSpawned {
+                        connection_id,
+                        anchor,
+                    })
+                    .is_err()
+                {
+                    log::error!(
+                        "cannot publish rendering anchor spawn: connection_id={}, anchor_id={}, reason=server_bridge_closed",
+                        connection_id.0,
+                        anchor.id.0
+                    );
+                }
             }
             LocalCoordinateServerCommand::UnsubscribePlayer { connection_id } => {
                 let removed_subscription = world.subscriptions.remove(&connection_id);
                 let removed_distance = world.requested_view_distances.remove(&connection_id);
-                if removed_subscription.is_none() {
+                if let Some(subscription) = removed_subscription {
+                    if pipe
+                        .0
+                        .try_send(LocalCoordinateServerEvent::RenderingAnchorDespawned {
+                            connection_id,
+                            anchor_id: subscription.anchor.id,
+                        })
+                        .is_err()
+                    {
+                        log::error!(
+                            "cannot publish rendering anchor despawn: connection_id={}, anchor_id={}, reason=server_bridge_closed",
+                            connection_id.0,
+                            subscription.anchor.id.0
+                        );
+                    }
+                } else {
                     log::debug!(
                         "ignored unsubscribe for unknown Local Coordinate subscription: connection_id={}, had_view_distance={}",
                         connection_id.0,
@@ -167,51 +201,43 @@ fn prepare_player_chunks(
                 let chunks = chunks.clamp(MIN_CHUNK_VIEW_DISTANCE, MAX_CHUNK_VIEW_DISTANCE);
                 world.requested_view_distances.insert(connection_id, chunks);
                 if let Some(subscription) = world.subscriptions.get_mut(&connection_id) {
-                    subscription.view_distance_chunks = chunks;
+                    subscription.anchor.radius_chunks = chunks;
+                    let anchor = subscription.anchor;
+                    if pipe
+                        .0
+                        .try_send(LocalCoordinateServerEvent::RenderingAnchorUpdated {
+                            connection_id,
+                            anchor,
+                        })
+                        .is_err()
+                    {
+                        log::error!(
+                            "cannot publish rendering anchor update: connection_id={}, anchor_id={}, reason=server_bridge_closed",
+                            connection_id.0,
+                            anchor.id.0
+                        );
+                    }
                 }
             }
         }
     }
 
-    let subscribed_players = world.subscriptions.values().fold(
-        HashMap::<PlayerId, u16>::new(),
-        |mut players, subscription| {
-            players
-                .entry(subscription.player_id)
-                .and_modify(|distance| {
-                    *distance = (*distance).max(subscription.view_distance_chunks)
-                })
-                .or_insert(subscription.view_distance_chunks);
-            players
-        },
-    );
-    world.observation_by_player.clear();
-    let mut observed_players = HashSet::new();
-    for observer in observation_input.observers() {
-        if let Some(&view_distance_chunks) = subscribed_players.get(&observer.player_id) {
-            observed_players.insert(observer.player_id);
-            let previous = world
-                .observer_streaming_chunks
-                .get(&observer.player_id)
-                .copied();
-            let streaming_chunk = stabilized_streaming_chunk(observer.position, previous);
-            world
-                .observer_streaming_chunks
-                .insert(observer.player_id, streaming_chunk);
-            world.observation_by_player.insert(
-                observer.player_id,
+    world.observation_by_anchor = world
+        .subscriptions
+        .values()
+        .map(|subscription| {
+            let anchor = subscription.anchor;
+            (
+                anchor.id,
                 ObservationRegion {
-                    center: observer.position,
-                    streaming_center: chunk_center(streaming_chunk),
-                    radius: f64::from(view_distance_chunks) * CHUNK_EDGE_LENGTH as f64,
-                    scene_id: observer.scene_id,
+                    center: anchor.position,
+                    streaming_center: anchor.position,
+                    radius: f64::from(anchor.radius_chunks) * CHUNK_EDGE_LENGTH as f64,
+                    scene_id: anchor.scene_id,
                 },
-            );
-        }
-    }
-    world
-        .observer_streaming_chunks
-        .retain(|player_id, _| observed_players.contains(player_id));
+            )
+        })
+        .collect();
 
     let mut active_coordinates = HashSet::new();
     let mut desired_physics = HashMap::new();
@@ -222,7 +248,7 @@ fn prepare_player_chunks(
     for (generated, coordinate_transform, mut local_coordinate) in &mut local_coordinates {
         active_coordinates.insert(generated.id);
         let observations = world
-            .observation_by_player
+            .observation_by_anchor
             .values()
             .filter(|observation| observation.scene_id == generated.scene_id)
             .filter_map(|observation| local_observation_region(coordinate_transform, *observation))
@@ -245,9 +271,7 @@ fn prepare_player_chunks(
             .iter()
             .map(|observation| {
                 (
-                    observation
-                        .streaming_center
-                        .map(|axis| (axis / CHUNK_EDGE_LENGTH as f64).floor() as i64),
+                    observation.streaming_center.map(f64::to_bits),
                     (observation.radius / CHUNK_EDGE_LENGTH as f64).round() as u16,
                 )
             })
@@ -266,9 +290,8 @@ fn prepare_player_chunks(
             let snapped_observations = signature
                 .iter()
                 .map(|(center, distance)| ObservationRegion {
-                    center: center.map(|axis| (axis as f64 + 0.5) * CHUNK_EDGE_LENGTH as f64),
-                    streaming_center: center
-                        .map(|axis| (axis as f64 + 0.5) * CHUNK_EDGE_LENGTH as f64),
+                    center: center.map(f64::from_bits),
+                    streaming_center: center.map(f64::from_bits),
                     radius: f64::from(*distance) * CHUNK_EDGE_LENGTH as f64,
                     scene_id: generated.scene_id,
                 })
@@ -510,15 +533,15 @@ fn publish_subscription_changes(
     let subscription_ids = world.subscriptions.keys().copied().collect::<Vec<_>>();
 
     for connection_id in subscription_ids {
-        let (player_id, spawned_coordinates, advertised_chunks) = {
+        let (anchor_id, spawned_coordinates, advertised_chunks) = {
             let subscription = &world.subscriptions[&connection_id];
             (
-                subscription.player_id,
+                subscription.anchor.id,
                 subscription.spawned_coordinates.clone(),
                 subscription.advertised_chunks.clone(),
             )
         };
-        let observation = world.observation_by_player.get(&player_id).copied();
+        let observation = world.observation_by_anchor.get(&anchor_id).copied();
         let desired_chunks = observation.map_or_else(HashMap::new, |observation| {
             virtual_chunks
                 .chunks_in_radius(
@@ -631,6 +654,20 @@ fn update_subscription_snapshot(
     subscription
         .pending_requests
         .retain(|chunk| desired_chunks.contains_key(chunk));
+    // Rendering anchors push complete SVO payloads proactively. Version events
+    // remain useful for cache hits and backward-compatible request deduplication,
+    // but payload delivery does not wait for a client request round trip.
+    let mut changed = desired_chunks
+        .iter()
+        .filter(|(chunk, version)| subscription.advertised_chunks.get(*chunk) != Some(*version))
+        .map(|(chunk, _)| *chunk)
+        .collect::<Vec<_>>();
+    changed.sort_unstable_by_key(|chunk| (chunk.local_coordinate_id.0, chunk.coordinate));
+    for chunk in changed {
+        if !subscription.pending_requests.contains(&chunk) {
+            subscription.pending_requests.push_back(chunk);
+        }
+    }
     subscription.advertised_chunks = desired_chunks;
 }
 
@@ -885,35 +922,8 @@ fn nearest_chunk_distance_squared(
         .unwrap_or(f64::INFINITY)
 }
 
-/// Applies a Schmitt-trigger dead band around the previously committed Chunk.
-///
-/// Crossing one boundary does not commit the adjacent Chunk until the observer
-/// is `STREAMING_CHUNK_HYSTERESIS` units inside it. Large teleports still select
-/// the destination directly, and Euclidean floor semantics cover negatives.
-fn stabilized_streaming_chunk(
-    position: [f64; 3],
-    previous: Option<ChunkCoordinate>,
-) -> ChunkCoordinate {
-    let edge = CHUNK_EDGE_LENGTH as f64;
-    std::array::from_fn(|axis| {
-        let value = position[axis];
-        let Some(previous) = previous.map(|chunk| chunk[axis]) else {
-            return (value / edge).floor() as i64;
-        };
-        let minimum = previous as f64 * edge;
-        let maximum = minimum + edge;
-        if value < minimum - STREAMING_CHUNK_HYSTERESIS {
-            ((value + STREAMING_CHUNK_HYSTERESIS) / edge).floor() as i64
-        } else if value >= maximum + STREAMING_CHUNK_HYSTERESIS {
-            ((value - STREAMING_CHUNK_HYSTERESIS) / edge).floor() as i64
-        } else {
-            previous
-        }
-    })
-}
-
-fn chunk_center(chunk: ChunkCoordinate) -> [f64; 3] {
-    chunk.map(|axis| (axis as f64 + 0.5) * CHUNK_EDGE_LENGTH as f64)
+fn absolute_chunk_coordinate(position: [f64; 3]) -> ChunkCoordinate {
+    position.map(|axis| (axis / CHUNK_EDGE_LENGTH as f64).floor() as i64)
 }
 
 fn distance_to_interval(value: f64, minimum: f64, maximum: f64) -> f64 {

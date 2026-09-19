@@ -41,10 +41,9 @@ pub use data::{
 };
 pub use raycast::{VoxelRaycastHit, VoxelRaycaster};
 pub use server::{
-    DEFAULT_PCG_LOCAL_COORDINATE_ID, LocalCoordinateObservationInput, LocalCoordinateObserver,
-    LocalCoordinateServerCommand, LocalCoordinateServerEvent, LocalCoordinateServerIpc,
-    LocalCoordinateServerPlugin, LocalCoordinateServerSet, LocalCoordinateServerWorld,
-    PcgLocalCoordinate,
+    DEFAULT_PCG_LOCAL_COORDINATE_ID, LocalCoordinateServerCommand, LocalCoordinateServerEvent,
+    LocalCoordinateServerIpc, LocalCoordinateServerPlugin, LocalCoordinateServerSet,
+    LocalCoordinateServerWorld, PcgLocalCoordinate,
 };
 pub use transform::LocalCoordinateTransform;
 pub use virtual_chunk::{

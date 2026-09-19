@@ -20,7 +20,7 @@ use bevy::prelude::{
     App, Commands, DetectChanges, Entity, IntoScheduleConfigs, Plugin, Query, Res, ResMut,
     Resource, Update,
 };
-use roundo_contracts::SerializedPayload;
+use roundo_contracts::{ChunkLoadingAnchorId, RenderingAnchorState, SerializedPayload};
 use roundo_toolbox::{
     CrossbeamThreadPipe, CrossbeamThreadPipeEndpointA, CrossbeamThreadPipeEndpointB, UpdateVersion,
 };
@@ -92,6 +92,9 @@ impl Default for LocalCoordinateClientPlugin {
 /// Authoritative lifecycle and chunk updates consumed by the client.
 pub enum LocalCoordinateClientCommand {
     BeginSession,
+    RenderingAnchorSpawned(RenderingAnchorState),
+    RenderingAnchorUpdated(RenderingAnchorState),
+    RenderingAnchorDespawned(ChunkLoadingAnchorId),
     ResetRequests,
     Spawn(LocalCoordinateId),
     Despawn(LocalCoordinateId),
@@ -117,6 +120,7 @@ pub enum LocalCoordinateClientEvent {
 /// Runtime indexes connecting server chunk versions to local ECS entities.
 pub struct LocalCoordinateClientWorld {
     coordinates: HashMap<LocalCoordinateId, Entity>,
+    rendering_anchors: HashMap<ChunkLoadingAnchorId, RenderingAnchorState>,
     cached_chunks: HashMap<ChunkId, CachedClientChunk>,
     active_server_versions: HashMap<ChunkId, UpdateVersion>,
     requested_server_versions: HashMap<ChunkId, UpdateVersion>,
@@ -128,6 +132,7 @@ impl Default for LocalCoordinateClientWorld {
     fn default() -> Self {
         Self {
             coordinates: HashMap::new(),
+            rendering_anchors: HashMap::new(),
             cached_chunks: HashMap::new(),
             active_server_versions: HashMap::new(),
             requested_server_versions: HashMap::new(),
@@ -138,6 +143,11 @@ impl Default for LocalCoordinateClientWorld {
 }
 
 impl LocalCoordinateClientWorld {
+    /// Returns the server-authoritative read-only rendering anchors.
+    pub fn rendering_anchors(&self) -> impl Iterator<Item = &RenderingAnchorState> {
+        self.rendering_anchors.values()
+    }
+
     /// Resolves a coordinate identity to its live ECS entity.
     pub fn entity(&self, local_coordinate_id: LocalCoordinateId) -> Option<Entity> {
         return self.coordinates.get(&local_coordinate_id).copied();

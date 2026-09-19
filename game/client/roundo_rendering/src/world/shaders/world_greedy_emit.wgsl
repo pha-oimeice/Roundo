@@ -180,7 +180,7 @@ fn reset_geometry(@builtin(global_invocation_id) invocation: vec3<u32>) {
     let descriptor = descriptors[slot];
     if (descriptor.metadata.x == 0u || descriptor.svo.w == 0u || descriptor.svo.z != build_pass.svo_segment) { return; }
     for (var lod = 0u; lod < 5u; lod += 1u) {
-        if (descriptor.draws[lod].z == build_pass.geometry_segment) {
+        if (descriptor.draws[lod].w != 0u && descriptor.draws[lod].z == build_pass.geometry_segment) {
             atomicStore(&quad_counts[slot * 5u + lod], 0u);
             descriptors[slot].draws[lod].x = 0u;
         }
@@ -199,7 +199,7 @@ fn mesh_chunks(@builtin(workgroup_id) workgroup: vec3<u32>) {
     let plane = within_chunk % 96u;
     let descriptor = descriptors[slot];
     if (descriptor.metadata.x == 0u || descriptor.svo.w == 0u || descriptor.svo.z != build_pass.svo_segment) { return; }
-    if (descriptor.draws[self_lod].z != build_pass.geometry_segment) { return; }
+    if (descriptor.draws[self_lod].w == 0u || descriptor.draws[self_lod].z != build_pass.geometry_segment) { return; }
 
     let self_plane_size = face_plane_size(plane / 16u, grid_size(self_lod));
     let face = plane / 16u;
@@ -247,7 +247,9 @@ fn finalize_builds(@builtin(global_invocation_id) invocation: vec3<u32>) {
     if (slot == 0xffffffffu) { return; }
     if (descriptors[slot].metadata.x != 0u && descriptors[slot].svo.z == build_pass.svo_segment) {
         for (var lod = 0u; lod < 5u; lod += 1u) {
-            descriptors[slot].draws[lod].x = atomicLoad(&quad_counts[slot * 5u + lod]) * 6u;
+            if (descriptors[slot].draws[lod].w != 0u) {
+                descriptors[slot].draws[lod].x = atomicLoad(&quad_counts[slot * 5u + lod]) * 6u;
+            }
         }
         descriptors[slot].svo.w = 0u;
     }

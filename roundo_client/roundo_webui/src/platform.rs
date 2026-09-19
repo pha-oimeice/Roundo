@@ -6,7 +6,7 @@
 use crate::registry::{MAX_PREPARED_COMMANDS, MAX_PREPARED_UI_CANDIDATES};
 use crate::*;
 use roundo_toolbox::request_response_pipe::{
-    ContextualJsonRequestResponseIo, JsonSubmitError, RequestCall, ResponseSender,
+    ContextualJsonRequestResponseIo, JsonSubmitError, RequestCall, ResponsePoll, ResponseSender,
 };
 use serde_json::{Value, json};
 use std::{
@@ -34,6 +34,7 @@ struct WebViewOverlay {
     webview: wry::WebView,
     pending: Arc<Mutex<Vec<PendingCommand>>>,
     subscriptions: Arc<Mutex<BTreeSet<String>>>,
+    script_transactions: Arc<std::sync::atomic::AtomicUsize>,
     load_state: Arc<Mutex<StagedLoadState>>,
     last_visible: bool,
     last_focused: bool,
@@ -147,6 +148,7 @@ struct StagedWebView {
     target_url: Option<String>,
     pending_commands: Arc<Mutex<Vec<PendingCommand>>>,
     subscriptions: Arc<Mutex<BTreeSet<String>>>,
+    script_transactions: Arc<std::sync::atomic::AtomicUsize>,
     command_gate: Arc<Mutex<StagedCommandGate>>,
     command_io: Option<ContextualJsonRequestResponseIo<UiCommandSource, Value>>,
     command_source: UiInstanceId,
@@ -161,6 +163,27 @@ struct DeferredOpenResponse {
     success: Value,
 }
 
+#[cfg(target_os = "windows")]
+fn evaluate_script_transaction(
+    webview: &wry::WebView,
+    transactions: &Arc<std::sync::atomic::AtomicUsize>,
+    script: &str,
+) -> wry::Result<()> {
+    use std::sync::atomic::Ordering;
+
+    transactions.fetch_add(1, Ordering::AcqRel);
+    let completed = Arc::clone(transactions);
+    match webview.evaluate_script_with_callback(script, move |_| {
+        completed.fetch_sub(1, Ordering::AcqRel);
+    }) {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            transactions.fetch_sub(1, Ordering::AcqRel);
+            Err(error)
+        }
+    }
+}
+
 pub struct UiNavigationExecutor {
     last_open_pending: Option<UiInstanceId>,
     load_timeout: Duration,
@@ -173,6 +196,10 @@ pub struct UiNavigationExecutor {
     /// sources in the lifecycle model.
     #[cfg(target_os = "windows")]
     retiring: BTreeMap<UiInstanceId, WebViewOverlay>,
+    /// Logically destroyed overlays retained until their final lifecycle script
+    /// transaction reports native completion.
+    #[cfg(target_os = "windows")]
+    destroying: BTreeMap<UiInstanceId, WebViewOverlay>,
     #[cfg(target_os = "windows")]
     staged: BTreeMap<u64, StagedWebView>,
     /// Graph-prefetched physical WebViews whose Mod documents are not loaded.
@@ -180,14 +207,13 @@ pub struct UiNavigationExecutor {
     #[cfg(target_os = "windows")]
     prepared: BTreeMap<u64, StagedWebView>,
     /// Superseded staged WebViews are moved here instead of dropped while a
-    /// WebView2 navigation callback may still be on the Win32 stack. Physical
-    /// controller creation also observes one creation-free update after COM
-    /// teardown or command-response script evaluation, so those operations
-    /// cannot share an active WebView2 callback turn.
+    /// WebView2 navigation callback may still be on the Win32 stack. Script
+    /// transactions are tracked per physical WebView until their native
+    /// completion callback, independently of how quickly callers submit work.
     #[cfg(target_os = "windows")]
     superseded_staged: BTreeMap<u64, StagedWebView>,
     #[cfg(target_os = "windows")]
-    webview_creation_cooldown: bool,
+    controller_retirement_barrier: bool,
     #[cfg(target_os = "windows")]
     deferred_open_responses: BTreeMap<u64, DeferredOpenResponse>,
     #[cfg(target_os = "windows")]
@@ -208,13 +234,15 @@ impl Default for UiNavigationExecutor {
             #[cfg(target_os = "windows")]
             retiring: BTreeMap::new(),
             #[cfg(target_os = "windows")]
+            destroying: BTreeMap::new(),
+            #[cfg(target_os = "windows")]
             staged: BTreeMap::new(),
             #[cfg(target_os = "windows")]
             prepared: BTreeMap::new(),
             #[cfg(target_os = "windows")]
             superseded_staged: BTreeMap::new(),
             #[cfg(target_os = "windows")]
-            webview_creation_cooldown: false,
+            controller_retirement_barrier: false,
             #[cfg(target_os = "windows")]
             deferred_open_responses: BTreeMap::new(),
             #[cfg(target_os = "windows")]
@@ -270,16 +298,17 @@ impl UiNavigationExecutor {
                     .unwrap_or_else(|poisoned| poisoned.into_inner())
                     .contains(resource);
                 if subscribed {
-                    match overlay.webview.evaluate_script(&script) {
+                    match evaluate_script_transaction(
+                        &overlay.webview,
+                        &overlay.script_transactions,
+                        &script,
+                    ) {
                         Ok(()) => delivered += 1,
                         Err(error) => log::error!(
                             "cannot synchronize Client Data resource `{resource}`: {error}"
                         ),
                     }
                 }
-            }
-            if delivered != 0 {
-                self.webview_creation_cooldown = true;
             }
             return delivered;
         }
@@ -316,14 +345,19 @@ impl UiNavigationExecutor {
         if !replacement_visible || self.retiring.is_empty() {
             return false;
         }
-        for (id, overlay) in &self.retiring {
+        for (id, overlay) in std::mem::take(&mut self.retiring) {
             log::info!(
                 "Destroying retained Web UI instance {} after presentation handoff",
                 id.value()
             );
-            dispatch_lifecycle_event(&overlay.webview, "roundo:destroying", "destroying");
+            dispatch_lifecycle_event(
+                &overlay.webview,
+                &overlay.script_transactions,
+                "roundo:destroying",
+                "destroying",
+            );
+            self.destroying.insert(id, overlay);
         }
-        self.retiring.clear();
         true
     }
 
@@ -503,8 +537,13 @@ impl UiNavigationExecutor {
             }
             for id in &destroyed {
                 if let Some(overlay) = self.committed.remove(id) {
-                    dispatch_lifecycle_event(&overlay.webview, "roundo:destroying", "destroying");
-                    drop(overlay);
+                    dispatch_lifecycle_event(
+                        &overlay.webview,
+                        &overlay.script_transactions,
+                        "roundo:destroying",
+                        "destroying",
+                    );
+                    self.destroying.insert(*id, overlay);
                 }
             }
         }
@@ -580,7 +619,13 @@ impl UiNavigationExecutor {
             self.recovery = None;
             for id in destroyed {
                 if let Some(overlay) = self.committed.remove(id) {
-                    dispatch_lifecycle_event(&overlay.webview, "roundo:destroying", "destroying");
+                    dispatch_lifecycle_event(
+                        &overlay.webview,
+                        &overlay.script_transactions,
+                        "roundo:destroying",
+                        "destroying",
+                    );
+                    self.destroying.insert(*id, overlay);
                 }
             }
         }
@@ -604,15 +649,20 @@ pub(crate) struct PendingCommand {
 
 #[cfg(target_os = "windows")]
 pub(crate) fn claim_webview_creation_turn(
-    active_transactions: usize,
-    retiring_transactions: usize,
+    active_controller_transactions: usize,
+    retiring_controller_transactions: usize,
     commands_pending: bool,
-    cooldown: &mut bool,
+    scripts_pending: bool,
+    retirement_barrier: &mut bool,
 ) -> bool {
-    if active_transactions != 0 || retiring_transactions != 0 || commands_pending {
+    if active_controller_transactions != 0
+        || retiring_controller_transactions != 0
+        || commands_pending
+        || scripts_pending
+    {
         return false;
     }
-    if std::mem::take(cooldown) {
+    if std::mem::take(retirement_barrier) {
         return false;
     }
     true
@@ -620,22 +670,36 @@ pub(crate) fn claim_webview_creation_turn(
 
 #[cfg(target_os = "windows")]
 pub(crate) fn retire_superseded_staged_webviews(world: &mut bevy::prelude::World) {
-    let retired = {
+    let retired_staged = {
         let mut executor = world.non_send_mut::<UiNavigationExecutor>();
-        if executor.superseded_staged.is_empty() {
-            return;
-        }
-        let retired = executor
+        let retired_staged = executor
             .superseded_staged
             .keys()
             .copied()
             .collect::<Vec<_>>();
+        let completed_destructions = executor
+            .destroying
+            .iter()
+            .filter_map(|(id, overlay)| {
+                (overlay
+                    .script_transactions
+                    .load(std::sync::atomic::Ordering::Acquire)
+                    == 0)
+                    .then_some(*id)
+            })
+            .collect::<Vec<_>>();
+        if retired_staged.is_empty() && completed_destructions.is_empty() {
+            return;
+        }
         executor.superseded_staged.clear();
-        executor.webview_creation_cooldown = true;
-        retired
+        for id in completed_destructions {
+            executor.destroying.remove(&id);
+        }
+        executor.controller_retirement_barrier = true;
+        retired_staged
     };
     let mut executor = world.non_send_mut::<UiNavigationExecutor>();
-    for id in retired {
+    for id in retired_staged {
         executor.resolve_open_response(
             id,
             Some(("stale_ui_instance", "UI root was replaced".into())),
@@ -712,7 +776,7 @@ pub(crate) fn stage_pending_webview(world: &mut bevy::prelude::World) {
     let may_create = {
         let mut executor = world.non_send_mut::<UiNavigationExecutor>();
         let active = executor.staged.len();
-        let retiring = executor.superseded_staged.len();
+        let retiring = executor.superseded_staged.len() + executor.destroying.len();
         let commands_pending = executor.committed.values().any(|overlay| {
             !overlay
                 .pending
@@ -720,8 +784,24 @@ pub(crate) fn stage_pending_webview(world: &mut bevy::prelude::World) {
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .is_empty()
         });
-        let cooldown = &mut executor.webview_creation_cooldown;
-        claim_webview_creation_turn(active, retiring, commands_pending, cooldown)
+        let scripts_pending = executor
+            .committed
+            .values()
+            .chain(executor.retiring.values())
+            .any(|overlay| {
+                overlay
+                    .script_transactions
+                    .load(std::sync::atomic::Ordering::Acquire)
+                    != 0
+            });
+        let retirement_barrier = &mut executor.controller_retirement_barrier;
+        claim_webview_creation_turn(
+            active,
+            retiring,
+            commands_pending,
+            scripts_pending,
+            retirement_barrier,
+        )
     };
     if !may_create {
         return;
@@ -770,6 +850,7 @@ pub(crate) fn stage_pending_webview(world: &mut bevy::prelude::World) {
     let pending_commands = Arc::new(Mutex::new(Vec::new()));
     let ipc_pending_commands = Arc::clone(&pending_commands);
     let subscriptions = Arc::new(Mutex::new(BTreeSet::new()));
+    let script_transactions = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let ipc_subscriptions = Arc::clone(&subscriptions);
     let subscription_generation = Arc::clone(
         &world
@@ -1030,6 +1111,7 @@ pub(crate) fn stage_pending_webview(world: &mut bevy::prelude::World) {
                     target_url: Some(url),
                     pending_commands,
                     subscriptions,
+                    script_transactions,
                     command_gate,
                     command_io: staged_command_io,
                     command_source,
@@ -1236,7 +1318,7 @@ pub(crate) fn advance_staged_webviews(world: &mut bevy::prelude::World) {
                                 &body,
                             );
                         }
-                        activate_webui_bridge(&staged.webview);
+                        activate_webui_bridge(&staged.webview, &staged.script_transactions);
                         let still_pending = world
                             .resource::<UiLifecycleManager>()
                             .pending_descriptors()
@@ -1287,6 +1369,7 @@ pub(crate) fn advance_staged_webviews(world: &mut bevy::prelude::World) {
                                 webview: staged.webview,
                                 pending: staged.pending_commands,
                                 subscriptions: staged.subscriptions,
+                                script_transactions: staged.script_transactions,
                                 load_state: staged.load_state,
                                 last_visible: false,
                                 last_focused: false,
@@ -1568,14 +1651,19 @@ pub(crate) fn sync_committed_navigation(
         }
         let overlay = executor.committed.get(&id);
         if let Some(overlay) = overlay {
-            activate_webui_bridge(&overlay.webview);
+            activate_webui_bridge(&overlay.webview, &overlay.script_transactions);
         }
     }
 }
 
 #[cfg(target_os = "windows")]
-fn activate_webui_bridge(webview: &wry::WebView) {
-    if let Err(error) = webview.evaluate_script("window.__roundoActivate();") {
+fn activate_webui_bridge(
+    webview: &wry::WebView,
+    transactions: &Arc<std::sync::atomic::AtomicUsize>,
+) {
+    if let Err(error) =
+        evaluate_script_transaction(webview, transactions, "window.__roundoActivate();")
+    {
         log::error!("cannot activate committed Web UI bridge: {error}");
     }
 }
@@ -1678,6 +1766,7 @@ pub(crate) fn apply_windows_input_mode(
                 );
                 dispatch_lifecycle_event(
                     &overlay.webview,
+                    &overlay.script_transactions,
                     "roundo:visibility",
                     if instance.visible {
                         "visible"
@@ -1700,6 +1789,7 @@ pub(crate) fn apply_windows_input_mode(
         if overlay.last_focused != is_focused {
             dispatch_lifecycle_event(
                 &overlay.webview,
+                &overlay.script_transactions,
                 "roundo:focus",
                 if is_focused { "focused" } else { "blurred" },
             );
@@ -1753,12 +1843,17 @@ fn invalidate_webview_parent(webview: &wry::WebView) {
 }
 
 #[cfg(target_os = "windows")]
-fn dispatch_lifecycle_event(webview: &wry::WebView, name: &str, state: &str) {
+fn dispatch_lifecycle_event(
+    webview: &wry::WebView,
+    transactions: &Arc<std::sync::atomic::AtomicUsize>,
+    name: &str,
+    state: &str,
+) {
     let name = serde_json::to_string(name).expect("event name serializes");
     let state = serde_json::to_string(state).expect("event state serializes");
     let script =
         format!("window.dispatchEvent(new CustomEvent({name},{{detail:{{state:{state}}}}}));");
-    if let Err(error) = webview.evaluate_script(&script) {
+    if let Err(error) = evaluate_script_transaction(webview, transactions, &script) {
         log::warn!("cannot deliver Web UI lifecycle event: {error}");
     }
 }
@@ -2021,26 +2116,33 @@ pub(crate) fn enqueue_webui_command(
 }
 
 #[cfg(target_os = "windows")]
-pub(crate) fn resolve_webui_commands(
-    mut executor: Option<bevy::ecs::system::NonSendMut<UiNavigationExecutor>>,
-) {
-    let Some(executor) = executor.as_deref_mut() else {
-        return;
-    };
-    let mut resolved_any = false;
-    for overlay in executor.committed.values_mut() {
-        let mut pending = overlay
-            .pending
+pub(crate) fn resolve_pending_commands(
+    pending: &Arc<Mutex<Vec<PendingCommand>>>,
+    mut resolve: impl FnMut(u64, &str, Value),
+) -> bool {
+    let resolved = {
+        let mut pending = pending
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut resolved = Vec::new();
         let mut index = 0;
         while index < pending.len() {
-            let result = pending[index].immediate.take().or_else(|| {
-                pending[index]
-                    .call
-                    .as_ref()
-                    .and_then(RequestCall::try_result)
-            });
+            let result = match pending[index].immediate.take() {
+                Some(result) => Some(result),
+                None => match pending[index].call.as_ref().map(RequestCall::poll) {
+                    Some(ResponsePoll::Ready(result)) => Some(result),
+                    Some(ResponsePoll::Disconnected) => Some(json!({
+                        "version": 1,
+                        "command": pending[index].command_name,
+                        "ok": false,
+                        "error": {
+                            "code": "internal_command_error",
+                            "message": "command response channel disconnected",
+                        },
+                    })),
+                    Some(ResponsePoll::Pending) | None => None,
+                },
+            };
             let Some(result) = result else {
                 if !pending[index].timeout_logged
                     && pending[index].submitted_at.elapsed() >= Duration::from_secs(2)
@@ -2055,8 +2157,30 @@ pub(crate) fn resolve_webui_commands(
                 index += 1;
                 continue;
             };
-            let request_id = pending[index].request_id;
-            let command_name = &pending[index].command_name;
+            let command = pending.swap_remove(index);
+            resolved.push((command.request_id, command.command_name, result));
+        }
+        resolved
+    };
+    let resolved_any = !resolved.is_empty();
+    for (request_id, command_name, result) in resolved {
+        // WebView2 script evaluation is an external, reentrant boundary. A
+        // Promise continuation may synchronously post the next IPC message,
+        // which needs the same pending-command mutex.
+        resolve(request_id, &command_name, result);
+    }
+    resolved_any
+}
+
+#[cfg(target_os = "windows")]
+pub(crate) fn resolve_webui_commands(
+    mut executor: Option<bevy::ecs::system::NonSendMut<UiNavigationExecutor>>,
+) {
+    let Some(executor) = executor.as_deref_mut() else {
+        return;
+    };
+    for overlay in executor.committed.values_mut() {
+        let _ = resolve_pending_commands(&overlay.pending, |request_id, command_name, result| {
             let succeeded = result.get("ok").and_then(Value::as_bool);
             if succeeded == Some(false) {
                 log::warn!("Web UI IPC request {request_id} ({command_name}) failed: {result}");
@@ -2064,15 +2188,12 @@ pub(crate) fn resolve_webui_commands(
                 log::debug!("Web UI IPC request {request_id}: ui.open completed with {result}");
             }
             let script = response_script(request_id, &result);
-            if let Err(error) = overlay.webview.evaluate_script(&script) {
+            if let Err(error) =
+                evaluate_script_transaction(&overlay.webview, &overlay.script_transactions, &script)
+            {
                 log::error!("cannot resolve Web UI command: {error}");
             }
-            pending.swap_remove(index);
-            resolved_any = true;
-        }
-    }
-    if resolved_any {
-        executor.webview_creation_cooldown = true;
+        });
     }
 }
 
@@ -2111,7 +2232,154 @@ pub(crate) fn data_sync_script(resource: &str, data: &Value) -> String {
 }
 
 #[cfg(target_os = "windows")]
-const WEBUI_BRIDGE_SCRIPT: &str = r#"(() => { let next = 1; let active = false; const pending = new Map(); const queued = []; const subscriptions = new Map(); const snapshots = new Map(); const post = body => active ? window.ipc.postMessage(body) : queued.push(body); window.__roundoActivate = () => { if (active) return; active = true; for (const body of queued.splice(0)) window.ipc.postMessage(body); }; window.__roundoResolve = (id, value) => { const resolve = pending.get(id); if (resolve) { pending.delete(id); resolve(value); } }; window.__roundoSync = (resource, data) => { snapshots.set(resource, data); const listeners = subscriptions.get(resource); if (!listeners) return; for (const listener of [...listeners]) { try { listener(data); } catch (error) { console.error('Roundo Client Data subscriber failed', resource, error); } } }; window.roundo = { execute(command) { return new Promise(resolve => { const id = next++; pending.set(id, resolve); post(JSON.stringify({ request_id: id, command })); }); }, subscribe(resource, listener) { if (typeof resource !== 'string' || typeof listener !== 'function') throw new TypeError('roundo.subscribe requires a resource name and listener'); let listeners = subscriptions.get(resource); if (!listeners) { listeners = new Set(); subscriptions.set(resource, listeners); } const first = listeners.size === 0; listeners.add(listener); if (first) post(JSON.stringify({roundo_subscription:{version:1,resource,subscribed:true}})); else if (snapshots.has(resource)) listener(snapshots.get(resource)); let live = true; return () => { if (!live) return; live = false; listeners.delete(listener); if (!listeners.size) { subscriptions.delete(resource); snapshots.delete(resource); post(JSON.stringify({roundo_subscription:{version:1,resource,subscribed:false}})); } }; } }; window.addEventListener('pointerdown',()=>{ if (active) window.ipc.postMessage(JSON.stringify({roundo_focus_request:true})); },true); window.ipc.postMessage(JSON.stringify({roundo_bridge_ready:true})); })();"#;
+const WEBUI_BRIDGE_SCRIPT: &str = r#"(() => {
+  const MAX_IN_FLIGHT = 64;
+  const MAX_ACTIVATION_QUEUE = 64;
+  const MAX_SUBSCRIPTIONS = 64;
+  let next = 1;
+  let active = false;
+  const pending = new Map();
+  const queued = [];
+  const subscriptions = new Map();
+  const snapshots = new Map();
+  const commandName = command => typeof command?.command === 'string' ? command.command : '';
+  const commandError = (command, code, message) => ({version:1,command:commandName(command),ok:false,error:{code,message}});
+  const post = body => {
+    if (active) {
+      window.ipc.postMessage(body);
+      return true;
+    }
+    if (queued.length >= MAX_ACTIVATION_QUEUE) return false;
+    queued.push(body);
+    return true;
+  };
+  const subscriptionBody = (resource, subscribed) => JSON.stringify({roundo_subscription:{version:1,resource,subscribed}});
+  const postSubscription = (resource, subscribed) => {
+    if (!active && !subscribed) {
+      const prior = subscriptionBody(resource, true);
+      const index = queued.indexOf(prior);
+      if (index !== -1) {
+        queued.splice(index, 1);
+        return true;
+      }
+    }
+    return post(subscriptionBody(resource, subscribed));
+  };
+  window.__roundoResolve = (id, value) => {
+    const resolve = pending.get(id);
+    if (resolve) {
+      pending.delete(id);
+      resolve(value);
+    }
+  };
+  const failQueuedCommand = (body, error) => {
+    try {
+      const envelope = JSON.parse(body);
+      if (Number.isSafeInteger(envelope.request_id)) {
+        window.__roundoResolve(envelope.request_id, commandError(envelope.command, 'internal_command_error', String(error)));
+      }
+    } catch (_) {}
+  };
+  window.__roundoActivate = () => {
+    if (active) return;
+    active = true;
+    for (const body of queued.splice(0)) {
+      try { window.ipc.postMessage(body); }
+      catch (error) { failQueuedCommand(body, error); }
+    }
+  };
+  window.__roundoSync = (resource, data) => {
+    snapshots.set(resource, data);
+    const listeners = subscriptions.get(resource);
+    if (!listeners) return;
+    for (const listener of [...listeners]) {
+      try { listener(data); }
+      catch (error) { console.error('Roundo Client Data subscriber failed', resource, error); }
+    }
+  };
+  const allocateRequestId = () => {
+    for (let attempt = 0; attempt < MAX_IN_FLIGHT; attempt++) {
+      const id = next;
+      next = next >= Number.MAX_SAFE_INTEGER ? 1 : next + 1;
+      if (!pending.has(id)) return id;
+    }
+    throw new Error('Roundo request ID space is exhausted');
+  };
+  window.roundo = {
+    execute(command) {
+      if (pending.size >= MAX_IN_FLIGHT) {
+        return Promise.resolve(commandError(command, 'command_queue_full', 'Web UI in-flight command limit reached'));
+      }
+      return new Promise((resolve, reject) => {
+        const id = allocateRequestId();
+        pending.set(id, resolve);
+        let body;
+        try { body = JSON.stringify({request_id:id,command}); }
+        catch (error) { pending.delete(id); reject(error); return; }
+        try {
+          if (!post(body)) {
+            pending.delete(id);
+            resolve(commandError(command, 'command_queue_full', 'Web UI activation queue is full'));
+          }
+        } catch (error) {
+          pending.delete(id);
+          reject(error);
+        }
+      });
+    },
+    subscribe(resource, listener) {
+      if (typeof resource !== 'string' || typeof listener !== 'function') {
+        throw new TypeError('roundo.subscribe requires a resource name and listener');
+      }
+      let listeners = subscriptions.get(resource);
+      if (!listeners) {
+        if (subscriptions.size >= MAX_SUBSCRIPTIONS) throw new RangeError('Roundo subscription limit reached');
+        listeners = new Set();
+        subscriptions.set(resource, listeners);
+      }
+      const first = listeners.size === 0;
+      listeners.add(listener);
+      if (first) {
+        let accepted = false;
+        try { accepted = postSubscription(resource, true); }
+        catch (error) {
+          listeners.delete(listener);
+          subscriptions.delete(resource);
+          throw error;
+        }
+        if (!accepted) {
+          listeners.delete(listener);
+          subscriptions.delete(resource);
+          throw new Error('Roundo activation queue is full');
+        }
+      } else if (snapshots.has(resource)) {
+        try { listener(snapshots.get(resource)); }
+        catch (error) { console.error('Roundo Client Data subscriber failed', resource, error); }
+      }
+      let live = true;
+      return () => {
+        if (!live) return;
+        live = false;
+        listeners.delete(listener);
+        if (!listeners.size) {
+          subscriptions.delete(resource);
+          snapshots.delete(resource);
+          try {
+            if (!postSubscription(resource, false)) {
+              console.error('Roundo Client Data unsubscribe queue is full', resource);
+            }
+          } catch (error) { console.error('Roundo Client Data unsubscribe failed', resource, error); }
+        }
+      };
+    }
+  };
+  window.addEventListener('pointerdown', () => {
+    if (!active) return;
+    try { window.ipc.postMessage(JSON.stringify({roundo_focus_request:true})); }
+    catch (error) { console.error('Roundo focus request failed', error); }
+  }, true);
+  window.ipc.postMessage(JSON.stringify({roundo_bridge_ready:true}));
+})();"#;
 
 pub(crate) fn webui_initialization_script(definition: &str) -> String {
     let prefix = serde_json::to_string(&format!("/{definition}/"))

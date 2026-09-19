@@ -560,6 +560,41 @@ impl ClientHooks for ClientHooksAdapter {
 
     fn on_server_resource_message(&self, message: ServerResourceMessage) {
         match message {
+            ServerResourceMessage::RenderingAnchorSpawned { anchor } => {
+                if self
+                    .local_coordinate_ipc
+                    .try_send(LocalCoordinateClientCommand::RenderingAnchorSpawned(anchor))
+                    .is_err()
+                {
+                    warn!(
+                        "Dropped RenderingAnchorSpawned message: destination=local_coordinate_ecs"
+                    );
+                }
+            }
+            ServerResourceMessage::RenderingAnchorUpdated { anchor } => {
+                if self
+                    .local_coordinate_ipc
+                    .try_send(LocalCoordinateClientCommand::RenderingAnchorUpdated(anchor))
+                    .is_err()
+                {
+                    warn!(
+                        "Dropped RenderingAnchorUpdated message: destination=local_coordinate_ecs"
+                    );
+                }
+            }
+            ServerResourceMessage::RenderingAnchorDespawned { anchor_id } => {
+                if self
+                    .local_coordinate_ipc
+                    .try_send(LocalCoordinateClientCommand::RenderingAnchorDespawned(
+                        anchor_id,
+                    ))
+                    .is_err()
+                {
+                    warn!(
+                        "Dropped RenderingAnchorDespawned message: destination=local_coordinate_ecs"
+                    );
+                }
+            }
             ServerResourceMessage::LocalCoordinateSpawned {
                 local_coordinate_id,
             } => {

@@ -2,18 +2,15 @@ use super::*;
 use crate::VoxelChunkSvo;
 use crate::local_coordinate::data::{Chunk, PositionedAtomicVoxel, SOLID_VOXEL_ID};
 use bevy::prelude::{FixedUpdate, IVec3, Schedule, Update, Vec3, World};
-fn observation_input(
-    player_id: PlayerId,
-    scene_id: SceneId,
-    position: Vec3,
-) -> LocalCoordinateObservationInput {
-    let mut input = LocalCoordinateObservationInput::default();
-    input.replace([LocalCoordinateObserver {
-        player_id,
-        scene_id,
-        position: position.as_dvec3().to_array(),
-    }]);
-    input
+
+fn test_anchor(player_id: PlayerId) -> RenderingAnchorState {
+    RenderingAnchorState {
+        id: ChunkLoadingAnchorId(1),
+        owner: player_id,
+        scene_id: SceneId::S1,
+        position: [0.0; 3],
+        radius_chunks: DEFAULT_CHUNK_VIEW_DISTANCE,
+    }
 }
 
 #[test]
@@ -23,8 +20,7 @@ fn core_fixed_tick_does_not_run_world_streaming() {
     let connection_id = ConnectionId(99);
     let player_id = PlayerId(99);
     let mut app = App::new();
-    app.insert_resource(observation_input(player_id, SceneId::S1, Vec3::ZERO))
-        .add_plugins(plugin);
+    app.add_plugins(plugin);
     app.world_mut().run_schedule(Startup);
     commands
         .try_send(LocalCoordinateServerCommand::SubscribePlayer {
@@ -52,13 +48,52 @@ fn core_fixed_tick_does_not_run_world_streaming() {
 }
 
 #[test]
+fn rendering_anchor_starts_at_origin_and_does_not_depend_on_player_transform() {
+    let plugin = LocalCoordinateServerPlugin::new();
+    let transport = plugin.ipc();
+    let connection_id = ConnectionId(5);
+    let player_id = PlayerId(8);
+    let mut app = App::new();
+    app.add_plugins(plugin);
+    app.world_mut().run_schedule(Startup);
+    transport
+        .try_send(LocalCoordinateServerCommand::SubscribePlayer {
+            connection_id,
+            player_id,
+        })
+        .unwrap();
+    app.world_mut().run_schedule(Update);
+
+    let subscription = &app
+        .world()
+        .resource::<LocalCoordinateServerWorld>()
+        .subscriptions[&connection_id];
+    assert_eq!(subscription.anchor.position, [0.0; 3]);
+    assert_eq!(subscription.anchor.owner, player_id);
+    assert_eq!(
+        absolute_chunk_coordinate(subscription.anchor.position),
+        [0, 0, 0]
+    );
+    let demand = app
+        .world()
+        .resource::<LocalCoordinateServerWorld>()
+        .observation_by_anchor[&subscription.anchor.id];
+    assert_eq!(demand.center, [0.0; 3]);
+    assert_eq!(demand.streaming_center, [0.0; 3]);
+    assert!(matches!(
+        transport.try_receive(),
+        Some(LocalCoordinateServerEvent::RenderingAnchorSpawned { anchor, .. })
+            if anchor == subscription.anchor
+    ));
+}
+
+#[test]
 fn chunk_view_distance_is_clamped_and_retained_before_subscription() {
     let transport = CrossbeamThreadPipe::new();
     let commands = transport.endpoint_a();
     let connection_id = ConnectionId(11);
     let mut app = App::new();
     app.insert_resource(LocalCoordinateServerPipe(transport.endpoint_b()))
-        .init_resource::<LocalCoordinateObservationInput>()
         .init_resource::<LocalCoordinateServerWorld>()
         .init_resource::<LocalCoordinatePhysicsInterests>()
         .add_systems(Update, prepare_player_chunks);
@@ -87,51 +122,13 @@ fn streaming_crosses_the_coordinate_origin_without_wrapping() {
 }
 
 #[test]
-fn streaming_chunk_hysteresis_suppresses_boundary_jitter() {
-    let initial = stabilized_streaming_chunk([15.9, 0.0, 0.0], None);
-    assert_eq!(initial, [0, 0, 0]);
-
-    // Merely crossing x=16 does not replace the streaming frontier.
-    let just_across = stabilized_streaming_chunk([16.1, 0.0, 0.0], Some(initial));
-    assert_eq!(just_across, initial);
-    let committed =
-        stabilized_streaming_chunk([16.0 + STREAMING_CHUNK_HYSTERESIS, 0.0, 0.0], Some(initial));
-    assert_eq!(committed, [1, 0, 0]);
-
-    // Returning across x=16 also requires penetration through the opposite
-    // half of the dead band, so noise around the boundary cannot oscillate.
-    let just_back = stabilized_streaming_chunk([15.9, 0.0, 0.0], Some(committed));
-    assert_eq!(just_back, committed);
-    let returned = stabilized_streaming_chunk(
-        [16.0 - STREAMING_CHUNK_HYSTERESIS - 1.0e-9, 0.0, 0.0],
-        Some(committed),
-    );
-    assert_eq!(returned, [0, 0, 0]);
-}
-
-#[test]
-fn streaming_chunk_hysteresis_handles_negative_boundaries_and_teleports() {
-    let negative = stabilized_streaming_chunk([-0.1, 0.0, 0.0], None);
-    assert_eq!(negative, [-1, 0, 0]);
-    assert_eq!(
-        stabilized_streaming_chunk([STREAMING_CHUNK_HYSTERESIS, 0.0, 0.0], Some(negative)),
-        [0, 0, 0]
-    );
-    assert_eq!(
-        stabilized_streaming_chunk([160.0, -160.0, 32.0], Some([0, 0, 0])),
-        [9, -10, 1]
-    );
-}
-
-#[test]
-fn moving_observation_does_not_accumulate_pristine_generated_chunks() {
+fn moving_anchor_does_not_accumulate_pristine_generated_chunks() {
     let transport = CrossbeamThreadPipe::new();
     let commands = transport.endpoint_a();
     let connection_id = ConnectionId(12);
     let player_id = PlayerId(12);
     let mut app = App::new();
     app.insert_resource(LocalCoordinateServerPipe(transport.endpoint_b()))
-        .insert_resource(observation_input(player_id, SceneId::S1, Vec3::ZERO))
         .init_resource::<LocalCoordinateServerWorld>()
         .init_resource::<LocalCoordinatePhysicsInterests>()
         .add_systems(
@@ -179,12 +176,12 @@ fn moving_observation_does_not_accumulate_pristine_generated_chunks() {
         .len();
 
     app.world_mut()
-        .resource_mut::<LocalCoordinateObservationInput>()
-        .replace([LocalCoordinateObserver {
-            player_id,
-            scene_id: SceneId::S1,
-            position: [160.0, 0.0, 0.0],
-        }]);
+        .resource_mut::<LocalCoordinateServerWorld>()
+        .subscriptions
+        .get_mut(&connection_id)
+        .unwrap()
+        .anchor
+        .position = [160.0, 0.0, 0.0];
     for _ in 0..100 {
         app.update();
         let server_world = app.world().resource::<LocalCoordinateServerWorld>();
@@ -251,8 +248,7 @@ fn only_advertised_chunk_ids_enter_the_response_queue_once() {
     };
     let current = UpdateVersion::new(7);
     let mut subscription = PlayerSubscription {
-        player_id: PlayerId(1),
-        view_distance_chunks: DEFAULT_CHUNK_VIEW_DISTANCE,
+        anchor: test_anchor(PlayerId(1)),
         spawned_coordinates: HashSet::new(),
         advertised_chunks: HashMap::from([(key, current)]),
         pending_requests: VecDeque::new(),
@@ -316,11 +312,10 @@ fn subscription_snapshot_drops_chunks_outside_the_latest_observation() {
         coordinate: [8, 0, 0],
     };
     let mut subscription = PlayerSubscription {
-        player_id: PlayerId(1),
-        view_distance_chunks: DEFAULT_CHUNK_VIEW_DISTANCE,
+        anchor: test_anchor(PlayerId(1)),
         spawned_coordinates: HashSet::from([LocalCoordinateId(1)]),
         advertised_chunks: HashMap::from([(removed, UpdateVersion::new(4))]),
-        pending_requests: VecDeque::from([removed, added]),
+        pending_requests: VecDeque::from([removed]),
     };
 
     update_subscription_snapshot(
@@ -347,8 +342,7 @@ fn stale_or_unsubscribed_svo_jobs_are_not_published() {
     world.subscriptions.insert(
         connection_id,
         PlayerSubscription {
-            player_id: PlayerId(1),
-            view_distance_chunks: DEFAULT_CHUNK_VIEW_DISTANCE,
+            anchor: test_anchor(PlayerId(1)),
             spawned_coordinates: HashSet::new(),
             advertised_chunks: HashMap::from([(chunk.id(), chunk.version)]),
             pending_requests: VecDeque::new(),

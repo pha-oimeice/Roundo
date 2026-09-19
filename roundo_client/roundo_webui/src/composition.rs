@@ -5,11 +5,21 @@
 use crate::{
     RecoveryActionRequest, UiCommandSource, UiLifecycleManager, UiNavigationExecutor, UiRegistry,
 };
-use bevy::prelude::{App, IntoScheduleConfigs, Plugin};
+use bevy::prelude::{App, IntoScheduleConfigs, Plugin, SystemSet};
 use roundo_mod_loader::LoadedMods;
 use roundo_toolbox::request_response_pipe::ContextualJsonRequestResponseIo;
 use serde_json::Value;
 use std::{path::PathBuf, time::Duration};
+
+/// Ordered host phase that owns physical WebView work and response delivery.
+///
+/// Client command execution and Client Data publication run before this phase
+/// so every submitted script transaction is visible to the controller-creation
+/// state machine in the same update.
+#[derive(Clone, Debug, Eq, Hash, PartialEq, SystemSet)]
+pub enum WebUiSystemSet {
+    Platform,
+}
 
 /// Web UI 的 Bevy composition 门面。
 pub struct RoundoWebUiPlugin {
@@ -149,7 +159,8 @@ impl Plugin for RoundoWebUiPlugin {
                     crate::platform::apply_windows_input_mode,
                     crate::platform::resolve_webui_commands,
                 )
-                    .chain(),
+                    .chain()
+                    .in_set(WebUiSystemSet::Platform),
             );
         }
     }

@@ -350,6 +350,36 @@ fn bridge_resource_ecs_events(
             return BridgeStep::Idle;
         };
         match event {
+            LocalCoordinateServerEvent::RenderingAnchorSpawned {
+                connection_id,
+                anchor,
+            } => {
+                network.send_to_connection(
+                    connection_id,
+                    StreamId::Stream1,
+                    ServerResourceMessage::RenderingAnchorSpawned { anchor },
+                );
+            }
+            LocalCoordinateServerEvent::RenderingAnchorUpdated {
+                connection_id,
+                anchor,
+            } => {
+                network.send_to_connection(
+                    connection_id,
+                    StreamId::Stream1,
+                    ServerResourceMessage::RenderingAnchorUpdated { anchor },
+                );
+            }
+            LocalCoordinateServerEvent::RenderingAnchorDespawned {
+                connection_id,
+                anchor_id,
+            } => {
+                network.send_to_connection(
+                    connection_id,
+                    StreamId::Stream1,
+                    ServerResourceMessage::RenderingAnchorDespawned { anchor_id },
+                );
+            }
             LocalCoordinateServerEvent::Spawned {
                 connection_id,
                 local_coordinate_id,

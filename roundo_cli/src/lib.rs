@@ -74,6 +74,15 @@ impl ClientCommandPipe {
 #[cfg(feature = "client")]
 pub type ClientCommandIo = ContextualJsonRequestResponseIo<UiCommandSource, Value>;
 
+/// Main-world phase that executes accepted client commands and publishes
+/// Client Data snapshots before the WebUI platform phase polls responses or
+/// creates another WebView2 controller.
+#[cfg(feature = "client")]
+#[derive(Clone, Debug, Eq, Hash, PartialEq, bevy::prelude::SystemSet)]
+pub enum ClientCommandSystemSet {
+    ExecuteAndPublish,
+}
+
 /// Feature-selected CLI composition for either client or server process.
 ///
 /// Installation also starts one detached stdin reader. The reader may remain

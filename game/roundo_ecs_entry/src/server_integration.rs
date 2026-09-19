@@ -1,20 +1,16 @@
 //! Explicit adapters between independently owned server domain modules.
 
 use bevy::prelude::{
-    Added, App, Commands, Entity, FixedUpdate, GlobalTransform, IntoScheduleConfigs, Plugin, Query,
-    ResMut, Update, With,
-};
-use roundo_local_coordinate::{
-    LocalCoordinateObservationInput, LocalCoordinateObserver, LocalCoordinateServerSet,
+    Added, App, Commands, Entity, FixedUpdate, IntoScheduleConfigs, Plugin, Query, With,
 };
 use roundo_marionette::{MarionetteServerSet, NetworkControllerTarget, PlayerControllers};
-use roundo_presence::{Player, PlayerConnection, PlayerScene, PresenceServerSet, ServerPlayer};
+use roundo_presence::{PlayerConnection, PresenceServerSet, ServerPlayer};
 
 /// Owns the narrow server-only seams between Presence, Marionette, and streaming.
 ///
 /// Presence remains the authority that creates players. This plugin attaches
-/// controller ownership before Marionette consumes commands and publishes a
-/// complete observation snapshot before coordinate streaming prepares demand.
+/// controller ownership before Marionette consumes commands. Chunk streaming
+/// demand is owned independently by server-side loading anchors.
 pub(crate) struct ServerDomainIntegrationPlugin;
 
 impl Plugin for ServerDomainIntegrationPlugin {
@@ -28,10 +24,6 @@ impl Plugin for ServerDomainIntegrationPlugin {
             attach_player_control
                 .after(PresenceServerSet::Commands)
                 .before(MarionetteServerSet::Commands),
-        )
-        .add_systems(
-            Update,
-            publish_local_coordinate_observations.before(LocalCoordinateServerSet::Prepare),
         );
     }
 }
@@ -49,24 +41,6 @@ fn attach_player_control(
             },
         ));
     }
-}
-
-// Replaces the streaming observer snapshot from all currently live server players.
-// Query iteration order is unspecified; duplicate PlayerId handling is therefore
-// not deterministic, but Presence is expected to maintain unique player identities.
-fn publish_local_coordinate_observations(
-    players: Query<(&Player, &PlayerScene, &GlobalTransform), With<ServerPlayer>>,
-    mut input: ResMut<LocalCoordinateObservationInput>,
-) {
-    let observers = players
-        .iter()
-        .map(|(player, scene, transform)| LocalCoordinateObserver {
-            player_id: player.id,
-            scene_id: scene.scene_id,
-            position: transform.translation().as_dvec3().to_array(),
-        })
-        .collect::<Vec<_>>();
-    input.replace(observers);
 }
 
 #[cfg(test)]
@@ -88,9 +62,11 @@ mod tests {
         let lifecycle = presence.ipc();
         let connection_id = ConnectionId(13);
         let mut app = App::new();
-        app.init_resource::<Time<Fixed>>()
-            .init_resource::<LocalCoordinateObservationInput>()
-            .add_plugins((marionette, presence, ServerDomainIntegrationPlugin));
+        app.init_resource::<Time<Fixed>>().add_plugins((
+            marionette,
+            presence,
+            ServerDomainIntegrationPlugin,
+        ));
 
         lifecycle
             .try_send(PresenceServerCommand::Connect { connection_id })
