@@ -12,8 +12,8 @@ use super::*;
 /// prevents handlers from retaining main-world references.
 pub(super) struct ClientCommandApplication<'a> {
     pub(super) config: &'a mut ClientConfigStore,
-    pub(super) network: &'a mut crate::client_network::ClientNetworkManager,
-    pub(super) probes: &'a crate::client_network::ServerProbeManager,
+    pub(super) network: &'a mut crate::network::ClientNetworkManager,
+    pub(super) probes: &'a crate::network::ServerProbeManager,
     pub(super) dev_level: &'a mut DevLevel,
     pub(super) camera_position: Option<[f32; 3]>,
     pub(super) webui: Option<&'a mut roundo_webui::UiLifecycleManager>,
@@ -61,7 +61,7 @@ impl ClientCommandApplication<'_> {
         let dev_level = RefCell::new(dev_level);
         let webui = RefCell::new(webui);
         let navigation = RefCell::new(navigation);
-        let mut registry = crate::json_command::CommandRegistry::default();
+        let mut registry = roundo_cli::json_command::CommandRegistry::default();
 
         // Connection handlers delegate ownership and status transitions to the
         // network manager; successful start is asynchronous, not peer admission.
@@ -69,21 +69,21 @@ impl ClientCommandApplication<'_> {
             let config = config.borrow();
             let mut network = network.borrow_mut();
             let server = config.0.servers.get(input.index).ok_or_else(|| {
-                crate::json_command::CommandError::new(
+                roundo_cli::json_command::CommandError::new(
                     "index_out_of_range",
                     "server index does not exist",
                 )
             })?;
             let connection = network.start_connection(server);
             connection.map_err(|error| {
-                crate::json_command::CommandError::new("connection_failed", error)
+                roundo_cli::json_command::CommandError::new("connection_failed", error)
             })?;
             Ok(server_status_output(network.status()))
         });
         registry.register_typed::<ServerRetryDefinition>(|_, _| {
             let mut network = network.borrow_mut();
             network.retry().map_err(|error| {
-                crate::json_command::CommandError::new("no_active_server", error)
+                roundo_cli::json_command::CommandError::new("no_active_server", error)
             })?;
             Ok(server_status_output(network.status()))
         });
@@ -112,7 +112,7 @@ impl ClientCommandApplication<'_> {
         registry.register_typed::<ServerAddDefinition>(|input, _| {
             let server = ServerEntry::from(input);
             if server.name.trim().is_empty() || server.address.trim().is_empty() {
-                return Err(crate::json_command::CommandError::new(
+                return Err(roundo_cli::json_command::CommandError::new(
                     "invalid_arguments",
                     "name and address are required",
                 ));
@@ -120,7 +120,7 @@ impl ClientCommandApplication<'_> {
             let mut config = config.borrow_mut();
             config.0.servers.push(server);
             config.save().map_err(|error| {
-                crate::json_command::CommandError::new("config_save_failed", error)
+                roundo_cli::json_command::CommandError::new("config_save_failed", error)
             })?;
             probes.invalidate();
             Ok(ServerIndexOutput {
@@ -130,21 +130,21 @@ impl ClientCommandApplication<'_> {
         registry.register_typed::<ServerEditDefinition>(|input, _| {
             let server = ServerEntry::from(input.server);
             if server.name.trim().is_empty() || server.address.trim().is_empty() {
-                return Err(crate::json_command::CommandError::new(
+                return Err(roundo_cli::json_command::CommandError::new(
                     "invalid_arguments",
                     "index and a complete server are required",
                 ));
             }
             let mut config = config.borrow_mut();
             if input.index >= config.0.servers.len() {
-                return Err(crate::json_command::CommandError::new(
+                return Err(roundo_cli::json_command::CommandError::new(
                     "index_out_of_range",
                     "server index does not exist",
                 ));
             }
             config.0.servers[input.index] = server;
             config.save().map_err(|error| {
-                crate::json_command::CommandError::new("config_save_failed", error)
+                roundo_cli::json_command::CommandError::new("config_save_failed", error)
             })?;
             probes.invalidate();
             Ok(ServerIndexOutput { index: input.index })
@@ -152,14 +152,14 @@ impl ClientCommandApplication<'_> {
         registry.register_typed::<ServerDeleteDefinition>(|input, _| {
             let mut config = config.borrow_mut();
             if input.index >= config.0.servers.len() {
-                return Err(crate::json_command::CommandError::new(
+                return Err(roundo_cli::json_command::CommandError::new(
                     "index_out_of_range",
                     "server index does not exist",
                 ));
             }
             let _removed_server = config.0.servers.remove(input.index);
             config.save().map_err(|error| {
-                crate::json_command::CommandError::new("config_save_failed", error)
+                roundo_cli::json_command::CommandError::new("config_save_failed", error)
             })?;
             probes.invalidate();
             Ok(EmptyOutput {})
@@ -186,7 +186,7 @@ impl ClientCommandApplication<'_> {
                     config.0.settings.world.chunk_view_distance = input.value
                 }
                 _ => {
-                    return Err(crate::json_command::CommandError::new(
+                    return Err(roundo_cli::json_command::CommandError::new(
                         "invalid_arguments",
                         "unknown setting key or value",
                     ));
@@ -194,7 +194,7 @@ impl ClientCommandApplication<'_> {
             }
             config.0.settings.normalize();
             config.save().map_err(|error| {
-                crate::json_command::CommandError::new("config_save_failed", error)
+                roundo_cli::json_command::CommandError::new("config_save_failed", error)
             })?;
             Ok(EmptyOutput {})
         });
@@ -209,14 +209,14 @@ impl ClientCommandApplication<'_> {
             validate_binding_slot(&binding, input_registry)?;
             let mut config = config.borrow_mut();
             if config.0.settings.input_bindings.contains(&binding) {
-                return Err(crate::json_command::CommandError::new(
+                return Err(roundo_cli::json_command::CommandError::new(
                     "binding_exists",
                     "binding already exists",
                 ));
             }
             config.0.settings.input_bindings.push(binding);
             config.save().map_err(|error| {
-                crate::json_command::CommandError::new("config_save_failed", error)
+                roundo_cli::json_command::CommandError::new("config_save_failed", error)
             })?;
             Ok(EmptyOutput {})
         });
@@ -230,14 +230,14 @@ impl ClientCommandApplication<'_> {
                 .iter()
                 .position(|existing| *existing == binding)
             else {
-                return Err(crate::json_command::CommandError::new(
+                return Err(roundo_cli::json_command::CommandError::new(
                     "binding_not_found",
                     "binding does not exist",
                 ));
             };
             config.0.settings.input_bindings.remove(index);
             config.save().map_err(|error| {
-                crate::json_command::CommandError::new("config_save_failed", error)
+                roundo_cli::json_command::CommandError::new("config_save_failed", error)
             })?;
             Ok(EmptyOutput {})
         });
@@ -253,7 +253,7 @@ impl ClientCommandApplication<'_> {
                 replacement,
             )?;
             roundo_user_config::save_config(CLIENT_CONFIG_FILE, &updated_config).map_err(
-                |error| crate::json_command::CommandError::new("config_save_failed", error),
+                |error| roundo_cli::json_command::CommandError::new("config_save_failed", error),
             )?;
             config.0 = updated_config;
             Ok(BindingMutationOutput {})
@@ -273,7 +273,7 @@ impl ClientCommandApplication<'_> {
                     command,
                     dev_level: required_level,
                 }),
-                None => Err(crate::json_command::CommandError::new(
+                None => Err(roundo_cli::json_command::CommandError::new(
                     "unknown_command",
                     "unknown command",
                 )),
@@ -283,7 +283,7 @@ impl ClientCommandApplication<'_> {
             let mut dev_level = dev_level.borrow_mut();
             if let Some(level) = input.level {
                 if level > 3 {
-                    return Err(crate::json_command::CommandError::new(
+                    return Err(roundo_cli::json_command::CommandError::new(
                         "invalid_arguments",
                         "level must be 0 through 3",
                     ));
@@ -295,12 +295,15 @@ impl ClientCommandApplication<'_> {
         // Diagnostics consume snapshots captured before dispatch and never borrow ECS here.
         registry.register_typed::<HudShowDefinition>(|_, _| {
             hud_show_output(hud).map_err(|error| {
-                crate::json_command::CommandError::new("internal_command_error", error.to_string())
+                roundo_cli::json_command::CommandError::new(
+                    "internal_command_error",
+                    error.to_string(),
+                )
             })
         });
         registry.register_typed::<DiagnosticsPositionDefinition>(|_, _| {
             let [x, y, z] = camera_position.ok_or_else(|| {
-                crate::json_command::CommandError::new(
+                roundo_cli::json_command::CommandError::new(
                     "camera_unavailable",
                     "player camera is unavailable",
                 )
@@ -316,7 +319,7 @@ impl ClientCommandApplication<'_> {
         registry.register_typed::<OpenExternalUrlDefinition>(|input, _| {
             let url = validate_external_url(&input.url)?;
             open_external_url(url).map_err(|error| {
-                crate::json_command::CommandError::new(
+                roundo_cli::json_command::CommandError::new(
                     "external_url_open_failed",
                     error.to_string(),
                 )
@@ -329,18 +332,21 @@ impl ClientCommandApplication<'_> {
         // logical lifecycle and platform navigation capabilities.
         registry.register_typed::<UiBackDefinition>(|_, _| {
             let source = ui_source.ok_or_else(|| {
-                crate::json_command::CommandError::new(
+                roundo_cli::json_command::CommandError::new(
                     "stale_ui_instance",
                     "ui.back requires a live WebView source",
                 )
             })?;
             let mut webui = webui.borrow_mut();
             let manager = webui.as_deref_mut().ok_or_else(|| {
-                crate::json_command::CommandError::new("stale_ui_instance", "Web UI is unavailable")
+                roundo_cli::json_command::CommandError::new(
+                    "stale_ui_instance",
+                    "Web UI is unavailable",
+                )
             })?;
             let mut navigation = navigation.borrow_mut();
             let navigation = navigation.as_deref_mut().ok_or_else(|| {
-                crate::json_command::CommandError::new(
+                roundo_cli::json_command::CommandError::new(
                     "ui_navigation_failed",
                     "Web UI navigation is unavailable",
                 )
@@ -352,14 +358,14 @@ impl ClientCommandApplication<'_> {
         });
         registry.register_typed::<UiOpenDefinition>(|input, _| {
             let source = ui_source.ok_or_else(|| {
-                crate::json_command::CommandError::new(
+                roundo_cli::json_command::CommandError::new(
                     "stale_ui_instance",
                     "ui.open requires a live WebView source",
                 )
             })?;
             let mut webui = webui.borrow_mut();
             let state = webui.as_deref_mut().ok_or_else(|| {
-                crate::json_command::CommandError::new(
+                roundo_cli::json_command::CommandError::new(
                     "invalid_ui_resource",
                     "Web UI is unavailable",
                 )
@@ -371,7 +377,7 @@ impl ClientCommandApplication<'_> {
             log::debug!("Resolved Web UI navigation target `{resource}`");
             let mut navigation = navigation.borrow_mut();
             let navigation = navigation.as_deref_mut().ok_or_else(|| {
-                crate::json_command::CommandError::new(
+                roundo_cli::json_command::CommandError::new(
                     "ui_navigation_failed",
                     "Web UI navigation is unavailable",
                 )

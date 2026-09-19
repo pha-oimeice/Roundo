@@ -9,8 +9,10 @@ path = "src/main.rs"
 
 [dependencies]
 bevy.workspace = true
+env_logger.workspace = true
 log.workspace = true
-roundo_cli = { workspace = true, features = ["client"] }
+roundo_cli.workspace = true
+roundo_contracts.workspace = true
 roundo_ecs_entry = { workspace = true, features = ["client"] }
 roundo_local_coordinate.workspace = true
 roundo_marionette.workspace = true
@@ -21,6 +23,7 @@ roundo_rendering.workspace = true
 roundo_toolbox.workspace = true
 roundo_webui.workspace = true
 roundo_user_config.workspace = true
+schemars.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 toml.workspace = true

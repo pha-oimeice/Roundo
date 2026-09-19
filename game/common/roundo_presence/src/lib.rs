@@ -14,8 +14,9 @@ pub use roundo_contracts::{
     SceneId,
 };
 pub use server::{
-    PlayerConnection, PlayerScene, PresenceServerCommand, PresenceServerEvent, PresenceServerIpc,
-    PresenceServerSet, PresenceServerSettings, RoundoPresenceServerPlugin, ServerPlayer,
+    PlayerConnection, PlayerScene, PresenceAdmin, PresenceServerCommand, PresenceServerEvent,
+    PresenceServerIpc, PresenceServerSet, PresenceServerSettings, RoundoPresenceServerPlugin,
+    ServerPlayer, ServerPlayerSnapshot,
 };
 
 #[derive(Component, Clone, Copy, Debug, Eq, PartialEq)]

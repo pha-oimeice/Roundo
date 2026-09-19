@@ -9,7 +9,7 @@
 pub mod connection;
 pub mod echo_test;
 pub mod frame;
-pub mod protocol;
+mod protocol;
 pub mod schema;
 pub mod session;
 
@@ -19,14 +19,6 @@ mod tls;
 mod error;
 
 pub use error::ProtocolError;
-pub use protocol::{
-    ChunkId, ChunkVersion, ClientGameMessage, ClientResourceMessage, ConnectionId,
-    ControllerCommand, DestroyBlockControllerAction, JoinableWorldId, LocalCoordinateId,
-    Movement3DAction, NearbyJoinableWorld, NearbyPlayer, PlaceBlockControllerAction,
-    PlayerControllerCommand, PlayerId, PlayerState, PresenceSnapshot, ResourceCatalogFingerprint,
-    RotationSync, SceneId, SerializedPayload, ServerGameMessage, ServerResourceMessage, SessionId,
-    StreamId, UserId, UserSession,
-};
 pub use service::{
     CertificatePolicy, ClientHooks, ClientNetwork, ClientNetworkConfig, HookFuture, NetworkError,
     PublicSession, ServerAddresses, ServerHooks, ServerNetwork, ServerNetworkConfig,

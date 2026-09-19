@@ -3,6 +3,7 @@
 //! This module has no page-flow state: it applies focused-UI presentation
 //! declarations supplied by the Web UI lifecycle manager, while authoritative
 //! connection state alone controls game-camera activation.
+use crate::network::{ClientConnectionStatus, ClientNetworkManager};
 use crate::targeting::ClientVoxelRaycastSettings;
 use bevy::{
     app::AppExit,
@@ -14,7 +15,6 @@ use bevy::{
     },
     window::{CursorGrabMode, CursorOptions, PrimaryWindow, Window},
 };
-use roundo_cli::client_network::{ClientConnectionStatus, ClientNetworkManager};
 use roundo_marionette::{
     ClientInputBindings, ClientMarionetteInputSettings, ClientPlayerController, InputRegistry,
 };
@@ -239,7 +239,7 @@ fn spawn_ui_clear_camera(mut commands: Commands) {
 }
 
 fn sync_runtime_settings(
-    config: Res<roundo_cli::ClientConfigStore>,
+    config: Res<crate::commands::ClientConfigStore>,
     mut input: ResMut<ClientMarionetteInputSettings>,
     registry: Res<InputRegistry>,
     mut bindings: ResMut<ClientInputBindings>,
@@ -289,7 +289,7 @@ fn escape_opens_pause(
 #[cfg(test)]
 mod tests {
     use super::{authoritative_lifecycle_state, authoritative_root_target};
-    use roundo_cli::client_network::ClientConnectionStatus;
+    use crate::network::ClientConnectionStatus;
     use roundo_webui::UiLifecycleState;
 
     #[test]

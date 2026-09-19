@@ -4,7 +4,7 @@ members = [
     "game/common/roundo_contracts",
     "game/common/roundo_marionette",
     "game/common/roundo_local_coordinate",
-    "game/server/roundo_lifecycle",
+    "game/common/roundo_lifecycle",
     "game/roundo_ecs_entry",
     "roundo_toolbox",
     "roundo_server",
@@ -90,7 +90,7 @@ roundo_block_interaction = { path = "game/common/roundo_block_interaction" }
 roundo_contracts = { path = "game/common/roundo_contracts" }
 roundo_cli = { path = "roundo_cli" }
 roundo_ecs_entry = { path = "game/roundo_ecs_entry" }
-roundo_lifecycle = { path = "game/server/roundo_lifecycle" }
+roundo_lifecycle = { path = "game/common/roundo_lifecycle" }
 roundo_marionette = { path = "game/common/roundo_marionette" }
 roundo_networking = {path = "roundo_networking" }
 roundo_rendering = {path = "game/client/roundo_rendering" }

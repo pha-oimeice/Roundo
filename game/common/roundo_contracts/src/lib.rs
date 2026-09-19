@@ -5,8 +5,27 @@
 //! implementation so domain modules can depend on contracts without depending
 //! on a particular transport.
 
-use roundo_toolbox::{UpdateVersion, macros::identifier};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
+
+macro_rules! identifier {
+    ($name:ident) => {
+        #[derive(
+            Clone,
+            Copy,
+            Debug,
+            Default,
+            Deserialize,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+            Serialize,
+        )]
+        #[repr(transparent)]
+        pub struct $name(pub u64);
+    };
+}
 
 /// Exact stream-0 application version required during session setup.
 pub const GAME_PROTOCOL_VERSION: u16 = 15;
@@ -213,6 +232,33 @@ pub struct ChunkId {
     pub coordinate: [i64; 3],
 }
 
+/// Monotonic Chunk content version advanced after each authoritative update.
+#[derive(
+    Clone, Copy, Debug, Default, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize,
+)]
+pub struct UpdateVersion(u64);
+
+impl UpdateVersion {
+    pub const INITIAL: Self = Self(0);
+
+    pub const fn new(value: u64) -> Self {
+        Self(value)
+    }
+
+    pub const fn value(self) -> u64 {
+        self.0
+    }
+
+    pub const fn next(self) -> Self {
+        Self(self.0.wrapping_add(1))
+    }
+
+    pub fn advance(&mut self) -> Self {
+        *self = self.next();
+        *self
+    }
+}
+
 /// Server-issued content version for one [`ChunkId`].
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 pub struct ChunkVersion {
@@ -366,5 +412,18 @@ impl ServerResourceMessage {
 impl From<ServerResourceMessage> for ServerMessage {
     fn from(message: ServerResourceMessage) -> Self {
         Self::Resource(message)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::UpdateVersion;
+
+    #[test]
+    fn update_version_advances_and_wraps_without_a_sentinel() {
+        let mut version = UpdateVersion::INITIAL;
+        assert_eq!(version.advance(), UpdateVersion::new(1));
+        assert_eq!(version.value(), 1);
+        assert_eq!(UpdateVersion::new(u64::MAX).next(), UpdateVersion::INITIAL);
     }
 }

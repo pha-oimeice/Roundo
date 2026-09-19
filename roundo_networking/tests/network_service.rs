@@ -1,12 +1,11 @@
-use roundo_networking::protocol::{
+use roundo_contracts::{
     ClientGameMessage, ClientResourceMessage, ConnectionId, ControllerCommand, LocalCoordinateId,
-    Movement3DAction, PlayerControllerCommand, PlayerId, PlayerState, SceneId, ServerGameMessage,
-    ServerResourceMessage, SessionId, UserId, UserSession,
+    Movement3DAction, PlayerControllerCommand, PlayerId, PlayerState, ResourceCatalogFingerprint,
+    SceneId, ServerGameMessage, ServerResourceMessage, SessionId, StreamId, UserId, UserSession,
 };
 use roundo_networking::{
     CertificatePolicy, ClientHooks, ClientNetwork, ClientNetworkConfig, HookFuture, PublicSession,
-    ResourceCatalogFingerprint, ServerHooks, ServerNetwork, ServerNetworkConfig, StreamId,
-    TransportAdmissionPolicy,
+    ServerHooks, ServerNetwork, ServerNetworkConfig, TransportAdmissionPolicy,
 };
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::PathBuf;

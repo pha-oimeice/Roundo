@@ -98,7 +98,7 @@ fn update_voxel_target(
     cameras: Query<(&Camera, &GlobalTransform), With<Camera3d>>,
     local_coordinates: Query<&GlobalTransform>,
     mut target: ResMut<ClientVoxelTarget>,
-    mut hud: ResMut<roundo_cli::HudCache>,
+    mut hud: ResMut<crate::commands::HudCache>,
     mut highlight: ResMut<VoxelHighlightState>,
     mut render_objects: ResMut<RenderObjects>,
 ) {

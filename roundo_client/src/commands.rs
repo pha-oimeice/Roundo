@@ -2,11 +2,6 @@
 
 mod application;
 
-use crate::{
-    ClientCommandDefinition, ClientCommandPipe, ClientCommandSystemSet,
-    MAX_JSON_COMMANDS_PER_UPDATE, TerminalInput, UnixCommand, UnixCommandParseError,
-    UnixCommandRegistry,
-};
 use bevy::{
     app::AppExit,
     prelude::{
@@ -14,8 +9,14 @@ use bevy::{
         Update,
     },
 };
+use roundo_cli::{
+    CommandDefinition, TerminalInput, UnixCommand, UnixCommandParseError, UnixCommandRegistry,
+};
 use roundo_marionette::{ClientPlayerController, InputRegistry};
-use roundo_toolbox::request_response_pipe::{JsonSubmitError, RequestCall, ResponsePoll};
+use roundo_toolbox::request_response_pipe::{
+    CommandTransport, ContextualJsonRequestResponseIo, JsonSubmitError, RequestCall,
+    RequestResponsePipe, ResponsePoll,
+};
 use roundo_user_config::{ClientConfig, ClientInputBindingConfig, ClientInputKey, ServerEntry};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -26,12 +27,55 @@ use std::{
 };
 
 const CLIENT_CONFIG_FILE: &str = "roundo-client-config.toml";
+const MAX_JSON_COMMANDS_PER_UPDATE: usize = 64;
 const SERVER_LIST_DATA: &str = "client.servers";
 const SERVER_STATUS_DATA: &str = "client.connection";
 const SETTINGS_DATA: &str = "client.settings";
 const BINDINGS_DATA: &str = "client.bindings";
 const HUD_DATA: &str = "client.hud";
 const HUD_SYNC_INTERVAL_SECS: f32 = 0.05;
+
+/// ECS-owned consumer side of the bounded client command queue.
+#[derive(Resource)]
+pub(crate) struct ClientCommandPipe(
+    RequestResponsePipe<CommandTransport<roundo_webui::UiCommandSource>, serde_json::Value>,
+);
+
+impl ClientCommandPipe {
+    pub(crate) fn bounded(capacity: usize) -> Self {
+        Self(RequestResponsePipe::bounded(capacity))
+    }
+
+    pub(crate) fn io(
+        &self,
+    ) -> ContextualJsonRequestResponseIo<roundo_webui::UiCommandSource, serde_json::Value> {
+        ContextualJsonRequestResponseIo::new(self.0.io())
+    }
+
+    fn try_receive(
+        &self,
+    ) -> Option<(
+        CommandTransport<roundo_webui::UiCommandSource>,
+        roundo_toolbox::request_response_pipe::ResponseSender<serde_json::Value>,
+    )> {
+        self.0.try_receive()
+    }
+}
+
+/// Main-world phase that executes commands before the Web UI platform phase.
+#[derive(Clone, Debug, Eq, Hash, PartialEq, bevy::prelude::SystemSet)]
+pub(crate) enum ClientCommandSystemSet {
+    ExecuteAndPublish,
+}
+
+/// Installs the client-owned command catalog and its terminal/Web UI adapters.
+pub(crate) struct ClientCommandsPlugin;
+
+impl bevy::prelude::Plugin for ClientCommandsPlugin {
+    fn build(&self, app: &mut App) {
+        configure(app);
+    }
+}
 
 /// Last published Client Data snapshots and source-specific change counters.
 #[derive(Resource, Default)]
@@ -116,17 +160,17 @@ struct BindingsReplaceArguments {
     binding: BindingArguments,
 }
 impl TryFrom<BindingArguments> for ClientInputBindingConfig {
-    type Error = crate::json_command::CommandError;
+    type Error = roundo_cli::json_command::CommandError;
     fn try_from(value: BindingArguments) -> Result<Self, Self::Error> {
         if value.slot.trim().is_empty() {
-            return Err(crate::json_command::CommandError::new(
+            return Err(roundo_cli::json_command::CommandError::new(
                 "invalid_arguments",
                 "binding slot cannot be empty",
             ));
         }
         let key =
             serde_json::from_value(serde_json::Value::String(value.key)).map_err(|error| {
-                crate::json_command::CommandError::new("invalid_arguments", error.to_string())
+                roundo_cli::json_command::CommandError::new("invalid_arguments", error.to_string())
             })?;
         Ok(Self::new(value.slot, key))
     }
@@ -296,12 +340,12 @@ fn replace_binding(
     bindings: &mut Vec<ClientInputBindingConfig>,
     old_binding: ClientInputBindingConfig,
     replacement: ClientInputBindingConfig,
-) -> Result<(), crate::json_command::CommandError> {
+) -> Result<(), roundo_cli::json_command::CommandError> {
     let Some(index) = bindings
         .iter()
         .position(|existing| *existing == old_binding)
     else {
-        return Err(crate::json_command::CommandError::new(
+        return Err(roundo_cli::json_command::CommandError::new(
             "binding_not_found",
             "binding does not exist",
         ));
@@ -311,7 +355,7 @@ fn replace_binding(
         .enumerate()
         .any(|(other, existing)| other != index && *existing == replacement)
     {
-        return Err(crate::json_command::CommandError::new(
+        return Err(roundo_cli::json_command::CommandError::new(
             "binding_exists",
             "replacement binding already exists",
         ));
@@ -442,10 +486,8 @@ struct UiOpenOutput {
     resource: String,
 }
 
-fn server_status_output(
-    snapshot: crate::client_network::ClientConnectionSnapshot,
-) -> ServerStatusOutput {
-    use crate::client_network::ClientConnectionStatus;
+fn server_status_output(snapshot: crate::network::ClientConnectionSnapshot) -> ServerStatusOutput {
+    use crate::network::ClientConnectionStatus;
     let status = match snapshot.status {
         ClientConnectionStatus::Disconnected => ConnectionStatusOutput::Disconnected,
         ClientConnectionStatus::Connecting => ConnectionStatusOutput::Connecting,
@@ -459,7 +501,7 @@ fn server_status_output(
     }
 }
 
-fn probe_output(probe: crate::client_network::ProbeResult) -> ProbeOutput {
+fn probe_output(probe: crate::network::ProbeResult) -> ProbeOutput {
     ProbeOutput {
         status: probe.status.into(),
         message: probe.message,
@@ -468,7 +510,7 @@ fn probe_output(probe: crate::client_network::ProbeResult) -> ProbeOutput {
 
 fn server_list_output(
     config: &ClientConfigStore,
-    probes: &crate::client_network::ServerProbeManager,
+    probes: &crate::network::ServerProbeManager,
 ) -> ServerListOutput {
     let servers = config
         .0
@@ -536,9 +578,9 @@ fn settings_show_output(config: &ClientConfigStore) -> SettingsShowOutput {
 fn validate_binding_slot(
     binding: &ClientInputBindingConfig,
     registry: Option<&InputRegistry>,
-) -> Result<(), crate::json_command::CommandError> {
+) -> Result<(), roundo_cli::json_command::CommandError> {
     if registry.is_some_and(|registry| !registry.contains_slot(&binding.slot)) {
-        return Err(crate::json_command::CommandError::new(
+        return Err(roundo_cli::json_command::CommandError::new(
             "unknown_input_slot",
             format!("input slot `{}` is not registered", binding.slot),
         ));
@@ -590,7 +632,7 @@ fn hud_show_output(hud: &HudCache) -> Result<HudShowOutput, serde_json::Error> {
 macro_rules! definition {
     ($definition:ident, $input:ty, $output:ty, $name:literal, $level:literal) => {
         struct $definition;
-        impl crate::ClientCommandDefinition for $definition {
+        impl roundo_cli::CommandDefinition for $definition {
             type Input = $input;
             type Output = $output;
             const NAME: &'static str = $name;
@@ -763,11 +805,11 @@ struct ClientCommandCatalogEntry {
 }
 
 impl ClientCommandCatalogEntry {
-    const fn of<D: ClientCommandDefinition>() -> Self {
+    const fn of<D: CommandDefinition>() -> Self {
         Self {
             name: D::NAME,
             dev_level: D::DEV_LEVEL,
-            schema: crate::json_command::command_schema::<D>,
+            schema: roundo_cli::json_command::command_schema::<D>,
         }
     }
 }
@@ -822,17 +864,17 @@ impl ClientCommandCatalog {
     fn schema(
         &self,
         command: &str,
-    ) -> Result<serde_json::Value, crate::json_command::CommandError> {
+    ) -> Result<serde_json::Value, roundo_cli::json_command::CommandError> {
         CLIENT_COMMANDS
             .iter()
             .find(|entry| entry.name == command)
             .map(|entry| (entry.schema)())
             .ok_or_else(|| match command.is_empty() {
-                true => crate::json_command::CommandError::new(
+                true => roundo_cli::json_command::CommandError::new(
                     "invalid_arguments",
                     "command must be a non-empty string",
                 ),
-                false => crate::json_command::CommandError::new(
+                false => roundo_cli::json_command::CommandError::new(
                     "unknown_command",
                     "schema is unavailable",
                 ),
@@ -841,7 +883,7 @@ impl ClientCommandCatalog {
 
     /// Refuses dispatch when composition omitted a catalog command. This check
     /// is owned here rather than repeated by Web UI and terminal adapters.
-    fn assert_complete(&self, registry: &crate::json_command::CommandRegistry<'_, ()>) {
+    fn assert_complete(&self, registry: &roundo_cli::json_command::CommandRegistry<'_, ()>) {
         let mut catalog_names = CLIENT_COMMANDS
             .iter()
             .map(|entry| entry.name)
@@ -857,11 +899,11 @@ impl ClientCommandCatalog {
 
 macro_rules! unix_empty_command {
     ($name:ident, $command:literal, $path:literal, $output:ty) => {
-        #[derive(Deserialize, Serialize, JsonSchema, roundo_proc_macros::UnixCommand)]
+        #[derive(Deserialize, Serialize, JsonSchema, roundo_cli::UnixCommand)]
         #[serde(deny_unknown_fields)]
         #[unix(path = $path)]
         struct $name {}
-        impl ClientCommandDefinition for $name {
+        impl CommandDefinition for $name {
             type Input = Self;
             type Output = $output;
             const NAME: &'static str = $command;
@@ -922,53 +964,53 @@ unix_empty_command!(
 );
 unix_empty_command!(UnixHudShow, "hud.show", "hud show", HudShowOutput);
 
-#[derive(Deserialize, Serialize, JsonSchema, roundo_proc_macros::UnixCommand)]
+#[derive(Deserialize, Serialize, JsonSchema, roundo_cli::UnixCommand)]
 #[serde(deny_unknown_fields)]
 #[unix(path = "command help")]
 struct UnixCommandHelp {
     command: Option<String>,
 }
-impl ClientCommandDefinition for UnixCommandHelp {
+impl CommandDefinition for UnixCommandHelp {
     type Input = Self;
     type Output = CommandHelpOutput;
     const NAME: &'static str = "command.help";
     const DEV_LEVEL: u8 = 0;
 }
 
-#[derive(Deserialize, Serialize, JsonSchema, roundo_proc_macros::UnixCommand)]
+#[derive(Deserialize, Serialize, JsonSchema, roundo_cli::UnixCommand)]
 #[serde(deny_unknown_fields)]
 #[unix(path = "command schema")]
 struct UnixCommandSchema {
     command: String,
 }
-impl ClientCommandDefinition for UnixCommandSchema {
+impl CommandDefinition for UnixCommandSchema {
     type Input = Self;
     type Output = CommandSchemaOutput;
     const NAME: &'static str = "command.schema";
     const DEV_LEVEL: u8 = 1;
 }
 
-#[derive(Deserialize, Serialize, JsonSchema, roundo_proc_macros::UnixCommand)]
+#[derive(Deserialize, Serialize, JsonSchema, roundo_cli::UnixCommand)]
 #[serde(deny_unknown_fields)]
 #[unix(path = "dev")]
 struct UnixDev {
     level: Option<u8>,
 }
-impl ClientCommandDefinition for UnixDev {
+impl CommandDefinition for UnixDev {
     type Input = Self;
     type Output = DevOutput;
     const NAME: &'static str = "dev";
     const DEV_LEVEL: u8 = 0;
 }
 
-#[derive(Deserialize, Serialize, JsonSchema, roundo_proc_macros::UnixCommand)]
+#[derive(Deserialize, Serialize, JsonSchema, roundo_cli::UnixCommand)]
 #[serde(deny_unknown_fields)]
 #[unix(path = "server add")]
 struct UnixServerAdd {
     name: String,
     address: String,
 }
-impl ClientCommandDefinition for UnixServerAdd {
+impl CommandDefinition for UnixServerAdd {
     type Input = Self;
     type Output = ServerIndexOutput;
     const NAME: &'static str = "server.add";
@@ -976,7 +1018,7 @@ impl ClientCommandDefinition for UnixServerAdd {
 }
 
 struct UnixServerEdit;
-impl ClientCommandDefinition for UnixServerEdit {
+impl CommandDefinition for UnixServerEdit {
     type Input = EmptyArguments;
     type Output = ServerIndexOutput;
     const NAME: &'static str = "server.edit";
@@ -1006,68 +1048,68 @@ impl UnixCommand for UnixServerEdit {
     }
 }
 
-#[derive(Deserialize, Serialize, JsonSchema, roundo_proc_macros::UnixCommand)]
+#[derive(Deserialize, Serialize, JsonSchema, roundo_cli::UnixCommand)]
 #[serde(deny_unknown_fields)]
 #[unix(path = "server delete")]
 struct UnixServerDelete {
     index: usize,
 }
-impl ClientCommandDefinition for UnixServerDelete {
+impl CommandDefinition for UnixServerDelete {
     type Input = Self;
     type Output = EmptyOutput;
     const NAME: &'static str = "server.delete";
     const DEV_LEVEL: u8 = 0;
 }
 
-#[derive(Deserialize, Serialize, JsonSchema, roundo_proc_macros::UnixCommand)]
+#[derive(Deserialize, Serialize, JsonSchema, roundo_cli::UnixCommand)]
 #[serde(deny_unknown_fields)]
 #[unix(path = "server connect")]
 struct UnixServerConnect {
     index: usize,
 }
-impl ClientCommandDefinition for UnixServerConnect {
+impl CommandDefinition for UnixServerConnect {
     type Input = Self;
     type Output = ServerStatusOutput;
     const NAME: &'static str = "server.connect";
     const DEV_LEVEL: u8 = 0;
 }
 
-#[derive(Deserialize, Serialize, JsonSchema, roundo_proc_macros::UnixCommand)]
+#[derive(Deserialize, Serialize, JsonSchema, roundo_cli::UnixCommand)]
 #[serde(deny_unknown_fields)]
 #[unix(path = "settings set")]
 struct UnixSettingsSet {
     key: String,
     value: f32,
 }
-impl ClientCommandDefinition for UnixSettingsSet {
+impl CommandDefinition for UnixSettingsSet {
     type Input = Self;
     type Output = EmptyOutput;
     const NAME: &'static str = "settings.set";
     const DEV_LEVEL: u8 = 0;
 }
 
-#[derive(Deserialize, Serialize, JsonSchema, roundo_proc_macros::UnixCommand)]
+#[derive(Deserialize, Serialize, JsonSchema, roundo_cli::UnixCommand)]
 #[serde(deny_unknown_fields)]
 #[unix(path = "bindings bind")]
 struct UnixBindingsBind {
     key: String,
     actions: Vec<String>,
 }
-impl ClientCommandDefinition for UnixBindingsBind {
+impl CommandDefinition for UnixBindingsBind {
     type Input = Self;
     type Output = EmptyOutput;
     const NAME: &'static str = "bindings.bind";
     const DEV_LEVEL: u8 = 0;
 }
 
-#[derive(Deserialize, Serialize, JsonSchema, roundo_proc_macros::UnixCommand)]
+#[derive(Deserialize, Serialize, JsonSchema, roundo_cli::UnixCommand)]
 #[serde(deny_unknown_fields)]
 #[unix(path = "bindings unbind")]
 struct UnixBindingsUnbind {
     key: String,
     actions: Vec<String>,
 }
-impl ClientCommandDefinition for UnixBindingsUnbind {
+impl CommandDefinition for UnixBindingsUnbind {
     type Input = Self;
     type Output = EmptyOutput;
     const NAME: &'static str = "bindings.unbind";
@@ -1208,15 +1250,15 @@ impl ClientConfigStore {
 /// Accepts an absolute lowercase `http`/`https` URL without credentials or whitespace.
 ///
 /// This is a narrow launch-safety check, not full URL parsing or host validation.
-fn validate_external_url(value: &str) -> Result<&str, crate::json_command::CommandError> {
+fn validate_external_url(value: &str) -> Result<&str, roundo_cli::json_command::CommandError> {
     if value.trim() != value || value.chars().any(char::is_control) {
-        return Err(crate::json_command::CommandError::new(
+        return Err(roundo_cli::json_command::CommandError::new(
             "invalid_external_url",
             "external URL contains whitespace or control characters",
         ));
     }
     let Some((scheme, remainder)) = value.split_once("://") else {
-        return Err(crate::json_command::CommandError::new(
+        return Err(roundo_cli::json_command::CommandError::new(
             "invalid_external_url",
             "external URL must be an absolute http or https URL",
         ));
@@ -1227,7 +1269,7 @@ fn validate_external_url(value: &str) -> Result<&str, crate::json_command::Comma
         || authority.contains('@')
         || authority.chars().any(char::is_whitespace)
     {
-        return Err(crate::json_command::CommandError::new(
+        return Err(roundo_cli::json_command::CommandError::new(
             "invalid_external_url",
             "external URL must use http or https and contain a host without credentials",
         ));
@@ -1270,7 +1312,7 @@ fn configure_webui_ipc_order(app: &mut App) {
 /// Installs missing client resources and the ordered command/data systems.
 ///
 /// Preinserted command pipes and configuration stores are preserved.
-pub(super) fn configure(app: &mut App) {
+fn configure(app: &mut App) {
     configure_webui_ipc_order(app);
     if !app.world().contains_resource::<ClientCommandPipe>() {
         app.insert_resource(ClientCommandPipe::bounded(256));
@@ -1285,7 +1327,7 @@ pub(super) fn configure(app: &mut App) {
     app.init_resource::<ClientDataSyncState>();
     app.init_resource::<ClientUnixAdapter>();
     app.init_resource::<TerminalResponses>();
-    app.init_resource::<crate::client_network::ServerProbeManager>();
+    app.init_resource::<crate::network::ServerProbeManager>();
     app.add_systems(
         Update,
         (
@@ -1304,8 +1346,8 @@ pub(super) fn configure(app: &mut App) {
 fn process_json_commands(
     pipe: Res<ClientCommandPipe>,
     mut config: ResMut<ClientConfigStore>,
-    mut network: ResMut<crate::client_network::ClientNetworkManager>,
-    probes: Res<crate::client_network::ServerProbeManager>,
+    mut network: ResMut<crate::network::ClientNetworkManager>,
+    probes: Res<crate::network::ServerProbeManager>,
     mut dev_level: ResMut<DevLevel>,
     controller: Res<ClientPlayerController>,
     cameras: Query<&Transform>,
@@ -1399,12 +1441,12 @@ fn command_transport_source(
 fn stale_ui_source_response(request: &serde_json::Value) -> serde_json::Value {
     let command_value = &request["command"];
     let command = command_value.as_str().unwrap_or_default().to_owned();
-    serde_json::to_value(crate::json_command::CommandResult {
-        version: crate::json_command::COMMAND_VERSION,
+    serde_json::to_value(roundo_cli::json_command::CommandResult {
+        version: roundo_cli::json_command::COMMAND_VERSION,
         command,
         ok: false,
         data: None,
-        error: Some(crate::json_command::CommandError::new(
+        error: Some(roundo_cli::json_command::CommandError::new(
             "stale_ui_instance",
             "WebView command source is no longer live and loaded",
         )),
@@ -1415,7 +1457,7 @@ fn stale_ui_source_response(request: &serde_json::Value) -> serde_json::Value {
 /// Maps lifecycle-domain failures onto command error categories.
 fn map_ui_lifecycle_error(
     error: roundo_webui::UiLifecycleError,
-) -> crate::json_command::CommandError {
+) -> roundo_cli::json_command::CommandError {
     let code = match error {
         roundo_webui::UiLifecycleError::UiInstanceLimit => "ui_instance_limit",
         roundo_webui::UiLifecycleError::DuplicatePendingOpen => "ui_open_pending",
@@ -1427,7 +1469,7 @@ fn map_ui_lifecycle_error(
         roundo_webui::UiLifecycleError::LoadTimeout => "ui_load_timeout",
         roundo_webui::UiLifecycleError::InternalTree(_) => "internal_ui_error",
     };
-    crate::json_command::CommandError::new(code, error.to_string())
+    roundo_cli::json_command::CommandError::new(code, error.to_string())
 }
 
 // Samples only the currently bound valid camera; missing cameras clear position.
@@ -1477,8 +1519,8 @@ fn publish_client_data_if_changed(
 fn sync_subscribed_client_data(
     time: Res<Time>,
     config: Res<ClientConfigStore>,
-    network: Res<crate::client_network::ClientNetworkManager>,
-    probes: Res<crate::client_network::ServerProbeManager>,
+    network: Res<crate::network::ClientNetworkManager>,
+    probes: Res<crate::network::ServerProbeManager>,
     hud: Res<HudCache>,
     input_registry: Option<Res<InputRegistry>>,
     mut sync: ResMut<ClientDataSyncState>,
@@ -1582,14 +1624,14 @@ fn process_commands(
 /// The terminal remains an opt-in Unix projection: it tokenizes text, projects
 /// it to a versioned JSON envelope, and only then crosses the command pipe.
 fn project_terminal_line(registry: &UnixCommandRegistry, line: &str) -> Option<serde_json::Value> {
-    let tokens = match crate::json_command::tokenize_unix_line(line) {
+    let tokens = match roundo_cli::json_command::tokenize_unix_line(line) {
         Ok(tokens) if tokens.is_empty() => return None,
         Ok(tokens) => tokens,
         Err(error) => return Some(terminal_error("", "invalid_command_envelope", error)),
     };
     Some(match registry.project(&tokens) {
         Ok((command, arguments)) => serde_json::json!({
-            "version": crate::json_command::COMMAND_VERSION,
+            "version": roundo_cli::json_command::COMMAND_VERSION,
             "command": command,
             "arguments": arguments,
         }),
@@ -1663,7 +1705,7 @@ fn collect_terminal_responses(responses: &mut TerminalResponses) -> Vec<serde_js
 
 fn terminal_error(command: &str, code: &str, message: impl std::fmt::Display) -> serde_json::Value {
     serde_json::json!({
-        "version": crate::json_command::COMMAND_VERSION,
+        "version": roundo_cli::json_command::COMMAND_VERSION,
         "command": command,
         "ok": false,
         "error": {"code": code, "message": message.to_string()},
@@ -1676,7 +1718,10 @@ fn print_terminal_response(response: serde_json::Value) {
 
 #[cfg(test)]
 mod tests {
-    use super::{CLIENT_COMMAND_CATALOG, CLIENT_COMMANDS, UiOpenArguments, validate_external_url};
+    use super::{
+        CLIENT_COMMAND_CATALOG, CLIENT_COMMANDS, ClientCommandPipe, ClientCommandSystemSet,
+        UiOpenArguments, validate_external_url,
+    };
     use bevy::prelude::{App, IntoScheduleConfigs, ResMut, Resource, Update};
 
     #[derive(Resource, Default)]
@@ -1703,7 +1748,7 @@ mod tests {
             Update,
             (
                 record_webui_phase.in_set(roundo_webui::WebUiSystemSet::Platform),
-                record_client_phase.in_set(crate::ClientCommandSystemSet::ExecuteAndPublish),
+                record_client_phase.in_set(ClientCommandSystemSet::ExecuteAndPublish),
             ),
         );
 
@@ -1780,8 +1825,8 @@ mod tests {
     #[test]
     fn typed_hud_and_position_definitions_expose_empty_argument_schemas() {
         for schema in [
-            crate::json_command::command_schema::<super::HudShowDefinition>(),
-            crate::json_command::command_schema::<super::DiagnosticsPositionDefinition>(),
+            roundo_cli::json_command::command_schema::<super::HudShowDefinition>(),
+            roundo_cli::json_command::command_schema::<super::DiagnosticsPositionDefinition>(),
         ] {
             assert_eq!(schema["input"]["properties"]["arguments"]["type"], "object");
             assert_eq!(
@@ -1952,7 +1997,7 @@ mod tests {
         assert_eq!(unknown["ok"], false);
         assert_eq!(unknown["error"]["code"], "unknown_command");
 
-        let pipe = crate::ClientCommandPipe::bounded(1);
+        let pipe = ClientCommandPipe::bounded(1);
         let _occupied = pipe
             .io()
             .submit(serde_json::json!({}), roundo_webui::UiCommandSource::Host)
@@ -1966,7 +2011,7 @@ mod tests {
 
     #[test]
     fn terminal_rejects_oversized_serialized_requests_before_queueing() {
-        let pipe = crate::ClientCommandPipe::bounded(1);
+        let pipe = ClientCommandPipe::bounded(1);
         let mut responses = super::TerminalResponses::default();
         let response = super::submit_terminal_request(
             &pipe,
@@ -2018,7 +2063,7 @@ mod tests {
 
     #[test]
     fn terminal_completes_a_disconnected_response_path_with_typed_error() {
-        let pipe = crate::ClientCommandPipe::bounded(1);
+        let pipe = ClientCommandPipe::bounded(1);
         let mut responses = super::TerminalResponses::default();
         assert!(
             super::submit_terminal_request(
@@ -2040,7 +2085,7 @@ mod tests {
 
     #[test]
     fn terminal_collects_the_unmodified_typed_json_response() {
-        let pipe = crate::ClientCommandPipe::bounded(1);
+        let pipe = ClientCommandPipe::bounded(1);
         let mut responses = super::TerminalResponses::default();
         assert!(
             super::submit_terminal_request(

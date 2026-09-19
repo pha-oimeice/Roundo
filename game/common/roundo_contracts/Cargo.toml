@@ -5,5 +5,4 @@ edition.workspace = true
 
 [dependencies]
 postcard.workspace = true
-roundo_toolbox.workspace = true
 serde.workspace = true

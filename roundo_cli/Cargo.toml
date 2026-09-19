@@ -3,21 +3,9 @@ name = "roundo_cli"
 version.workspace = true
 edition.workspace = true
 
-[features]
-client = ["dep:roundo_marionette", "dep:roundo_webui", "dep:roundo_user_config", "dep:roundo_local_coordinate", "dep:roundo_networking", "dep:roundo_presence"]
-server = ["dep:roundo_presence"]
-
 [dependencies]
 bevy.workspace = true
-log.workspace = true
-roundo_local_coordinate = { workspace = true, optional = true }
-roundo_networking = { workspace = true, optional = true }
-roundo_toolbox.workspace = true
+schemars.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-schemars.workspace = true
 roundo_proc_macros.workspace = true
-roundo_marionette = { workspace = true, optional = true }
-roundo_webui = { workspace = true, optional = true }
-roundo_user_config = { workspace = true, optional = true }
-roundo_presence = { workspace = true, optional = true }

@@ -1,9 +1,5 @@
-use roundo_networking::ProtocolError;
-use roundo_networking::connection::{
-    ClientConnection, ConnectionLifecycle, ServerConnection, run_writer,
-};
-use roundo_networking::frame::{self, MAX_FRAME_SIZE};
-use roundo_networking::protocol::{
+use roundo_contracts::UpdateVersion;
+use roundo_contracts::{
     ChunkLoadingAnchorId, ChunkVersion, ClientGameMessage, ClientMessage, ClientResourceMessage,
     ControllerCommand, DestroyBlockControllerAction, JoinableWorldId, LocalCoordinateId,
     Movement3DAction, NearbyJoinableWorld, NearbyPlayer, PlaceBlockControllerAction,
@@ -12,8 +8,12 @@ use roundo_networking::protocol::{
     ServerGameMessage, ServerMessage, ServerResourceMessage, SessionId, SessionInfo, StreamId,
     UserId, UserSession,
 };
+use roundo_networking::ProtocolError;
+use roundo_networking::connection::{
+    ClientConnection, ConnectionLifecycle, ServerConnection, run_writer,
+};
+use roundo_networking::frame::{self, MAX_FRAME_SIZE};
 use roundo_networking::session::{ClientSession, ServerSession, SessionState};
-use roundo_toolbox::UpdateVersion;
 use tokio::io::{AsyncWriteExt, DuplexStream};
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::{Duration, timeout};

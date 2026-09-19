@@ -1,3 +1,4 @@
+mod commands;
 mod config;
 mod my_db;
 mod network;
@@ -5,17 +6,27 @@ mod network;
 use crate::network::ServerNetworkRuntime;
 use log::{debug, info};
 use roundo_cli::RoundoCliPlugin;
-use roundo_ecs_entry::{
-    configure_server_presence_radius, configure_server_tick_rate, create_ecs_server_app,
-    server_local_coordinate_ipc, server_marionette_ipc, server_presence_ipc,
-};
+use roundo_ecs_entry::{ServerEcsConfig, ServerEcsRuntime};
+
+fn init_logger() {
+    let filter_level = if cfg!(debug_assertions) {
+        log::LevelFilter::Debug
+    } else {
+        log::LevelFilter::Info
+    };
+    env_logger::Builder::new()
+        .default_format()
+        .format_level(true)
+        .filter_module("marionette", filter_level)
+        .filter_module("roundo", filter_level)
+        .write_style(env_logger::WriteStyle::Always)
+        .init();
+}
 
 fn main() {
-    roundo_toolbox::init_logger();
+    init_logger();
     // Load the one installation-wide configuration shared with the client.
     std::sync::LazyLock::force(&config::COMMON_CONFIG);
-    configure_server_tick_rate(config::SERVER_CONFIG.gameplay.tick_rate);
-    configure_server_presence_radius(config::SERVER_CONFIG.gameplay.presence_radius);
     let mods_root = config::COMMON_CONFIG.resolved_mod_path();
     let mut resources = roundo_mod_loader::ResourceTypeCatalog::new()
         .register(
@@ -35,15 +46,23 @@ fn main() {
             roundo_mod_loader::ATOMIC_VOXEL_RESOURCE_TYPE,
         )
         .expect("Atomic Voxel Resource Type must be published");
-    let resource_fingerprint = roundo_networking::ResourceCatalogFingerprint(voxels.fingerprint());
+    let resource_fingerprint = roundo_contracts::ResourceCatalogFingerprint(voxels.fingerprint());
+    let (mut app, ecs) = ServerEcsRuntime::new(
+        voxels,
+        ServerEcsConfig {
+            tick_rate: config::SERVER_CONFIG.gameplay.tick_rate,
+            presence_radius: config::SERVER_CONFIG.gameplay.presence_radius,
+        },
+    )
+    .into_parts();
     let _network_runtime = ServerNetworkRuntime::start(
-        server_marionette_ipc(),
-        server_presence_ipc(),
-        server_local_coordinate_ipc(),
+        ecs.marionette,
+        ecs.presence,
+        ecs.local_coordinate,
         resource_fingerprint,
     );
     info!("Server started");
-    let mut app = create_ecs_server_app(voxels);
-    app.add_plugins(RoundoCliPlugin::server()).run();
+    app.add_plugins((RoundoCliPlugin, commands::ServerCommandsPlugin))
+        .run();
     debug!("Main thread terminated.");
 }

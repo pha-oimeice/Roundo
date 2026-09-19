@@ -1,4 +1,4 @@
-//! Composes the fixed-tick authoritative ECS server and domain IPC endpoints.
+//! Composes one fixed-tick authoritative ECS server and its bound IPC endpoints.
 
 use crate::server_integration::ServerDomainIntegrationPlugin;
 use avian3d::PhysicsPlugins;
@@ -16,96 +16,90 @@ use roundo_local_coordinate::{
 use roundo_marionette::{MarionetteServerPlugin, ServerMarionetteIpc};
 use roundo_portal::RoundoPortalPlugin;
 use roundo_presence::{PresenceServerIpc, PresenceServerSettings, RoundoPresenceServerPlugin};
-use std::sync::{
-    LazyLock,
-    atomic::{AtomicU32, Ordering},
-};
 
 const DEFAULT_TICK_RATE: u32 = 20;
+const DEFAULT_PRESENCE_RADIUS: f32 = 128.0;
 
-// Plugin singletons expose stable IPC endpoints before App construction.
-static PRESENCE_PLUGIN: LazyLock<RoundoPresenceServerPlugin> =
-    LazyLock::new(RoundoPresenceServerPlugin::new);
-static MARIONETTE_PLUGIN: LazyLock<MarionetteServerPlugin> =
-    LazyLock::new(MarionetteServerPlugin::new);
-static LOCAL_COORDINATE_PLUGIN: LazyLock<LocalCoordinateServerPlugin> =
-    LazyLock::new(LocalCoordinateServerPlugin::new);
-static TICK_RATE: AtomicU32 = AtomicU32::new(DEFAULT_TICK_RATE);
-static PRESENCE_RADIUS: AtomicU32 = AtomicU32::new(128.0_f32.to_bits());
-
-/// Returns a clone of the network-facing presence endpoint.
-///
-/// All clones share the singleton plugin's queues; constructing an [`App`] does
-/// not replace or disconnect previously returned endpoints.
-pub fn server_presence_ipc() -> PresenceServerIpc {
-    PRESENCE_PLUGIN.ipc()
+/// Process-supplied settings captured when one server ECS App is assembled.
+#[derive(Clone, Copy, Debug)]
+pub struct ServerEcsConfig {
+    /// FixedUpdate frequency in hertz; zero is normalized to one.
+    pub tick_rate: u32,
+    /// Presence distance in world units; Presence normalizes non-finite/non-positive values.
+    pub presence_radius: f32,
 }
 
-/// Returns a clone of the network-facing controller endpoint.
-///
-/// All clones share the singleton plugin's queues; constructing an [`App`] does
-/// not replace or disconnect previously returned endpoints.
-pub fn server_marionette_ipc() -> ServerMarionetteIpc {
-    MARIONETTE_PLUGIN.ipc()
+impl Default for ServerEcsConfig {
+    fn default() -> Self {
+        Self {
+            tick_rate: DEFAULT_TICK_RATE,
+            presence_radius: DEFAULT_PRESENCE_RADIUS,
+        }
+    }
 }
 
-/// Returns a clone of the network-facing coordinate endpoint.
-///
-/// All clones share the singleton plugin's queues; constructing an [`App`] does
-/// not replace or disconnect previously returned endpoints.
-pub fn server_local_coordinate_ipc() -> LocalCoordinateServerIpc {
-    LOCAL_COORDINATE_PLUGIN.ipc()
+/// Network-facing endpoints bound to one concrete server ECS App.
+#[derive(Clone)]
+pub struct ServerEcsEndpoints {
+    /// Controller command endpoint connected to this runtime's Marionette plugin.
+    pub marionette: ServerMarionetteIpc,
+    /// Player lifecycle/snapshot endpoint connected to this runtime's Presence plugin.
+    pub presence: PresenceServerIpc,
+    /// Resource-stream endpoint connected to this runtime's Local Coordinate plugin.
+    pub local_coordinate: LocalCoordinateServerIpc,
 }
 
-/// Configures the fixed-update frequency of subsequently created apps.
-///
-/// Zero is normalized to one tick per second. Existing apps are unaffected;
-/// concurrent calls use last-store-wins semantics.
-pub fn configure_server_tick_rate(tick_rate: u32) {
-    TICK_RATE.store(tick_rate.max(1), Ordering::Relaxed);
+/// One fully assembled authoritative App and exactly its plugin endpoints.
+pub struct ServerEcsRuntime {
+    app: App,
+    endpoints: ServerEcsEndpoints,
 }
 
-/// Configures the presence radius of subsequently created apps.
-///
-/// [`PresenceServerSettings::new`] replaces non-finite or non-positive values
-/// with its default when an app is created. Existing apps are unaffected;
-/// concurrent calls use last-store-wins semantics.
-pub fn configure_server_presence_radius(radius: f32) {
-    PRESENCE_RADIUS.store(radius.to_bits(), Ordering::Relaxed);
+impl ServerEcsRuntime {
+    pub fn new(voxels: AtomicVoxelRegistry, config: ServerEcsConfig) -> Self {
+        let presence = RoundoPresenceServerPlugin::new();
+        let marionette = MarionetteServerPlugin::new();
+        let local_coordinate = LocalCoordinateServerPlugin::new();
+        let endpoints = ServerEcsEndpoints {
+            marionette: marionette.ipc(),
+            presence: presence.ipc(),
+            local_coordinate: local_coordinate.ipc(),
+        };
+        let mut app = App::new();
+        app.insert_resource(voxels)
+            .insert_resource(Time::<Fixed>::from_hz(f64::from(config.tick_rate.max(1))))
+            .insert_resource(PresenceServerSettings::new(config.presence_radius));
+        app.add_plugins((
+            MinimalPlugins,
+            AssetPlugin::default(),
+            MeshPlugin,
+            PhysicsPlugins::default(),
+            RoundoPortalPlugin,
+            marionette,
+            presence,
+            local_coordinate,
+            ServerDomainIntegrationPlugin,
+            BlockInteractionPlugin::default(),
+        ));
+        Self { app, endpoints }
+    }
+
+    /// Separates the App from endpoints that address exactly its plugin instances.
+    ///
+    /// Dropping the App disconnects these channels; later runtimes create new queues.
+    pub fn into_parts(self) -> (App, ServerEcsEndpoints) {
+        (self.app, self.endpoints)
+    }
 }
 
-/// Builds an authoritative app with all server domains installed.
-///
-/// The app takes ownership of `voxels` and snapshots the process-wide tick rate
-/// and presence radius at construction time. It reuses the singleton domain
-/// plugins, so their IPC queues are shared with the endpoint accessors above.
+/// Builds an App when external IPC access is not required.
 pub fn create_ecs_server_app(voxels: AtomicVoxelRegistry) -> App {
-    let mut app = App::new();
-    app.insert_resource(voxels)
-        .insert_resource(Time::<Fixed>::from_hz(f64::from(
-            TICK_RATE.load(Ordering::Relaxed),
-        )))
-        .insert_resource(PresenceServerSettings::new(f32::from_bits(
-            PRESENCE_RADIUS.load(Ordering::Relaxed),
-        )));
-    app.add_plugins((
-        MinimalPlugins,
-        AssetPlugin::default(),
-        MeshPlugin,
-        PhysicsPlugins::default(),
-        RoundoPortalPlugin,
-        (*MARIONETTE_PLUGIN).clone(),
-        (*PRESENCE_PLUGIN).clone(),
-        (*LOCAL_COORDINATE_PLUGIN).clone(),
-        ServerDomainIntegrationPlugin,
-        BlockInteractionPlugin::default(),
-    ));
-    app
+    ServerEcsRuntime::new(voxels, ServerEcsConfig::default())
+        .into_parts()
+        .0
 }
 
 /// Builds and runs a server backed by the built-in voxel registry.
-///
-/// This blocks the current thread until the Bevy app exits.
 pub fn run_ecs_server() {
     create_ecs_server_app(AtomicVoxelRegistry::builtin()).run();
 }

@@ -20,9 +20,11 @@ use bevy::prelude::{
     App, Commands, DetectChanges, Entity, IntoScheduleConfigs, Plugin, Query, Res, ResMut,
     Resource, Update,
 };
-use roundo_contracts::{ChunkLoadingAnchorId, RenderingAnchorState, SerializedPayload};
+use roundo_contracts::{
+    ChunkLoadingAnchorId, RenderingAnchorState, SerializedPayload, UpdateVersion,
+};
 use roundo_toolbox::{
-    CrossbeamThreadPipe, CrossbeamThreadPipeEndpointA, CrossbeamThreadPipeEndpointB, UpdateVersion,
+    CrossbeamThreadPipe, CrossbeamThreadPipeEndpointA, CrossbeamThreadPipeEndpointB,
 };
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;

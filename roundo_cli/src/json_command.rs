@@ -11,7 +11,7 @@ pub const MAX_INPUT_BYTES: usize = 64 * 1024;
 
 /// A command definition owns its typed input/output contract. Adapters only
 /// project to this seam; schema generation never copies hand-written examples.
-pub trait ClientCommandDefinition {
+pub trait CommandDefinition {
     type Input: DeserializeOwned + JsonSchema;
     type Output: Serialize + JsonSchema;
     const NAME: &'static str;
@@ -38,7 +38,7 @@ impl std::error::Error for UnixCommandParseError {}
 
 /// Opt-in Unix text projection. The command dispatcher itself never accepts
 /// text, preserving one source-neutral JSON execution seam.
-pub trait UnixCommand: ClientCommandDefinition {
+pub trait UnixCommand: CommandDefinition {
     const UNIX_PATH: &'static [&'static str];
     fn parse_unix(arguments: &[String]) -> Result<Value, UnixCommandParseError>;
     fn usage() -> String;
@@ -171,7 +171,7 @@ pub fn tokenize_unix_line(line: &str) -> Result<Vec<String>, UnixCommandParseErr
     Ok(tokens)
 }
 
-pub fn command_schema<D: ClientCommandDefinition>() -> Value {
+pub fn command_schema<D: CommandDefinition>() -> Value {
     serde_json::json!({
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "command": D::NAME,
@@ -263,7 +263,7 @@ impl<'a, Context> CommandRegistry<'a, Context> {
     /// Registers a handler through its definition, making strict input
     /// deserialization and output serialization part of the registry rather
     /// than a concern of individual adapters.
-    pub fn register_typed<D: ClientCommandDefinition>(
+    pub fn register_typed<D: CommandDefinition>(
         &mut self,
         handler: impl Fn(D::Input, &mut Context) -> Result<D::Output, CommandError> + 'a,
     ) {
@@ -374,7 +374,7 @@ mod tests {
         echoed: u32,
     }
     struct EchoDefinition;
-    impl ClientCommandDefinition for EchoDefinition {
+    impl CommandDefinition for EchoDefinition {
         type Input = SchemaInput;
         type Output = SchemaOutput;
         const NAME: &'static str = "echo";
@@ -385,7 +385,7 @@ mod tests {
     #[serde(deny_unknown_fields)]
     #[unix(path = "echo")]
     struct EchoUnix {}
-    impl ClientCommandDefinition for EchoUnix {
+    impl CommandDefinition for EchoUnix {
         type Input = Self;
         type Output = serde_json::Value;
         const NAME: &'static str = "echo";
@@ -398,7 +398,7 @@ mod tests {
     struct OptionalUnix {
         value: Option<u32>,
     }
-    impl ClientCommandDefinition for OptionalUnix {
+    impl CommandDefinition for OptionalUnix {
         type Input = Self;
         type Output = serde_json::Value;
         const NAME: &'static str = "optional";
@@ -410,7 +410,7 @@ mod tests {
     struct ManyUnix {
         values: Vec<u32>,
     }
-    impl ClientCommandDefinition for ManyUnix {
+    impl CommandDefinition for ManyUnix {
         type Input = Self;
         type Output = serde_json::Value;
         const NAME: &'static str = "many";
@@ -432,7 +432,7 @@ mod tests {
         #[unix(long)]
         filter: Option<String>,
     }
-    impl ClientCommandDefinition for OptionsUnix {
+    impl CommandDefinition for OptionsUnix {
         type Input = Self;
         type Output = serde_json::Value;
         const NAME: &'static str = "server.probe";

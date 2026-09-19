@@ -5,16 +5,18 @@
 //! chunk-demand events into bounded networking queues.
 
 use log::{debug, info, warn};
+use roundo_contracts::{
+    ClientGameMessage, ClientResourceMessage, ResourceCatalogFingerprint, ServerGameMessage,
+    ServerResourceMessage, StreamId,
+};
 use roundo_local_coordinate::{
     CHUNK_EDGE_LENGTH, LocalCoordinateClientCommand, LocalCoordinateClientEvent,
     LocalCoordinateClientIpc,
 };
 use roundo_marionette::{ClientMarionetteCommand, ClientMarionetteEvent, ClientMarionetteIpc};
 use roundo_networking::{
-    CertificatePolicy, ClientGameMessage, ClientHooks, ClientNetwork,
-    ClientNetworkConfig as NetworkRuntimeConfig, ClientResourceMessage, NetworkError,
-    ResourceCatalogFingerprint, ServerGameMessage, ServerResourceMessage, StreamId,
-    probe_quic_endpoint,
+    CertificatePolicy, ClientHooks, ClientNetwork, ClientNetworkConfig as NetworkRuntimeConfig,
+    NetworkError, probe_quic_endpoint,
 };
 use roundo_presence::{ClientPresenceCommand, ClientPresenceIpc};
 use roundo_toolbox::{BridgeStep, BridgeThreadGroup, run_polling_bridge};
@@ -401,11 +403,6 @@ impl ActiveClientConnection {
             bridges,
             status,
         })
-    }
-
-    /// Returns the trimmed server display name captured at startup.
-    pub fn name(&self) -> &str {
-        &self.name
     }
 
     /// Returns a cloned momentary status updated by networking callbacks.
@@ -822,7 +819,7 @@ mod tests {
             marionette.endpoint_a(),
             presence.endpoint_a(),
             local_coordinate.endpoint_a(),
-            roundo_networking::ResourceCatalogFingerprint::default(),
+            roundo_contracts::ResourceCatalogFingerprint::default(),
         )
     }
 

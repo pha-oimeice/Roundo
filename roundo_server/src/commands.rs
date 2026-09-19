@@ -4,18 +4,18 @@
 //! execution against the Bevy main world. Unix aliases never create independent
 //! command identities or schemas.
 
-use crate::{
-    TerminalInput,
-    json_command::{
-        ClientCommandDefinition, CommandError, CommandRegistry, UnixCommandRegistry,
-        command_schema, tokenize_unix_line,
-    },
-};
 use bevy::{
     app::AppExit,
-    prelude::{App, MessageWriter, Query, Res, ResMut, Resource, Transform, Update, Vec3, With},
+    prelude::{App, MessageWriter, Res, ResMut, Resource, Update},
 };
-use roundo_presence::{Player, PlayerScene, SceneId, ServerPlayer};
+use roundo_cli::{
+    TerminalInput,
+    json_command::{
+        CommandDefinition, CommandError, CommandRegistry, UnixCommandRegistry, command_schema,
+        tokenize_unix_line,
+    },
+};
+use roundo_presence::{PlayerId, PresenceAdmin, SceneId};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
@@ -147,7 +147,7 @@ struct DevOutput {
 macro_rules! definition {
     ($name:ident, $input:ty, $output:ty, $command:literal, $level:literal) => {
         struct $name;
-        impl ClientCommandDefinition for $name {
+        impl CommandDefinition for $name {
             type Input = $input;
             type Output = $output;
             const NAME: &'static str = $command;
@@ -201,11 +201,11 @@ definition!(DevDefinition, DevArguments, DevOutput, "dev", 0);
 
 macro_rules! unix_empty_command {
     ($name:ident, $command:literal, $path:literal, $output:ty) => {
-        #[derive(Deserialize, Serialize, JsonSchema, roundo_proc_macros::UnixCommand)]
+        #[derive(Deserialize, Serialize, JsonSchema, roundo_cli::UnixCommand)]
         #[serde(deny_unknown_fields)]
         #[unix(path = $path)]
         struct $name {}
-        impl ClientCommandDefinition for $name {
+        impl CommandDefinition for $name {
             type Input = Self;
             type Output = $output;
             const NAME: &'static str = $command;
@@ -222,13 +222,13 @@ unix_empty_command!(
 );
 unix_empty_command!(UnixAppQuit, "app.quit", "app quit", AcceptedOutput);
 
-#[derive(Deserialize, Serialize, JsonSchema, roundo_proc_macros::UnixCommand)]
+#[derive(Deserialize, Serialize, JsonSchema, roundo_cli::UnixCommand)]
 #[serde(deny_unknown_fields)]
 #[unix(path = "player position")]
 struct UnixPlayerPosition {
     player_id: u64,
 }
-impl ClientCommandDefinition for UnixPlayerPosition {
+impl CommandDefinition for UnixPlayerPosition {
     type Input = Self;
     type Output = PlayerPositionOutput;
     const NAME: &'static str = "player.position";
@@ -243,25 +243,27 @@ struct UnixPlayerTeleport {
     y: f32,
     z: f32,
 }
-impl ClientCommandDefinition for UnixPlayerTeleport {
+impl CommandDefinition for UnixPlayerTeleport {
     type Input = Self;
     type Output = PlayerTeleportOutput;
     const NAME: &'static str = "player.teleport";
     const DEV_LEVEL: u8 = 0;
 }
 
-impl crate::UnixCommand for UnixPlayerTeleport {
+impl roundo_cli::UnixCommand for UnixPlayerTeleport {
     const UNIX_PATH: &'static [&'static str] = &["player", "teleport"];
 
-    fn parse_unix(arguments: &[String]) -> Result<serde_json::Value, crate::UnixCommandParseError> {
+    fn parse_unix(
+        arguments: &[String],
+    ) -> Result<serde_json::Value, roundo_cli::UnixCommandParseError> {
         if arguments.len() != 4 {
-            return Err(crate::UnixCommandParseError::new(
+            return Err(roundo_cli::UnixCommandParseError::new(
                 "usage: player teleport <player_id> <x> <y> <z>",
             ));
         }
         let player_id = arguments[0]
             .parse::<u64>()
-            .map_err(|_| crate::UnixCommandParseError::new("invalid argument 1"))?;
+            .map_err(|_| roundo_cli::UnixCommandParseError::new("invalid argument 1"))?;
         let translation = [
             parse_finite_coordinate(&arguments[1], 2)?,
             parse_finite_coordinate(&arguments[2], 3)?,
@@ -275,51 +277,55 @@ impl crate::UnixCommand for UnixPlayerTeleport {
     }
 }
 
-#[derive(Deserialize, Serialize, JsonSchema, roundo_proc_macros::UnixCommand)]
+#[derive(Deserialize, Serialize, JsonSchema, roundo_cli::UnixCommand)]
 #[serde(deny_unknown_fields)]
 #[unix(path = "command help")]
 struct UnixCommandHelp {
     command: Option<String>,
 }
-impl ClientCommandDefinition for UnixCommandHelp {
+impl CommandDefinition for UnixCommandHelp {
     type Input = Self;
     type Output = CommandHelpOutput;
     const NAME: &'static str = "command.help";
     const DEV_LEVEL: u8 = 0;
 }
 
-#[derive(Deserialize, Serialize, JsonSchema, roundo_proc_macros::UnixCommand)]
+#[derive(Deserialize, Serialize, JsonSchema, roundo_cli::UnixCommand)]
 #[serde(deny_unknown_fields)]
 #[unix(path = "command schema")]
 struct UnixCommandSchema {
     command: String,
 }
-impl ClientCommandDefinition for UnixCommandSchema {
+impl CommandDefinition for UnixCommandSchema {
     type Input = Self;
     type Output = CommandSchemaOutput;
     const NAME: &'static str = "command.schema";
     const DEV_LEVEL: u8 = 1;
 }
 
-#[derive(Deserialize, Serialize, JsonSchema, roundo_proc_macros::UnixCommand)]
+#[derive(Deserialize, Serialize, JsonSchema, roundo_cli::UnixCommand)]
 #[serde(deny_unknown_fields)]
 #[unix(path = "dev")]
 struct UnixDev {
     level: Option<u8>,
 }
-impl ClientCommandDefinition for UnixDev {
+impl CommandDefinition for UnixDev {
     type Input = Self;
     type Output = DevOutput;
     const NAME: &'static str = "dev";
     const DEV_LEVEL: u8 = 0;
 }
 
-/// Installs console resources and per-update command draining.
-pub(super) fn configure(app: &mut App) {
-    println!("[cli] Roundo server console ready; type 'help' for available commands");
-    app.init_resource::<ServerDevLevel>();
-    app.init_resource::<ServerUnixAdapter>();
-    app.add_systems(Update, process_commands);
+/// Installs the server-owned command catalog over the generic CLI adapter.
+pub(crate) struct ServerCommandsPlugin;
+
+impl bevy::prelude::Plugin for ServerCommandsPlugin {
+    fn build(&self, app: &mut App) {
+        println!("[cli] Roundo server console ready; type 'help' for available commands");
+        app.init_resource::<ServerDevLevel>();
+        app.init_resource::<ServerUnixAdapter>();
+        app.add_systems(Update, process_commands);
+    }
 }
 
 /// Unix text is only terminal input projection. All command execution remains
@@ -327,7 +333,7 @@ pub(super) fn configure(app: &mut App) {
 fn process_commands(
     input: Res<TerminalInput>,
     adapter: Res<ServerUnixAdapter>,
-    mut players: Query<(&Player, &PlayerScene, &mut Transform), With<ServerPlayer>>,
+    mut players: PresenceAdmin,
     mut dev_level: ResMut<ServerDevLevel>,
     mut app_exit: MessageWriter<AppExit>,
 ) {
@@ -356,7 +362,7 @@ fn project_terminal_line(registry: &UnixCommandRegistry, line: &str) -> Option<s
     };
     Some(match registry.project(&tokens) {
         Ok((command, arguments)) => serde_json::json!({
-            "version": crate::json_command::COMMAND_VERSION,
+            "version": roundo_cli::json_command::COMMAND_VERSION,
             "command": command,
             "arguments": arguments,
         }),
@@ -376,14 +382,14 @@ fn project_terminal_line(registry: &UnixCommandRegistry, line: &str) -> Option<s
 fn parse_finite_coordinate(
     value: &str,
     argument_number: usize,
-) -> Result<f32, crate::UnixCommandParseError> {
+) -> Result<f32, roundo_cli::UnixCommandParseError> {
     let coordinate = value.parse::<f32>().map_err(|_| {
-        crate::UnixCommandParseError::new(format!("invalid argument {argument_number}"))
+        roundo_cli::UnixCommandParseError::new(format!("invalid argument {argument_number}"))
     })?;
     if coordinate.is_finite() {
         Ok(coordinate)
     } else {
-        Err(crate::UnixCommandParseError::new(format!(
+        Err(roundo_cli::UnixCommandParseError::new(format!(
             "argument {argument_number} must be finite"
         )))
     }
@@ -395,7 +401,7 @@ fn parse_finite_coordinate(
 /// occurs only after complete envelope and typed-input validation.
 fn dispatch_typed_server_command(
     request: serde_json::Value,
-    players: &mut Query<(&Player, &PlayerScene, &mut Transform), With<ServerPlayer>>,
+    players: &mut PresenceAdmin,
     dev_level: &mut ServerDevLevel,
 ) -> serde_json::Value {
     // This short-lived main-world context is the server's Bevy seam. The
@@ -404,60 +410,49 @@ fn dispatch_typed_server_command(
     let dev_level = RefCell::new(dev_level);
     let mut registry = CommandRegistry::default();
     registry.register_typed::<PlayersListDefinition>(|_, _| {
-        let mut entries = players
-            .borrow_mut()
-            .iter_mut()
-            .map(|(player, scene, transform)| (player.id.0, scene.scene_id, transform.translation))
-            .collect::<Vec<_>>();
-        entries.sort_unstable_by_key(|(player_id, _, _)| *player_id);
         Ok(PlayersListOutput {
-            players: entries
+            players: players
+                .borrow_mut()
+                .players()
                 .into_iter()
-                .map(|(player_id, scene, position)| PlayerDisplay {
-                    player_id,
-                    scene: scene_name(scene),
-                    position: [position.x, position.y, position.z],
+                .map(|player| PlayerDisplay {
+                    player_id: player.player_id.0,
+                    scene: scene_name(player.scene_id),
+                    position: player.translation,
                 })
                 .collect(),
         })
     });
     registry.register_typed::<PlayerPositionDefinition>(|input, _| {
-        let mut players = players.borrow_mut();
-        let Some((_, scene, transform)) = players
-            .iter_mut()
-            .find(|(player, _, _)| player.id.0 == input.player_id)
-        else {
-            return Err(CommandError::new(
+        let player_id = PlayerId(input.player_id);
+        let player = players.borrow_mut().player(player_id).ok_or_else(|| {
+            CommandError::new(
                 "player_not_found",
                 format!("player {} was not found", input.player_id),
-            ));
-        };
-        let position = transform.translation;
+            )
+        })?;
         Ok(PlayerPositionOutput {
-            player_id: input.player_id,
-            scene: scene_name(scene.scene_id),
-            position: [position.x, position.y, position.z],
+            player_id: player.player_id.0,
+            scene: scene_name(player.scene_id),
+            position: player.translation,
         })
     });
     registry.register_typed::<PlayerTeleportDefinition>(|input, _| {
-        let mut players = players.borrow_mut();
-        let Some((_, _, mut transform)) = players
-            .iter_mut()
-            .find(|(player, _, _)| player.id.0 == input.player_id)
-        else {
-            return Err(CommandError::new(
-                "player_not_found",
-                format!("player {} was not found", input.player_id),
-            ));
-        };
-        transform.translation = Vec3::from_array(input.translation);
+        let position = players
+            .borrow_mut()
+            .teleport(PlayerId(input.player_id), input.translation)
+            .ok_or_else(|| {
+                CommandError::new(
+                    "player_not_found_or_invalid_position",
+                    format!(
+                        "player {} was not found or the requested position was non-finite",
+                        input.player_id
+                    ),
+                )
+            })?;
         Ok(PlayerTeleportOutput {
             player_id: input.player_id,
-            position: [
-                transform.translation.x,
-                transform.translation.y,
-                transform.translation.z,
-            ],
+            position,
         })
     });
     registry.register_typed::<AppQuitDefinition>(|_, _| {
@@ -539,7 +534,7 @@ fn command_dev_level(name: &str) -> Option<u8> {
 /// Constructs the same versioned error shape returned by typed dispatch.
 fn terminal_error(command: &str, code: &str, message: impl std::fmt::Display) -> serde_json::Value {
     serde_json::json!({
-        "version": crate::json_command::COMMAND_VERSION,
+        "version": roundo_cli::json_command::COMMAND_VERSION,
         "command": command,
         "ok": false,
         "error": {"code": code, "message": message.to_string()},
@@ -561,7 +556,8 @@ fn scene_name(scene: SceneId) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bevy::prelude::App;
+    use bevy::prelude::{App, Transform, Vec3};
+    use roundo_presence::{Player, PlayerScene, ServerPlayer};
 
     #[test]
     fn terminal_projects_canonical_paths_and_aliases_to_the_same_typed_envelopes() {

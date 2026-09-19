@@ -6,15 +6,17 @@
 //! requeued by this adapter.
 
 use log::{debug, info, warn};
+use roundo_contracts::{
+    ClientGameMessage, ClientResourceMessage, ConnectionId, ResourceCatalogFingerprint,
+    ServerGameMessage, ServerResourceMessage, SessionId, StreamId, UserId, UserSession,
+};
 use roundo_local_coordinate::{
     CHUNK_EDGE_LENGTH, LocalCoordinateServerCommand, LocalCoordinateServerEvent,
     LocalCoordinateServerIpc,
 };
 use roundo_marionette::{ServerMarionetteCommand, ServerMarionetteIpc};
 use roundo_networking::{
-    ClientGameMessage, ClientResourceMessage, ConnectionId, HookFuture, PublicSession,
-    ResourceCatalogFingerprint, ServerHooks, ServerNetwork, ServerNetworkConfig,
-    ServerResourceMessage, SessionId, StreamId, UserSession,
+    HookFuture, PublicSession, ServerHooks, ServerNetwork, ServerNetworkConfig,
 };
 use roundo_presence::{PresenceServerCommand, PresenceServerEvent, PresenceServerIpc};
 use roundo_toolbox::{BridgeStep, BridgeThreadGroup, run_polling_bridge};
@@ -152,7 +154,7 @@ impl ServerHooks for ServerHooksAdapter {
             );
             Ok(PublicSession {
                 user_session: UserSession {
-                    user_id: roundo_networking::UserId(session.owner_user_id),
+                    user_id: UserId(session.owner_user_id),
                     session_id: SessionId(session.id),
                 },
                 session_name: session.name,
@@ -300,7 +302,7 @@ fn bridge_game_ecs_events(
                 network.send_to_connection(
                     connection_id,
                     StreamId::Stream0,
-                    roundo_networking::ServerGameMessage::PresenceSnapshot { snapshot },
+                    ServerGameMessage::PresenceSnapshot { snapshot },
                 );
             }
             PresenceServerEvent::PlayerJoined {
@@ -327,7 +329,7 @@ fn bridge_game_ecs_events(
                 network.send_to_connection(
                     connection_id,
                     StreamId::Stream0,
-                    roundo_networking::ServerGameMessage::PlayerState { state },
+                    ServerGameMessage::PlayerState { state },
                 );
             }
         }

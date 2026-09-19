@@ -221,7 +221,7 @@ fn transport_config() -> Arc<quinn::TransportConfig> {
 #[cfg(test)]
 mod tests {
     use super::quinn_priority;
-    use crate::StreamId;
+    use roundo_contracts::StreamId;
 
     #[test]
     fn stream0_has_higher_quinn_priority_than_stream1() {

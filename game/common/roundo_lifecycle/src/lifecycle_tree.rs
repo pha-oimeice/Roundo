@@ -1,19 +1,16 @@
-//! Pure ownership/lifetime tree used by UI lifecycle adapters.
-//!
-//! The tree deliberately has no ECS, scheduling, or resource-cleanup dependency.
-//! A root-unrestricted commit leaves a terminal empty tree; a root replacement owner
-//! creates its replacement tree separately.
+//! UI ownership and lifetime semantics over the generic ordered-tree algorithm.
 
-use std::collections::{HashMap, HashSet};
+use roundo_algorithm::graph::{
+    OrderedRootedTree, RootedTreeError, RootedTreeInvariantError, TreeReparent,
+};
+use std::collections::HashSet;
 use std::hash::Hash;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 static NEXT_TREE_ID: AtomicU64 = AtomicU64::new(1);
 
-/// Rejected tree query, mutation, or destruction transaction.
-///
-/// Planning errors never mutate the tree. [`AnchorTree::apply_plan`] validates
-/// plan identity and invariants before structural mutation.
+pub type TreeInvariantError = RootedTreeInvariantError;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TreeError {
     UnknownParent,
@@ -25,21 +22,6 @@ pub enum TreeError {
     InvalidTree(TreeInvariantError),
 }
 
-/// Exact invariant violated by [`AnchorTree::validate`].
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum TreeInvariantError {
-    MissingRoot,
-    RootHasParent,
-    MissingParent,
-    MissingChild,
-    ParentChildMismatch,
-    DuplicateChild,
-    RootHasParentReference,
-    Cycle,
-    DisconnectedNode,
-}
-
-/// One surviving subtree root moved from `from` to `to` during destruction.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Reparented<N> {
     pub node: N,
@@ -47,17 +29,12 @@ pub struct Reparented<N> {
     pub to: N,
 }
 
-/// Deterministically ordered structural effects of a committed destruction.
-///
-/// `destroyed` follows tree traversal order; `reparented` contains only
-/// survival-boundary roots, whose descendants move with them.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DestructionOutcome<N> {
     pub destroyed: Vec<N>,
     pub reparented: Vec<Reparented<N>>,
 }
 
-/// An immutable, validated destruction transaction.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DestructionPlan<N> {
     tree_id: u64,
@@ -66,29 +43,23 @@ pub struct DestructionPlan<N> {
 }
 
 impl<N> DestructionPlan<N> {
-    /// Nodes that would be removed if this still-current plan is committed.
     pub fn destroyed(&self) -> &[N] {
         &self.outcome.destroyed
     }
 
-    /// Surviving subtree roots that would be reparented on commit.
     pub fn reparented(&self) -> &[Reparented<N>] {
         &self.outcome.reparented
     }
 }
 
-#[derive(Debug)]
-struct Node<N, M> {
-    metadata: M,
-    parent: Option<N>,
-    children: Vec<N>,
-}
-
-/// A single-root ownership tree with deterministic insertion and traversal order.
+/// UI lifecycle ownership tree.
+///
+/// Generic topology, ordering, and invariant checks are delegated to
+/// [`OrderedRootedTree`]. This module owns lifecycle independence, destruction
+/// planning, stale-plan rejection, and lifecycle-specific errors.
 #[derive(Debug)]
 pub struct AnchorTree<N, M> {
-    root: Option<N>,
-    nodes: HashMap<N, Node<N, M>>,
+    topology: OrderedRootedTree<N, M>,
     tree_id: u64,
     version: u64,
 }
@@ -97,100 +68,42 @@ impl<N, M> AnchorTree<N, M>
 where
     N: Copy + Eq + Hash,
 {
-    /// Creates a valid one-node tree with a fresh process-local tree identity.
     pub fn new(root: N, metadata: M) -> Self {
-        let tree_id = NEXT_TREE_ID.fetch_add(1, Ordering::Relaxed);
-        let mut nodes = HashMap::new();
-        nodes.insert(
-            root,
-            Node {
-                metadata,
-                parent: None,
-                children: Vec::new(),
-            },
-        );
         Self {
-            root: Some(root),
-            nodes,
-            tree_id,
+            topology: OrderedRootedTree::new(root, metadata),
+            tree_id: NEXT_TREE_ID.fetch_add(1, Ordering::Relaxed),
             version: 0,
         }
     }
 
-    /// The root is absent only after an unrestricted root destruction commit.
     pub fn root(&self) -> Option<N> {
-        self.root
+        self.topology.root()
     }
 
-    /// Returns whether `node` is live in this tree.
     pub fn contains(&self, node: N) -> bool {
-        self.nodes.contains_key(&node)
+        self.topology.contains(node)
     }
 
-    /// Returns the parent of a live non-root node.
-    ///
-    /// `None` means root or unknown; use [`contains`](Self::contains) to
-    /// distinguish those cases.
     pub fn parent(&self, node: N) -> Option<N> {
-        let entry = self.nodes.get(&node);
-        entry.and_then(|entry| entry.parent)
+        self.topology.parent(node)
     }
 
-    /// Borrows metadata for a live node, or returns `None` when unknown.
     pub fn metadata(&self, node: N) -> Option<&M> {
-        let entry = self.nodes.get(&node);
-        entry.map(|entry| &entry.metadata)
+        self.topology.metadata(node)
     }
 
-    /// Iterates direct children in insertion/reparent order.
-    ///
-    /// An unknown node produces an empty iterator. The iterator borrows the tree
-    /// and cannot outlive a mutable tree operation.
     pub fn children(&self, node: N) -> impl Iterator<Item = N> + '_ {
-        let entry = self.nodes.get(&node);
-        entry
-            .into_iter()
-            .flat_map(|entry| entry.children.iter().copied())
+        self.topology.children(node)
     }
 
-    /// Appends a new leaf to `parent`'s ordered children.
-    ///
-    /// Self-parenting, duplicate identity, and an unknown parent are rejected
-    /// before mutation. Success advances the tree version and invalidates every
-    /// outstanding [`DestructionPlan`] for this tree.
     pub fn insert_child(&mut self, parent: N, node: N, metadata: M) -> Result<(), TreeError> {
-        if parent == node {
-            return Err(TreeError::SelfParent);
-        }
-        if self.nodes.contains_key(&node) {
-            return Err(TreeError::DuplicateNode);
-        }
-        if !self.nodes.contains_key(&parent) {
-            return Err(TreeError::UnknownParent);
-        }
-        self.nodes.insert(
-            node,
-            Node {
-                metadata,
-                parent: Some(parent),
-                children: Vec::new(),
-            },
-        );
-        self.nodes
-            .get_mut(&parent)
-            .expect("parent was checked")
-            .children
-            .push(node);
+        self.topology
+            .insert_child(parent, node, metadata)
+            .map_err(map_insert_error)?;
         self.version += 1;
         Ok(())
     }
 
-    /// Calculates a complete transaction without changing this tree.
-    ///
-    /// Duplicate explicit targets are deduplicated. An explicitly targeted
-    /// independent node is still destroyed; independence only protects the
-    /// first non-target boundary below a destruction cascade. If root is
-    /// targeted, `root_is_unrestricted` must be true and no descendant survives.
     pub fn plan_destruction<I, F>(
         &self,
         explicit_targets: I,
@@ -204,11 +117,11 @@ where
         self.validate().map_err(TreeError::InvalidTree)?;
         let targets: HashSet<N> = explicit_targets.into_iter().collect();
         for target in &targets {
-            if !self.nodes.contains_key(target) {
+            if !self.topology.contains(*target) {
                 return Err(TreeError::UnknownTarget);
             }
         }
-        let Some(root) = self.root else {
+        let Some(root) = self.topology.root() else {
             return Ok(DestructionPlan {
                 tree_id: self.tree_id,
                 version: self.version,
@@ -237,12 +150,6 @@ where
         })
     }
 
-    /// Atomically applies a plan created from this exact, unchanged tree.
-    ///
-    /// A plan from another tree or an older version returns
-    /// [`TreeError::PlanDoesNotMatchTree`] before mutation. Success advances the
-    /// version, invalidating all other plans, and may leave the terminal empty
-    /// tree when the root was unrestricted.
     pub fn apply_plan(
         &mut self,
         plan: DestructionPlan<N>,
@@ -252,106 +159,24 @@ where
         }
         self.validate().map_err(TreeError::InvalidTree)?;
         let outcome = plan.outcome;
-        let destroyed: HashSet<N> = outcome.destroyed.iter().copied().collect();
-
-        for change in &outcome.reparented {
-            if destroyed.contains(&change.node)
-                || destroyed.contains(&change.to)
-                || self.parent(change.node) != Some(change.from)
-            {
-                return Err(TreeError::PlanDoesNotMatchTree);
-            }
-        }
-        for change in &outcome.reparented {
-            self.nodes
-                .get_mut(&change.from)
-                .expect("validated plan")
-                .children
-                .retain(|&child| child != change.node);
-            self.nodes
-                .get_mut(&change.node)
-                .expect("validated plan")
-                .parent = Some(change.to);
-            self.nodes
-                .get_mut(&change.to)
-                .expect("validated plan")
-                .children
-                .push(change.node);
-        }
-        // Explicit targets may occur below a surviving boundary. Remove those
-        // target links from their surviving parents before dropping their nodes.
-        for node in &outcome.destroyed {
-            if let Some(parent) = self.parent(*node) {
-                if !destroyed.contains(&parent) {
-                    self.nodes
-                        .get_mut(&parent)
-                        .expect("validated plan")
-                        .children
-                        .retain(|&child| child != *node);
-                }
-            }
-        }
-        for node in &outcome.destroyed {
-            let removed = self.nodes.remove(node);
-            debug_assert!(removed.is_some(), "validated destruction target must exist");
-        }
-        if self.root.is_some_and(|root| destroyed.contains(&root)) {
-            self.root = None;
-        }
+        let edits = outcome
+            .reparented
+            .iter()
+            .map(|change| TreeReparent {
+                node: change.node,
+                from: change.from,
+                to: change.to,
+            })
+            .collect::<Vec<_>>();
+        self.topology
+            .apply_edits(&edits, &outcome.destroyed)
+            .map_err(|_| TreeError::PlanDoesNotMatchTree)?;
         self.version += 1;
-        self.validate().map_err(TreeError::InvalidTree)?;
         Ok(outcome)
     }
 
-    /// Verifies all internal edges rather than attempting to repair invalid state.
     pub fn validate(&self) -> Result<(), TreeInvariantError> {
-        let Some(root) = self.root else {
-            return if self.nodes.is_empty() {
-                Ok(())
-            } else {
-                Err(TreeInvariantError::MissingRoot)
-            };
-        };
-        let root_entry = self.nodes.get(&root);
-        let root_entry = root_entry.ok_or(TreeInvariantError::MissingRoot)?;
-        if root_entry.parent.is_some() {
-            return Err(TreeInvariantError::RootHasParent);
-        }
-        for (&node, entry) in &self.nodes {
-            if node == root && entry.parent.is_some() {
-                return Err(TreeInvariantError::RootHasParent);
-            }
-            if node != root && entry.parent.is_none() {
-                return Err(TreeInvariantError::MissingParent);
-            }
-            if let Some(parent) = entry.parent {
-                let parent_entry = self.nodes.get(&parent);
-                let parent_entry = parent_entry.ok_or(TreeInvariantError::MissingParent)?;
-                if !parent_entry.children.contains(&node) {
-                    return Err(TreeInvariantError::ParentChildMismatch);
-                }
-            }
-            let mut unique = HashSet::new();
-            for &child in &entry.children {
-                if !unique.insert(child) {
-                    return Err(TreeInvariantError::DuplicateChild);
-                }
-                if child == root {
-                    return Err(TreeInvariantError::RootHasParentReference);
-                }
-                let child_entry = self.nodes.get(&child);
-                let child_entry = child_entry.ok_or(TreeInvariantError::MissingChild)?;
-                if child_entry.parent != Some(node) {
-                    return Err(TreeInvariantError::ParentChildMismatch);
-                }
-            }
-        }
-        let mut visited = HashSet::new();
-        self.validate_reachable(root, &mut visited, &mut HashSet::new())?;
-        if visited.len() != self.nodes.len() {
-            return Err(TreeInvariantError::DisconnectedNode);
-        }
-        Ok(())
+        self.topology.validate()
     }
 
     fn collect_all(&self, node: N, destroyed: &mut Vec<N>) {
@@ -361,7 +186,6 @@ where
         }
     }
 
-    // `destroying_to` is the nearest surviving ancestor for the active cascade.
     fn plan_visit<F>(
         &self,
         node: N,
@@ -374,14 +198,18 @@ where
     {
         let explicit = targets.contains(&node);
         if let Some(surviving_parent) = destroying_to {
-            if !explicit && is_independent(node, &self.nodes[&node].metadata) {
-                let from = self.nodes[&node].parent.expect("non-root boundary");
+            if !explicit
+                && is_independent(
+                    node,
+                    self.topology.metadata(node).expect("planned node is live"),
+                )
+            {
+                let from = self.topology.parent(node).expect("non-root boundary");
                 outcome.reparented.push(Reparented {
                     node,
                     from,
                     to: surviving_parent,
                 });
-                // A boundary preserves ordinary descendants, but never masks an explicit target.
                 for child in self.children(node) {
                     self.plan_visit(child, None, targets, is_independent, outcome);
                 }
@@ -398,8 +226,9 @@ where
                 );
             }
         } else if explicit {
-            let parent = self.nodes[&node]
-                .parent
+            let parent = self
+                .topology
+                .parent(node)
                 .expect("root target handled separately");
             outcome.destroyed.push(node);
             for child in self.children(node) {
@@ -411,25 +240,17 @@ where
             }
         }
     }
+}
 
-    fn validate_reachable(
-        &self,
-        node: N,
-        visited: &mut HashSet<N>,
-        active: &mut HashSet<N>,
-    ) -> Result<(), TreeInvariantError> {
-        if !active.insert(node) {
-            return Err(TreeInvariantError::Cycle);
+fn map_insert_error(error: RootedTreeError) -> TreeError {
+    match error {
+        RootedTreeError::UnknownParent => TreeError::UnknownParent,
+        RootedTreeError::DuplicateNode => TreeError::DuplicateNode,
+        RootedTreeError::SelfParent => TreeError::SelfParent,
+        RootedTreeError::InvalidStructure(error) => TreeError::InvalidTree(error),
+        RootedTreeError::UnknownNode | RootedTreeError::InvalidReparent => {
+            TreeError::PlanDoesNotMatchTree
         }
-        if !visited.insert(node) {
-            return Err(TreeInvariantError::Cycle);
-        }
-        for child in self.children(node) {
-            self.validate_reachable(child, visited, active)?;
-        }
-        let removed = active.remove(&node);
-        debug_assert!(removed, "reachable node must be active during traversal");
-        Ok(())
     }
 }
 

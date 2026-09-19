@@ -31,9 +31,10 @@ use bevy::prelude::{
 };
 use roundo_contracts::{
     ChunkLoadingAnchorId, ConnectionId, PlayerId, RenderingAnchorState, SceneId, SerializedPayload,
+    UpdateVersion,
 };
 use roundo_toolbox::{
-    CrossbeamThreadPipe, CrossbeamThreadPipeEndpointA, CrossbeamThreadPipeEndpointB, UpdateVersion,
+    CrossbeamThreadPipe, CrossbeamThreadPipeEndpointA, CrossbeamThreadPipeEndpointB,
 };
 use std::collections::{HashMap, HashSet, VecDeque};
 
