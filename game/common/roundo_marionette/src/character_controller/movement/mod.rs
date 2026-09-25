@@ -11,10 +11,10 @@ pub use roundo_contracts::Movement3DAction;
 #[cfg(test)]
 pub(super) use self::client::movement_world_direction;
 pub(super) use self::client::{move_spirit_camera, route_player_movement};
-pub(super) use self::server::{accept_movement_commands, apply_movement};
+pub(super) use self::server::accept_movement_commands;
 
-/// Temporary authoritative speed until the kinematic system owns movement.
-pub const PLAYER_MOVE_SPEED: f32 = 5.0;
+/// Accepted controller-domain input. Composition adapters route it to a Creature;
+/// Marionette deliberately owns no physical pose or velocity.
 
 /// Authoritative movement controller and latest accepted direction.
 #[derive(Component, Clone, Debug, Default)]
@@ -29,7 +29,7 @@ impl Movement3D {
         action: Movement3DAction,
     ) -> Result<ControllerCommand<Movement3DAction>, super::ControllerError> {
         let command = self.commands.issue(action)?;
-        self.direction = Vec3::from_array(action.direction).normalize_or_zero();
+        self.direction = Vec3::from_array(action.direction);
         Ok(command)
     }
 
@@ -38,7 +38,7 @@ impl Movement3D {
         command: ControllerCommand<Movement3DAction>,
     ) -> Result<Movement3DAction, super::ControllerError> {
         let action = self.commands.apply_command(command)?;
-        self.direction = Vec3::from_array(action.direction).normalize_or_zero();
+        self.direction = Vec3::from_array(action.direction);
         Ok(action)
     }
 
@@ -62,6 +62,13 @@ impl ControllerAction for Movement3DAction {
 pub(super) struct Movement3DMessage {
     pub entity: bevy::prelude::Entity,
     pub command: ControllerCommand<Movement3DAction>,
+}
+
+#[derive(Message, Clone, Copy, Debug, PartialEq)]
+pub struct AcceptedMovementIntent {
+    pub controller: bevy::prelude::Entity,
+    pub local_axis: [f32; 3],
+    pub sequence: u64,
 }
 
 #[cfg(test)]

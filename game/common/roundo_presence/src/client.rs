@@ -1,8 +1,9 @@
 //! Client projection of authoritative presence snapshots into ECS marker entities.
 //!
 //! Each snapshot is treated as the complete desired player/world set. Missing
-//! identities are despawned, existing identities retain their ECS entity, and
-//! player translation is interpolated over one nominal server tick.
+//! identities are despawned, existing identities retain their ECS entity, player
+//! translation is interpolated over one nominal server tick, and authoritative
+//! gaze rotation is projected without synthetic animation.
 
 use crate::{JoinableWorld, JoinableWorldId, Player, PlayerId, PresenceSnapshot};
 use bevy::prelude::{
@@ -55,6 +56,7 @@ impl Plugin for RoundoPresenceClientPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<ClientPresenceSettings>()
             .init_resource::<LocalPlayerIdentity>()
+            .init_resource::<ClientPresenceSession>()
             .init_resource::<ClientPresenceRegistry>()
             .insert_resource(ClientPresencePipe(self.pipe.endpoint_b()))
             .add_systems(
@@ -105,7 +107,7 @@ impl Default for ClientPresenceSettings {
 
 /// Latest own-player identity received from the presence server.
 ///
-/// The value is `None` before the first snapshot and after [`ClientPresenceCommand::Clear`].
+/// The value is `None` outside an active session and before its first snapshot.
 #[derive(Resource, Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct LocalPlayerIdentity {
     player_id: Option<PlayerId>,
@@ -118,13 +120,20 @@ impl LocalPlayerIdentity {
     }
 }
 
-/// Authoritative replacement or teardown command consumed by the client ECS.
+/// Authoritative session lifecycle and replacement snapshots consumed by client ECS.
 #[derive(Clone, Debug)]
 pub enum ClientPresenceCommand {
+    /// Starts a fresh authority session after invalidating every prior projection.
+    BeginSession { epoch: u64 },
     /// Reconciles markers to the complete supplied presence snapshot.
     Snapshot(PresenceSnapshot),
-    /// Despawns all projected markers and clears the local player identity.
-    Clear,
+    /// Ends the matching authority session. Repeated or stale ends are harmless.
+    EndSession { epoch: u64 },
+}
+
+#[derive(Resource, Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct ClientPresenceSession {
+    epoch: Option<u64>,
 }
 
 /// Domain-side player marker observed by rendering.
@@ -173,13 +182,19 @@ fn apply_presence_commands(
     mut commands: Commands,
     pipe: Res<ClientPresencePipe>,
     settings: Res<ClientPresenceSettings>,
+    mut session: ResMut<ClientPresenceSession>,
     mut local_identity: ResMut<LocalPlayerIdentity>,
     mut registry: ResMut<ClientPresenceRegistry>,
-    mut players: Query<&mut PlayerTranslationInterpolation>,
+    mut players: Query<(&mut PlayerTranslationInterpolation, &mut Transform)>,
 ) {
     while let Some(command) = pipe.0.try_receive() {
         match command {
-            ClientPresenceCommand::Snapshot(snapshot) => apply_snapshot(
+            ClientPresenceCommand::BeginSession { epoch } => {
+                clear_presence(&mut commands, &mut registry);
+                local_identity.player_id = None;
+                session.epoch = Some(epoch);
+            }
+            ClientPresenceCommand::Snapshot(snapshot) if session.epoch.is_some() => apply_snapshot(
                 &mut commands,
                 &settings,
                 &mut registry,
@@ -187,10 +202,13 @@ fn apply_presence_commands(
                 &mut local_identity,
                 snapshot,
             ),
-            ClientPresenceCommand::Clear => {
+            ClientPresenceCommand::Snapshot(_) => {}
+            ClientPresenceCommand::EndSession { epoch } if session.epoch == Some(epoch) => {
                 clear_presence(&mut commands, &mut registry);
                 local_identity.player_id = None;
+                session.epoch = None;
             }
+            ClientPresenceCommand::EndSession { .. } => {}
         }
     }
 }
@@ -199,7 +217,7 @@ fn apply_snapshot(
     commands: &mut Commands,
     settings: &ClientPresenceSettings,
     registry: &mut ClientPresenceRegistry,
-    players: &mut Query<&mut PlayerTranslationInterpolation>,
+    players: &mut Query<(&mut PlayerTranslationInterpolation, &mut Transform)>,
     local_identity: &mut LocalPlayerIdentity,
     snapshot: PresenceSnapshot,
 ) {
@@ -219,9 +237,10 @@ fn apply_snapshot(
 
     for player in snapshot.players {
         if let Some(visual) = registry.players.get(&player.player_id).copied() {
-            if let Ok(mut interpolation) = players.get_mut(visual.entity) {
+            if let Ok((mut interpolation, mut transform)) = players.get_mut(visual.entity) {
                 let current = interpolation.0.value();
                 interpolation.0.retarget(current, player.translation);
+                transform.rotation = validated_rotation(player.rotation);
             }
             continue;
         }
@@ -235,7 +254,8 @@ fn apply_snapshot(
                     visible: true,
                 },
                 PlayerTranslationInterpolation::stationary(player.translation),
-                Transform::from_translation(Vec3::from_array(player.translation)),
+                Transform::from_translation(Vec3::from_array(player.translation))
+                    .with_rotation(validated_rotation(player.rotation)),
             ))
             .id();
         registry
@@ -301,8 +321,6 @@ fn animate_player_markers(
 ) {
     for (mut interpolation, mut transform) in &mut players {
         transform.translation = Vec3::from_array(interpolation.0.advance(time.delta_secs()));
-        transform.rotation *= Quat::from_rotation_y(time.delta_secs() * 1.4);
-        transform.rotation *= Quat::from_rotation_x(time.delta_secs() * 0.7);
     }
 }
 
@@ -315,6 +333,15 @@ fn sync_joinable_world_radius(
     }
     for mut transform in &mut worlds {
         transform.scale = Vec3::splat(settings.joinable_world_radius());
+    }
+}
+
+fn validated_rotation(rotation: [f32; 4]) -> Quat {
+    let rotation = Quat::from_array(rotation);
+    if rotation.is_finite() && rotation.length_squared() > f32::EPSILON {
+        rotation.normalize()
+    } else {
+        Quat::IDENTITY
     }
 }
 
@@ -338,6 +365,7 @@ mod tests {
             .add_systems(Update, animate_player_markers);
         let mut interpolation = PlayerTranslationInterpolation::stationary([2.0, 0.0, 0.0]);
         interpolation.0.retarget([2.0, 0.0, 0.0], [12.0, 0.0, 0.0]);
+        let original_rotation = Quat::from_rotation_y(0.7);
         let entity = app
             .world_mut()
             .spawn((
@@ -346,7 +374,7 @@ mod tests {
                     visible: true,
                 },
                 interpolation,
-                Transform::from_xyz(2.0, 0.0, 0.0),
+                Transform::from_xyz(2.0, 0.0, 0.0).with_rotation(original_rotation),
             ))
             .id();
 
@@ -357,9 +385,84 @@ mod tests {
             ));
         app.update();
 
+        let transform = app.world().get::<Transform>(entity).unwrap();
+        assert_eq!(transform.translation, Vec3::new(7.0, 0.0, 0.0));
+        assert!(
+            transform
+                .rotation
+                .abs_diff_eq(original_rotation, f32::EPSILON)
+        );
+    }
+
+    #[test]
+    fn authoritative_player_rotation_updates_the_projected_gaze() {
+        let plugin = RoundoPresenceClientPlugin::new();
+        let ipc = plugin.ipc();
+        let mut app = App::new();
+        app.init_resource::<Time>().add_plugins(plugin);
+        let player_id = PlayerId(3);
+        let expected = Quat::from_rotation_y(1.1);
+        ipc.try_send(ClientPresenceCommand::BeginSession { epoch: 1 })
+            .unwrap();
+        ipc.try_send(ClientPresenceCommand::Snapshot(PresenceSnapshot {
+            own_player_id: player_id,
+            players: vec![roundo_contracts::NearbyPlayer {
+                player_id,
+                translation: [0.0; 3],
+                rotation: expected.to_array(),
+            }],
+            joinable_worlds: Vec::new(),
+        }))
+        .unwrap();
+
+        app.update();
+
+        let transform = app
+            .world_mut()
+            .query_filtered::<&Transform, bevy::prelude::With<ClientPlayerMarker>>()
+            .single(app.world())
+            .unwrap();
+        assert!(transform.rotation.abs_diff_eq(expected, f32::EPSILON));
+    }
+
+    #[test]
+    fn ending_a_session_removes_identity_and_every_presence_projection() {
+        let plugin = RoundoPresenceClientPlugin::new();
+        let ipc = plugin.ipc();
+        let mut app = App::new();
+        app.init_resource::<Time>().add_plugins(plugin);
+        ipc.try_send(ClientPresenceCommand::BeginSession { epoch: 3 })
+            .unwrap();
+        ipc.try_send(ClientPresenceCommand::Snapshot(PresenceSnapshot {
+            own_player_id: PlayerId(8),
+            players: vec![roundo_contracts::NearbyPlayer {
+                player_id: PlayerId(8),
+                translation: [1.0, 2.0, 3.0],
+                rotation: Quat::IDENTITY.to_array(),
+            }],
+            joinable_worlds: Vec::new(),
+        }))
+        .unwrap();
+        app.update();
         assert_eq!(
-            app.world().get::<Transform>(entity).unwrap().translation,
-            Vec3::new(7.0, 0.0, 0.0)
+            app.world().resource::<LocalPlayerIdentity>().player_id(),
+            Some(PlayerId(8))
+        );
+
+        ipc.try_send(ClientPresenceCommand::EndSession { epoch: 3 })
+            .unwrap();
+        app.update();
+
+        assert_eq!(
+            app.world().resource::<LocalPlayerIdentity>().player_id(),
+            None
+        );
+        assert_eq!(
+            app.world_mut()
+                .query_filtered::<Entity, bevy::prelude::With<ClientPlayerMarker>>()
+                .iter(app.world())
+                .count(),
+            0
         );
     }
 

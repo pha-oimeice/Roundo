@@ -180,7 +180,12 @@ impl ServerHooks for TestServerHooks {
         Box::pin(async move { Ok(session_id == test_session().session_id) })
     }
 
-    fn on_session_connected(&self, connection_id: ConnectionId, user_session: UserSession) {
+    fn on_session_connected(
+        &self,
+        connection_id: ConnectionId,
+        user_session: UserSession,
+        _: std::net::SocketAddr,
+    ) {
         let notification = self.connected_sender.send((connection_id, user_session));
         assert!(
             notification.is_ok(),
@@ -188,7 +193,7 @@ impl ServerHooks for TestServerHooks {
         );
     }
 
-    fn on_session_disconnected(&self, _: ConnectionId, _: UserSession) {}
+    fn on_session_disconnected(&self, _: ConnectionId, _: UserSession, _: std::net::SocketAddr) {}
 
     fn on_client_game_message(
         &self,

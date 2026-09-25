@@ -210,13 +210,212 @@ fn probe_server(server: &ServerEntry, network_settings: &ClientNetworkSettings) 
     }
 }
 
+/// Owns the complete client-side authority-session boundary.
+///
+/// Every transport exit path converges here. While the mutex is held, inbound
+/// messages cannot cross an end/begin transition; each domain observes its own
+/// FIFO lifecycle commands around all session-scoped payloads.
+#[derive(Clone)]
+struct ClientGameSessionLifecycle {
+    state: Arc<Mutex<ClientGameSessionState>>,
+    marionette: ClientMarionetteIpc,
+    presence: ClientPresenceIpc,
+    local_coordinate: LocalCoordinateClientIpc,
+}
+
+#[derive(Default)]
+struct ClientGameSessionState {
+    next_epoch: u64,
+    active_epoch: Option<u64>,
+}
+
+impl ClientGameSessionLifecycle {
+    fn new(
+        marionette: ClientMarionetteIpc,
+        presence: ClientPresenceIpc,
+        local_coordinate: LocalCoordinateClientIpc,
+    ) -> Self {
+        Self {
+            state: Arc::new(Mutex::new(ClientGameSessionState::default())),
+            marionette,
+            presence,
+            local_coordinate,
+        }
+    }
+
+    fn begin(&self) -> u64 {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(epoch) = state.active_epoch.take() {
+            self.publish_end(epoch);
+        }
+        let mut discarded_controller_events = 0;
+        while self.marionette.try_receive().is_some() {
+            discarded_controller_events += 1;
+        }
+        let mut discarded_resource_events = 0;
+        while self.local_coordinate.try_receive().is_some() {
+            discarded_resource_events += 1;
+        }
+        if discarded_controller_events != 0 || discarded_resource_events != 0 {
+            warn!(
+                "Discarded stale ECS events at client session boundary: controller={discarded_controller_events}, resource={discarded_resource_events}"
+            );
+        }
+        state.next_epoch = state.next_epoch.wrapping_add(1).max(1);
+        let epoch = state.next_epoch;
+        self.publish_begin(epoch);
+        state.active_epoch = Some(epoch);
+        epoch
+    }
+
+    fn end(&self) -> Option<u64> {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let epoch = state.active_epoch.take()?;
+        self.publish_end(epoch);
+        Some(epoch)
+    }
+
+    fn route_game(&self, message: ServerGameMessage) {
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if state.active_epoch.is_none() {
+            warn!("Dropped server game message outside an active client session");
+            return;
+        }
+        let epoch = state.active_epoch.expect("checked above");
+        match message {
+            ServerGameMessage::PlayerControllerAccessSnapshot { snapshot } => {
+                let _ = self.marionette.try_send(
+                    ClientMarionetteCommand::PlayerControllerAccessSnapshot { epoch, snapshot },
+                );
+            }
+            ServerGameMessage::ControllerOperationRejected { operation, error } => {
+                let _ = self.marionette.try_send(
+                    ClientMarionetteCommand::ControllerOperationRejected {
+                        epoch,
+                        operation,
+                        error,
+                    },
+                );
+            }
+            ServerGameMessage::ControllerAcquired { controller_id } => {
+                let _ = self
+                    .marionette
+                    .try_send(ClientMarionetteCommand::ControllerAcquired {
+                        epoch,
+                        controller_id,
+                    });
+            }
+            ServerGameMessage::ControllerReleased { controller_id } => {
+                let _ = self
+                    .marionette
+                    .try_send(ClientMarionetteCommand::ControllerReleased {
+                        epoch,
+                        controller_id,
+                    });
+            }
+            ServerGameMessage::CreatureMotionSnapshot { snapshot } => {
+                if self
+                    .marionette
+                    .try_send(ClientMarionetteCommand::CreatureMotionSnapshot(snapshot))
+                    .is_err()
+                {
+                    warn!("Dropped CreatureMotionSnapshot message: destination=marionette_ecs");
+                }
+            }
+            ServerGameMessage::PlayerState { state } => {
+                if self
+                    .marionette
+                    .try_send(ClientMarionetteCommand::PlayerState(state))
+                    .is_err()
+                {
+                    warn!("Dropped PlayerState message: destination=marionette_ecs");
+                }
+            }
+            ServerGameMessage::PresenceSnapshot { snapshot } => {
+                if self
+                    .presence
+                    .try_send(ClientPresenceCommand::Snapshot(snapshot))
+                    .is_err()
+                {
+                    warn!("Dropped PresenceSnapshot message: destination=presence_ecs");
+                }
+            }
+        }
+    }
+
+    fn active_guard(&self) -> Option<std::sync::MutexGuard<'_, ClientGameSessionState>> {
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.active_epoch.map(|_| state)
+    }
+
+    fn publish_begin(&self, epoch: u64) {
+        if self
+            .marionette
+            .try_send(ClientMarionetteCommand::BeginSession { epoch })
+            .is_err()
+        {
+            warn!("Failed to begin Marionette client session: epoch={epoch}");
+        }
+        if self
+            .presence
+            .try_send(ClientPresenceCommand::BeginSession { epoch })
+            .is_err()
+        {
+            warn!("Failed to begin Presence client session: epoch={epoch}");
+        }
+        if self
+            .local_coordinate
+            .try_send(LocalCoordinateClientCommand::BeginSession { epoch })
+            .is_err()
+        {
+            warn!("Failed to begin Local Coordinate client session: epoch={epoch}");
+        }
+    }
+
+    fn publish_end(&self, epoch: u64) {
+        if self
+            .marionette
+            .try_send(ClientMarionetteCommand::EndSession { epoch })
+            .is_err()
+        {
+            warn!("Failed to end Marionette client session: epoch={epoch}");
+        }
+        if self
+            .presence
+            .try_send(ClientPresenceCommand::EndSession { epoch })
+            .is_err()
+        {
+            warn!("Failed to end Presence client session: epoch={epoch}");
+        }
+        if self
+            .local_coordinate
+            .try_send(LocalCoordinateClientCommand::EndSession { epoch })
+            .is_err()
+        {
+            warn!("Failed to end Local Coordinate client session: epoch={epoch}");
+        }
+    }
+}
+
 /// Bevy-owned authority for one selected server and at most one active attempt.
 #[derive(bevy::prelude::Resource)]
 pub struct ClientNetworkManager {
     network_settings: ClientNetworkSettings,
     marionette_ipc: ClientMarionetteIpc,
-    presence_ipc: ClientPresenceIpc,
     local_coordinate_ipc: LocalCoordinateClientIpc,
+    session_lifecycle: ClientGameSessionLifecycle,
     resource_fingerprint: ResourceCatalogFingerprint,
     active: Option<ActiveClientConnection>,
     snapshot: ClientConnectionSnapshot,
@@ -231,11 +430,16 @@ impl ClientNetworkManager {
         local_coordinate_ipc: LocalCoordinateClientIpc,
         resource_fingerprint: ResourceCatalogFingerprint,
     ) -> Self {
+        let session_lifecycle = ClientGameSessionLifecycle::new(
+            marionette_ipc.clone(),
+            presence_ipc.clone(),
+            local_coordinate_ipc.clone(),
+        );
         Self {
             network_settings,
             marionette_ipc,
-            presence_ipc,
             local_coordinate_ipc,
+            session_lifecycle,
             resource_fingerprint,
             active: None,
             snapshot: ClientConnectionSnapshot {
@@ -273,8 +477,8 @@ impl ClientNetworkManager {
             server,
             &self.network_settings,
             self.marionette_ipc.clone(),
-            self.presence_ipc.clone(),
             self.local_coordinate_ipc.clone(),
+            self.session_lifecycle.clone(),
             self.resource_fingerprint,
         ) {
             Ok(active) => {
@@ -311,8 +515,8 @@ impl ClientNetworkManager {
     }
     /// Stops and joins the active connection runtime and clears server selection.
     ///
-    /// This blocks the current OS thread. It does not itself enqueue domain-state
-    /// clear commands; connection-loss callbacks own transient-loss cleanup.
+    /// This blocks the current OS thread. After all transport callbacks stop, it
+    /// ends the same authority session used by transient connection loss.
     pub fn disconnect(&mut self) {
         let previous = self.status().status;
         let server = self
@@ -326,6 +530,7 @@ impl ClientNetworkManager {
         if let Some(mut active) = self.active.take() {
             active.shutdown();
         }
+        self.session_lifecycle.end();
         self.snapshot = ClientConnectionSnapshot {
             status: ClientConnectionStatus::Disconnected,
             server: None,
@@ -343,7 +548,7 @@ impl ClientNetworkManager {
 }
 
 /// Owns one reconnecting network runtime and its two ECS outbound bridges.
-pub struct ActiveClientConnection {
+struct ActiveClientConnection {
     name: String,
     network: Arc<ClientNetwork>,
     bridges: BridgeThreadGroup,
@@ -356,12 +561,12 @@ impl ActiveClientConnection {
     /// Success does not mean a remote session is established; status begins as
     /// `Connecting`. If bridge creation fails, already-created owners are dropped
     /// during error unwinding and shut down their workers.
-    pub fn start(
+    fn start(
         server: &ServerEntry,
         network_settings: &ClientNetworkSettings,
         marionette_ipc: ClientMarionetteIpc,
-        presence_ipc: ClientPresenceIpc,
         local_coordinate_ipc: LocalCoordinateClientIpc,
+        session_lifecycle: ClientGameSessionLifecycle,
         resource_fingerprint: ResourceCatalogFingerprint,
     ) -> Result<Self, String> {
         validate_server_entry(server, network_settings)?;
@@ -373,9 +578,8 @@ impl ActiveClientConnection {
         );
         let status = Arc::new(RwLock::new(ClientConnectionStatus::Connecting));
         let hooks = Arc::new(ClientHooksAdapter {
-            marionette_ipc: marionette_ipc.clone(),
-            presence_ipc: presence_ipc.clone(),
             local_coordinate_ipc: local_coordinate_ipc.clone(),
+            session_lifecycle: session_lifecycle.clone(),
             resource_fingerprint,
             status: Arc::clone(&status),
         });
@@ -385,15 +589,22 @@ impl ActiveClientConnection {
         );
         let mut bridges = BridgeThreadGroup::new();
         let game_network = Arc::clone(&network);
+        let game_session = session_lifecycle.clone();
         bridges
             .spawn("roundo-client-game-bridge", move |stop| {
-                bridge_game_ecs_events(marionette_ipc, game_network, stop)
+                bridge_game_ecs_events(marionette_ipc, game_session, game_network, stop)
             })
             .map_err(|error| format!("failed to start client game bridge: {error}"))?;
         let resource_network = Arc::clone(&network);
+        let resource_session = session_lifecycle;
         bridges
             .spawn("roundo-client-resource-bridge", move |stop| {
-                bridge_resource_ecs_events(local_coordinate_ipc, resource_network, stop)
+                bridge_resource_ecs_events(
+                    local_coordinate_ipc,
+                    resource_session,
+                    resource_network,
+                    stop,
+                )
             })
             .map_err(|error| format!("failed to start client resource bridge: {error}"))?;
 
@@ -506,9 +717,8 @@ pub(crate) fn resolve_socket_address(
 
 /// Projects network-runtime callbacks into domain queues and connection status.
 struct ClientHooksAdapter {
-    marionette_ipc: ClientMarionetteIpc,
-    presence_ipc: ClientPresenceIpc,
     local_coordinate_ipc: LocalCoordinateClientIpc,
+    session_lifecycle: ClientGameSessionLifecycle,
     resource_fingerprint: ResourceCatalogFingerprint,
     status: Arc<RwLock<ClientConnectionStatus>>,
 }
@@ -533,29 +743,14 @@ impl ClientHooks for ClientHooksAdapter {
     }
 
     fn on_server_game_message(&self, message: ServerGameMessage) {
-        match message {
-            ServerGameMessage::PlayerState { state } => {
-                if self
-                    .marionette_ipc
-                    .try_send(ClientMarionetteCommand::PlayerState(state))
-                    .is_err()
-                {
-                    warn!("Dropped PlayerState message: destination=marionette_ecs");
-                }
-            }
-            ServerGameMessage::PresenceSnapshot { snapshot } => {
-                if self
-                    .presence_ipc
-                    .try_send(ClientPresenceCommand::Snapshot(snapshot))
-                    .is_err()
-                {
-                    warn!("Dropped PresenceSnapshot message: destination=presence_ecs");
-                }
-            }
-        }
+        self.session_lifecycle.route_game(message);
     }
 
     fn on_server_resource_message(&self, message: ServerResourceMessage) {
+        let Some(_session) = self.session_lifecycle.active_guard() else {
+            warn!("Dropped server resource message outside an active client session");
+            return;
+        };
         match message {
             ServerResourceMessage::RenderingAnchorSpawned { anchor } => {
                 if self
@@ -580,17 +775,29 @@ impl ClientHooks for ClientHooksAdapter {
                 }
             }
             ServerResourceMessage::RenderingAnchorDespawned { anchor_id } => {
-                if self
-                    .local_coordinate_ipc
-                    .try_send(LocalCoordinateClientCommand::RenderingAnchorDespawned(
-                        anchor_id,
-                    ))
-                    .is_err()
-                {
-                    warn!(
-                        "Dropped RenderingAnchorDespawned message: destination=local_coordinate_ecs"
-                    );
-                }
+                let _ = self.local_coordinate_ipc.try_send(
+                    LocalCoordinateClientCommand::RenderingAnchorDespawned(anchor_id),
+                );
+            }
+            ServerResourceMessage::PredictionAnchorSpawned { anchor } => {
+                let _ = self.local_coordinate_ipc.try_send(
+                    LocalCoordinateClientCommand::PredictionAnchorSpawned(anchor),
+                );
+            }
+            ServerResourceMessage::PredictionAnchorUpdated { anchor } => {
+                let _ = self.local_coordinate_ipc.try_send(
+                    LocalCoordinateClientCommand::PredictionAnchorUpdated(anchor),
+                );
+            }
+            ServerResourceMessage::PredictionAnchorDespawned { anchor_id } => {
+                let _ = self.local_coordinate_ipc.try_send(
+                    LocalCoordinateClientCommand::PredictionAnchorDespawned(anchor_id),
+                );
+            }
+            ServerResourceMessage::VirtualChunkEnvironmentOverrides { overrides } => {
+                let _ = self.local_coordinate_ipc.try_send(
+                    LocalCoordinateClientCommand::EnvironmentOverrides(overrides),
+                );
             }
             ServerResourceMessage::LocalCoordinateSpawned {
                 local_coordinate_id,
@@ -682,41 +889,15 @@ impl ClientHooks for ClientHooksAdapter {
     }
 
     fn on_connection_established(&self) {
-        info!("Client game connection established");
+        let epoch = self.session_lifecycle.begin();
+        info!("Client game connection established: session_epoch={epoch}");
         self.set_status(ClientConnectionStatus::Connected);
-        if self
-            .local_coordinate_ipc
-            .try_send(LocalCoordinateClientCommand::BeginSession)
-            .is_err()
-        {
-            warn!("Failed to initialize local-coordinate state for connected session");
-        }
     }
 
     fn on_connection_lost(&self) {
-        warn!("Client game connection lost; waiting to reconnect");
+        let epoch = self.session_lifecycle.end();
+        warn!("Client game connection lost; waiting to reconnect; session_epoch={epoch:?}");
         self.set_status(ClientConnectionStatus::Reconnecting);
-        if self
-            .presence_ipc
-            .try_send(ClientPresenceCommand::Clear)
-            .is_err()
-        {
-            warn!("Failed to clear presence state after connection loss");
-        }
-        if self
-            .marionette_ipc
-            .try_send(ClientMarionetteCommand::ClearPlayerState)
-            .is_err()
-        {
-            warn!("Failed to clear player state after connection loss");
-        }
-        if self
-            .local_coordinate_ipc
-            .try_send(LocalCoordinateClientCommand::ResetRequests)
-            .is_err()
-        {
-            warn!("Failed to reset chunk requests after connection loss");
-        }
     }
 
     fn on_connection_error(&self, error: &NetworkError) {
@@ -733,15 +914,35 @@ impl ClientHooks for ClientHooksAdapter {
 /// permanently; it does not retry after network reconnection.
 fn bridge_game_ecs_events(
     marionette_ipc: ClientMarionetteIpc,
+    session_lifecycle: ClientGameSessionLifecycle,
     network: Arc<ClientNetwork>,
     stop: Arc<AtomicBool>,
 ) {
     debug!("Started client game IPC bridge");
     run_polling_bridge(&stop, || {
+        let Some(_session) = session_lifecycle.active_guard() else {
+            return BridgeStep::Idle;
+        };
         let Some(event) = marionette_ipc.try_receive() else {
             return BridgeStep::Idle;
         };
         let message = match event {
+            ClientMarionetteEvent::RequestPlayerControllerAccess => {
+                ClientGameMessage::RequestPlayerControllerAccess
+            }
+            ClientMarionetteEvent::AcquireController { controller_id } => {
+                ClientGameMessage::AcquireController { controller_id }
+            }
+            ClientMarionetteEvent::ReleaseController { controller_id } => {
+                ClientGameMessage::ReleaseController { controller_id }
+            }
+            ClientMarionetteEvent::SubmitControllerInput {
+                controller_id,
+                input,
+            } => ClientGameMessage::SubmitControllerInput {
+                controller_id,
+                input,
+            },
             ClientMarionetteEvent::UsePlayerController(command) => {
                 ClientGameMessage::UsePlayerController { command }
             }
@@ -764,11 +965,15 @@ fn bridge_game_ecs_events(
 /// permanently; it does not retry after network reconnection.
 fn bridge_resource_ecs_events(
     local_coordinate_ipc: LocalCoordinateClientIpc,
+    session_lifecycle: ClientGameSessionLifecycle,
     network: Arc<ClientNetwork>,
     stop: Arc<AtomicBool>,
 ) {
     debug!("Started client resource IPC bridge");
     run_polling_bridge(&stop, || {
+        let Some(_session) = session_lifecycle.active_guard() else {
+            return BridgeStep::Idle;
+        };
         let Some(event) = local_coordinate_ipc.try_receive() else {
             return BridgeStep::Idle;
         };
@@ -914,6 +1119,92 @@ mod tests {
             "disconnect took {:?}",
             started.elapsed()
         );
+    }
+
+    #[test]
+    fn explicit_disconnect_ends_the_same_domain_session_as_connection_loss() {
+        let marionette =
+            CrossbeamThreadPipe::<ClientMarionetteCommand, ClientMarionetteEvent>::new();
+        let presence = CrossbeamThreadPipe::<ClientPresenceCommand, ()>::new();
+        let local_coordinate =
+            CrossbeamThreadPipe::<LocalCoordinateClientCommand, LocalCoordinateClientEvent>::new();
+        let marionette_commands = marionette.endpoint_b();
+        let presence_commands = presence.endpoint_b();
+        let local_coordinate_commands = local_coordinate.endpoint_b();
+        let mut manager = ClientNetworkManager::new(
+            roundo_user_config::ClientNetworkConfig::default(),
+            marionette.endpoint_a(),
+            presence.endpoint_a(),
+            local_coordinate.endpoint_a(),
+            roundo_contracts::ResourceCatalogFingerprint::default(),
+        );
+        let epoch = manager.session_lifecycle.begin();
+        assert!(matches!(
+            marionette_commands.try_receive(),
+            Some(ClientMarionetteCommand::BeginSession { epoch: observed }) if observed == epoch
+        ));
+        assert!(matches!(
+            presence_commands.try_receive(),
+            Some(ClientPresenceCommand::BeginSession { epoch: observed }) if observed == epoch
+        ));
+        assert!(matches!(
+            local_coordinate_commands.try_receive(),
+            Some(LocalCoordinateClientCommand::BeginSession { epoch: observed }) if observed == epoch
+        ));
+
+        manager.disconnect();
+
+        assert!(matches!(
+            marionette_commands.try_receive(),
+            Some(ClientMarionetteCommand::EndSession { epoch: observed }) if observed == epoch
+        ));
+        assert!(matches!(
+            presence_commands.try_receive(),
+            Some(ClientPresenceCommand::EndSession { epoch: observed }) if observed == epoch
+        ));
+        assert!(matches!(
+            local_coordinate_commands.try_receive(),
+            Some(LocalCoordinateClientCommand::EndSession { epoch: observed }) if observed == epoch
+        ));
+        assert!(manager.session_lifecycle.end().is_none());
+    }
+
+    #[test]
+    fn repeated_entry_replaces_the_complete_previous_session() {
+        let marionette =
+            CrossbeamThreadPipe::<ClientMarionetteCommand, ClientMarionetteEvent>::new();
+        let presence = CrossbeamThreadPipe::<ClientPresenceCommand, ()>::new();
+        let local_coordinate =
+            CrossbeamThreadPipe::<LocalCoordinateClientCommand, LocalCoordinateClientEvent>::new();
+        let marionette_commands = marionette.endpoint_b();
+        let local_coordinate_commands = local_coordinate.endpoint_b();
+        let local_coordinate_events = local_coordinate.endpoint_a();
+        let lifecycle = super::ClientGameSessionLifecycle::new(
+            marionette.endpoint_a(),
+            presence.endpoint_a(),
+            local_coordinate_events.clone(),
+        );
+        let first = lifecycle.begin();
+        assert!(matches!(
+            marionette_commands.try_receive(),
+            Some(ClientMarionetteCommand::BeginSession { epoch }) if epoch == first
+        ));
+        local_coordinate_commands
+            .try_send(LocalCoordinateClientEvent::RequestChunks(Vec::new()))
+            .unwrap();
+
+        let second = lifecycle.begin();
+
+        assert_ne!(first, second);
+        assert!(matches!(
+            marionette_commands.try_receive(),
+            Some(ClientMarionetteCommand::EndSession { epoch }) if epoch == first
+        ));
+        assert!(matches!(
+            marionette_commands.try_receive(),
+            Some(ClientMarionetteCommand::BeginSession { epoch }) if epoch == second
+        ));
+        assert!(local_coordinate_events.try_receive().is_none());
     }
 
     #[test]

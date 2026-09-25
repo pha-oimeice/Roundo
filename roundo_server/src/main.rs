@@ -59,6 +59,7 @@ fn main() {
         ecs.marionette,
         ecs.presence,
         ecs.local_coordinate,
+        ecs.player_control,
         resource_fingerprint,
     );
     info!("Server started");

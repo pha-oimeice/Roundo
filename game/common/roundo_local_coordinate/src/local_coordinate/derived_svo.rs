@@ -23,6 +23,7 @@ pub(crate) enum DerivedSvoJob {
         source: SvoSource,
     },
     Decode {
+        session_epoch: u64,
         chunk: ChunkVersion,
         payload: SerializedPayload,
     },
@@ -36,11 +37,13 @@ pub(crate) enum DerivedSvoResult {
         payload: SerializedPayload,
     },
     Decoded {
+        session_epoch: u64,
         chunk: ChunkVersion,
         svo: VoxelChunkSvo,
     },
     Failed {
         connection_id: Option<ConnectionId>,
+        session_epoch: Option<u64>,
         chunk: ChunkVersion,
         error: String,
     },
@@ -86,7 +89,11 @@ fn run_worker(pipe: CrossbeamThreadPipeEndpointB<DerivedSvoJob, DerivedSvoResult
                 chunk,
                 source,
             } => encode_chunk(connection_id, chunk, source),
-            DerivedSvoJob::Decode { chunk, payload } => decode_chunk(chunk, payload),
+            DerivedSvoJob::Decode {
+                session_epoch,
+                chunk,
+                payload,
+            } => decode_chunk(session_epoch, chunk, payload),
         };
         if pipe.try_send(result).is_err() {
             break;
@@ -108,6 +115,7 @@ fn encode_chunk(
             Err(error) => {
                 return DerivedSvoResult::Failed {
                     connection_id: Some(connection_id),
+                    session_epoch: None,
                     chunk,
                     error: error.to_string(),
                 };
@@ -123,6 +131,7 @@ fn encode_chunk(
         },
         Err(error) => DerivedSvoResult::Failed {
             connection_id: Some(connection_id),
+            session_epoch: None,
             chunk,
             error: error.to_string(),
         },
@@ -168,12 +177,21 @@ fn insert_voxel(root: &mut Node<AtomicVoxel, 8>, position: [usize; 3], voxel: At
 }
 
 // Preserves chunk identity across payload decoding failures.
-fn decode_chunk(chunk: ChunkVersion, payload: SerializedPayload) -> DerivedSvoResult {
+fn decode_chunk(
+    session_epoch: u64,
+    chunk: ChunkVersion,
+    payload: SerializedPayload,
+) -> DerivedSvoResult {
     let decoded = payload.decode();
     match decoded {
-        Ok(svo) => DerivedSvoResult::Decoded { chunk, svo },
+        Ok(svo) => DerivedSvoResult::Decoded {
+            session_epoch,
+            chunk,
+            svo,
+        },
         Err(error) => DerivedSvoResult::Failed {
             connection_id: None,
+            session_epoch: Some(session_epoch),
             chunk,
             error: error.to_string(),
         },

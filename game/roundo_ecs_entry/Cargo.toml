@@ -4,15 +4,21 @@ version.workspace = true
 edition.workspace = true
 
 [features]
-client = ["dep:roundo_marionette", "dep:roundo_rendering"]
-server = ["dep:avian3d", "dep:roundo_block_interaction", "dep:roundo_marionette", "dep:roundo_portal"]
+client = ["dep:avian3d", "dep:roundo_creature", "dep:roundo_marionette", "dep:roundo_rendering"]
+server = ["dep:avian3d", "dep:roundo_block_interaction", "dep:roundo_controller", "dep:roundo_creature", "dep:roundo_marionette", "dep:roundo_player", "dep:roundo_portal"]
+dev = ["roundo_marionette/dev"]
 
 [dependencies]
 avian3d = { workspace = true, optional = true }
 bevy.workspace = true
 roundo_block_interaction = { workspace = true, optional = true }
+roundo_creature = { workspace = true, optional = true }
+roundo_contracts.workspace = true
+roundo_controller = { workspace = true, optional = true }
 roundo_marionette = { workspace = true, optional = true }
 roundo_local_coordinate.workspace = true
 roundo_rendering = { workspace = true, optional = true }
+roundo_player = { workspace = true, optional = true }
 roundo_presence.workspace = true
 roundo_portal = { workspace = true, optional = true }
+roundo_toolbox.workspace = true

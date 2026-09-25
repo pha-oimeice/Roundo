@@ -25,8 +25,9 @@ pub const MOVE_BACKWARD_INPUT_SLOT: &str = "roundo.move-backward";
 pub const SPIRIT_CAMERA_INPUT_SLOT: &str = "roundo.spirit-camera";
 pub const DESTROY_BLOCK_INPUT_SLOT: &str = "roundo.destroy-block";
 pub const PLACE_BLOCK_INPUT_SLOT: &str = "roundo.place-block";
+pub const SPAWN_TEST_CREATURE_INPUT_SLOT: &str = "roundo.spawn-test-creature";
 
-const REQUIRED_INPUT_SLOTS: [&str; 9] = [
+const REQUIRED_INPUT_SLOTS: [&str; 10] = [
     MOVE_UP_INPUT_SLOT,
     MOVE_DOWN_INPUT_SLOT,
     MOVE_LEFT_INPUT_SLOT,
@@ -36,6 +37,7 @@ const REQUIRED_INPUT_SLOTS: [&str; 9] = [
     SPIRIT_CAMERA_INPUT_SLOT,
     DESTROY_BLOCK_INPUT_SLOT,
     PLACE_BLOCK_INPUT_SLOT,
+    SPAWN_TEST_CREATURE_INPUT_SLOT,
 ];
 
 #[derive(Clone, Debug)]
@@ -141,6 +143,11 @@ impl InputRegistry {
             (SPIRIT_CAMERA_INPUT_SLOT, "spirit-camera", "Spirit Camera"),
             (DESTROY_BLOCK_INPUT_SLOT, "destroy-block", "Destroy Block"),
             (PLACE_BLOCK_INPUT_SLOT, "place-block", "Place Block"),
+            (
+                SPAWN_TEST_CREATURE_INPUT_SLOT,
+                "spawn-test-creature",
+                "Spawn Test Creature",
+            ),
         ];
         let mut definitions = BTreeMap::new();
         let mut slots = BTreeMap::new();

@@ -89,22 +89,15 @@ fn apply_recovery_action(
 }
 
 fn authoritative_lifecycle_state(
-    current: UiLifecycleState,
+    _current: UiLifecycleState,
     status: &ClientConnectionStatus,
 ) -> UiLifecycleState {
-    match (current, status) {
-        // Connecting and pre-authentication errors still belong to the
-        // Disconnected Root. Only the first authoritative Connected fact
-        // replaces it.
-        (UiLifecycleState::Disconnected, ClientConnectionStatus::Connected) => {
-            UiLifecycleState::Connected
-        }
-        // Reconnecting and Error do not revoke an established session root.
-        // Only explicit/authoritative Disconnected replaces it.
-        (UiLifecycleState::Connected, ClientConnectionStatus::Disconnected) => {
-            UiLifecycleState::Disconnected
-        }
-        _ => current,
+    match status {
+        ClientConnectionStatus::Connected => UiLifecycleState::Connected,
+        ClientConnectionStatus::Disconnected
+        | ClientConnectionStatus::Connecting
+        | ClientConnectionStatus::Reconnecting
+        | ClientConnectionStatus::Error { .. } => UiLifecycleState::Disconnected,
     }
 }
 
@@ -317,8 +310,9 @@ mod tests {
     }
 
     #[test]
-    fn transient_connected_session_states_preserve_connected_root() {
+    fn every_non_session_status_selects_the_disconnected_root() {
         for status in [
+            ClientConnectionStatus::Disconnected,
             ClientConnectionStatus::Reconnecting,
             ClientConnectionStatus::Error {
                 message: "temporary".into(),
@@ -327,16 +321,9 @@ mod tests {
         ] {
             assert_eq!(
                 authoritative_lifecycle_state(UiLifecycleState::Connected, &status),
-                UiLifecycleState::Connected
+                UiLifecycleState::Disconnected
             );
         }
-        assert_eq!(
-            authoritative_lifecycle_state(
-                UiLifecycleState::Connected,
-                &ClientConnectionStatus::Disconnected,
-            ),
-            UiLifecycleState::Disconnected
-        );
     }
 
     #[test]

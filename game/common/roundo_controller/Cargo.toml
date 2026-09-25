@@ -1,0 +1,10 @@
+[package]
+name = "roundo_controller"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+bevy.workspace = true
+roundo_contracts.workspace = true
+roundo_creature.workspace = true
+roundo_player.workspace = true

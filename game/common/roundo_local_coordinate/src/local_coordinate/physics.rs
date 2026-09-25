@@ -49,12 +49,22 @@ pub(crate) enum LocalCoordinatePhysicsSet {
 /// retained; changing the set schedules reconciliation rather than rebuilding
 /// every collider synchronously.
 #[derive(Default, Resource)]
-pub(crate) struct LocalCoordinatePhysicsInterests {
+pub struct LocalCoordinatePhysicsInterests {
     restricted: bool,
     chunks: HashMap<LocalCoordinateId, HashSet<IVec3>>,
 }
 
 impl LocalCoordinatePhysicsInterests {
+    /// Creates an exact empty interest set. Clients install this before their
+    /// first streamed prediction anchor so rendering-only chunks never obtain a
+    /// transient collider during startup.
+    pub fn restricted_empty() -> Self {
+        Self {
+            restricted: true,
+            chunks: HashMap::new(),
+        }
+    }
+
     /// Returns whether this resource already contains the same restricted set.
     pub fn matches(&self, chunks: &HashMap<LocalCoordinateId, HashSet<IVec3>>) -> bool {
         self.restricted && self.chunks == *chunks
@@ -424,6 +434,26 @@ mod tests {
         let admitted = take_pending_collider_chunks(&mut state);
         assert_eq!(admitted.len(), MAX_COLLIDER_CHUNKS_PER_UPDATE);
         assert_eq!(state.pending_chunks.len(), 10);
+    }
+
+    #[test]
+    fn restricted_empty_interest_never_materializes_a_collider() {
+        let mut app = physics_app();
+        app.insert_resource(LocalCoordinatePhysicsInterests::restricted_empty());
+        let owner = app
+            .world_mut()
+            .spawn(LocalCoordinate::from_voxels([solid(IVec3::ZERO)]))
+            .id();
+
+        app.update();
+
+        assert!(
+            app.world()
+                .get::<LocalCoordinatePhysicsState>(owner)
+                .unwrap()
+                .chunks
+                .is_empty()
+        );
     }
 
     #[test]

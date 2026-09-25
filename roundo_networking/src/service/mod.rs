@@ -160,9 +160,19 @@ pub trait ServerHooks: Send + Sync + 'static {
 
     fn session_is_open(&self, session_id: SessionId) -> HookFuture<bool>;
 
-    fn on_session_connected(&self, connection_id: ConnectionId, user_session: UserSession);
+    fn on_session_connected(
+        &self,
+        connection_id: ConnectionId,
+        user_session: UserSession,
+        peer_address: SocketAddr,
+    );
 
-    fn on_session_disconnected(&self, connection_id: ConnectionId, user_session: UserSession);
+    fn on_session_disconnected(
+        &self,
+        connection_id: ConnectionId,
+        user_session: UserSession,
+        peer_address: SocketAddr,
+    );
 
     fn on_client_game_message(
         &self,

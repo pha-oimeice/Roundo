@@ -5,22 +5,37 @@
 //! destroy/place semantics, and schedule placement stay local to this module.
 
 use bevy::prelude::{
-    App, FixedUpdate, IntoScheduleConfigs, MessageReader, MessageWriter, Plugin, Query, Transform,
+    App, Component, FixedUpdate, IntoScheduleConfigs, MessageReader, MessageWriter, Plugin, Query,
+    Transform, With,
 };
 use roundo_local_coordinate::{
     AtomicVoxelId, AtomicVoxelRegistry, EMPTY_VOXEL_ID, LocalCoordinateCRUDMessage,
     LocalCoordinateCRUDMessageEnum, LocalCoordinateSet, PositionedAtomicVoxel, VoxelRaycaster,
 };
-use roundo_marionette::{BlockInteraction, BlockInteractionMessage, MarionetteServerSet};
+use roundo_marionette::{BlockInteraction, MarionetteServerSet};
 
 /// Fallback maximum ray distance in world units.
 pub const DEFAULT_BLOCK_INTERACTION_DISTANCE: f32 = 8.0;
 
+/// Marks the entity whose Creature pose is authoritative for block interaction.
+/// Composition adapters route controller messages to this entity.
+#[derive(Component)]
+pub struct BlockInteractionPose;
+
+/// A composition adapter's resolved interaction target. It deliberately names a
+/// Creature pose entity, never a Controller entity.
+#[derive(bevy::prelude::Message, Clone, Copy, Debug, PartialEq)]
+pub struct RoutedBlockInteractionMessage {
+    pub entity: bevy::prelude::Entity,
+    pub gaze_direction: bevy::math::Dir3,
+    pub interaction: BlockInteraction,
+}
+
 /// Applies validated controller interactions to authoritative voxel state.
 ///
-/// Each interaction casts from the controlled entity's Bevy `Transform` using
-/// its translation and forward axis. A destroy writes the empty ID at the first
-/// hit; a placement writes a registry-approved ID at the preceding voxel. The
+/// Each interaction casts from the controlled Creature's translation using the
+/// gaze direction resolved by the composition adapter. A destroy writes the empty
+/// ID at the first hit; a placement writes a registry-approved ID at the preceding voxel. The
 /// resulting CRUD message is applied later in the same fixed schedule.
 pub struct BlockInteractionPlugin {
     maximum_distance: f32,
@@ -55,6 +70,7 @@ struct BlockInteractionSettings {
 impl Plugin for BlockInteractionPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<AtomicVoxelRegistry>()
+            .add_message::<RoutedBlockInteractionMessage>()
             .insert_resource(BlockInteractionSettings {
                 maximum_distance: self.maximum_distance,
             })
@@ -73,8 +89,8 @@ impl Plugin for BlockInteractionPlugin {
 fn apply_block_interactions(
     settings: bevy::prelude::Res<BlockInteractionSettings>,
     voxels: bevy::prelude::Res<AtomicVoxelRegistry>,
-    mut messages: MessageReader<BlockInteractionMessage>,
-    transforms: Query<&Transform>,
+    mut messages: MessageReader<RoutedBlockInteractionMessage>,
+    transforms: Query<&Transform, With<BlockInteractionPose>>,
     raycaster: VoxelRaycaster,
     mut voxel_updates: MessageWriter<LocalCoordinateCRUDMessage>,
 ) {
@@ -84,7 +100,7 @@ fn apply_block_interactions(
             continue;
         };
         let Some(hit) = raycaster.cast(
-            bevy::math::Ray3d::new(transform.translation, transform.forward()),
+            bevy::math::Ray3d::new(transform.translation, message.gaze_direction),
             settings.maximum_distance,
         ) else {
             continue;
@@ -111,14 +127,12 @@ fn apply_block_interactions(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bevy::prelude::{App, Fixed, GlobalTransform, IVec3, Time};
+    use bevy::prelude::{App, Fixed, GlobalTransform, IVec3, Quat, Time};
     use roundo_local_coordinate::{
         LocalCoordinate, SOLID_VOXEL_ID, local_coordinate::plugins::LocalCoordinateBasePlugin,
     };
     use roundo_marionette::{
-        ConnectionId, ControllerCommand, DestroyBlockControllerAction, MarionetteServerPlugin,
-        NetworkControllerTarget, PlaceBlockControllerAction, PlayerControllerCommand,
-        PlayerControllers, ServerMarionetteCommand,
+        ConnectionId, MarionetteServerPlugin, NetworkControllerTarget, PlayerControllers,
     };
 
     fn interaction_app() -> (
@@ -149,6 +163,7 @@ mod tests {
             NetworkControllerTarget {
                 connection_id: ConnectionId(3),
             },
+            BlockInteractionPose,
             Transform::from_xyz(0.5, 0.5, 1.5),
         ));
         app.world_mut().run_schedule(FixedUpdate);
@@ -157,15 +172,21 @@ mod tests {
 
     #[test]
     fn destroy_replaces_the_hit_voxel_with_air() {
-        let (mut app, ipc, coordinate) = interaction_app();
-        ipc.try_send(ServerMarionetteCommand::UsePlayerController {
-            connection_id: ConnectionId(3),
-            command: PlayerControllerCommand::DestroyBlock(ControllerCommand {
-                sequence: 1,
-                action: DestroyBlockControllerAction,
-            }),
-        })
-        .unwrap();
+        let (mut app, _ipc, coordinate) = interaction_app();
+        let pose = app
+            .world_mut()
+            .query::<(bevy::prelude::Entity, &BlockInteractionPose)>()
+            .single(app.world())
+            .unwrap()
+            .0;
+        app.world_mut().get_mut::<Transform>(pose).unwrap().rotation =
+            Quat::from_rotation_y(std::f32::consts::FRAC_PI_2);
+        app.world_mut()
+            .write_message(RoutedBlockInteractionMessage {
+                entity: pose,
+                gaze_direction: bevy::math::Dir3::NEG_Z,
+                interaction: BlockInteraction::Destroy,
+            });
         app.world_mut().run_schedule(FixedUpdate);
 
         assert_eq!(
@@ -179,15 +200,19 @@ mod tests {
 
     #[test]
     fn place_writes_the_requested_voxel_before_the_hit() {
-        let (mut app, ipc, coordinate) = interaction_app();
-        ipc.try_send(ServerMarionetteCommand::UsePlayerController {
-            connection_id: ConnectionId(3),
-            command: PlayerControllerCommand::PlaceBlock(ControllerCommand {
-                sequence: 1,
-                action: PlaceBlockControllerAction { voxel_id: 1 },
-            }),
-        })
-        .unwrap();
+        let (mut app, _ipc, coordinate) = interaction_app();
+        let pose = app
+            .world_mut()
+            .query::<(bevy::prelude::Entity, &BlockInteractionPose)>()
+            .single(app.world())
+            .unwrap()
+            .0;
+        app.world_mut()
+            .write_message(RoutedBlockInteractionMessage {
+                entity: pose,
+                gaze_direction: bevy::math::Dir3::NEG_Z,
+                interaction: BlockInteraction::Place { voxel_id: 1 },
+            });
         app.world_mut().run_schedule(FixedUpdate);
 
         assert_eq!(
@@ -201,15 +226,19 @@ mod tests {
 
     #[test]
     fn unknown_voxel_id_cannot_mutate_authoritative_state() {
-        let (mut app, ipc, coordinate) = interaction_app();
-        ipc.try_send(ServerMarionetteCommand::UsePlayerController {
-            connection_id: ConnectionId(3),
-            command: PlayerControllerCommand::PlaceBlock(ControllerCommand {
-                sequence: 1,
-                action: PlaceBlockControllerAction { voxel_id: 99 },
-            }),
-        })
-        .unwrap();
+        let (mut app, _ipc, coordinate) = interaction_app();
+        let pose = app
+            .world_mut()
+            .query::<(bevy::prelude::Entity, &BlockInteractionPose)>()
+            .single(app.world())
+            .unwrap()
+            .0;
+        app.world_mut()
+            .write_message(RoutedBlockInteractionMessage {
+                entity: pose,
+                gaze_direction: bevy::math::Dir3::NEG_Z,
+                interaction: BlockInteraction::Place { voxel_id: 99 },
+            });
         app.world_mut().run_schedule(FixedUpdate);
 
         assert_eq!(

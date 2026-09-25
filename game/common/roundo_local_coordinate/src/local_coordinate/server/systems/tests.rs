@@ -3,6 +3,16 @@ use crate::VoxelChunkSvo;
 use crate::local_coordinate::data::{Chunk, PositionedAtomicVoxel, SOLID_VOXEL_ID};
 use bevy::prelude::{FixedUpdate, IVec3, Schedule, Update, Vec3, World};
 
+fn test_prediction_anchor(player_id: PlayerId) -> PredictionAnchorState {
+    PredictionAnchorState {
+        id: PredictionAnchorId(2),
+        owner: player_id,
+        scene_id: SceneId::S1,
+        position: [0.0; 3],
+        radius_chunks: PREDICTION_CHUNK_RADIUS,
+    }
+}
+
 fn test_anchor(player_id: PlayerId) -> RenderingAnchorState {
     RenderingAnchorState {
         id: ChunkLoadingAnchorId(1),
@@ -85,6 +95,38 @@ fn rendering_anchor_starts_at_origin_and_does_not_depend_on_player_transform() {
         Some(LocalCoordinateServerEvent::RenderingAnchorSpawned { anchor, .. })
             if anchor == subscription.anchor
     ));
+    assert!(matches!(
+        transport.try_receive(),
+        Some(LocalCoordinateServerEvent::PredictionAnchorSpawned { anchor, .. })
+            if anchor == subscription.prediction_anchor
+    ));
+
+    transport
+        .try_send(
+            LocalCoordinateServerCommand::UpdateControlledCreaturePosition {
+                connection_id,
+                position: [128.0, 64.0, -32.0],
+            },
+        )
+        .unwrap();
+    app.world_mut().run_schedule(Update);
+
+    let subscription = &app
+        .world()
+        .resource::<LocalCoordinateServerWorld>()
+        .subscriptions[&connection_id];
+    assert_eq!(subscription.anchor.position, [0.0; 3]);
+    assert_eq!(subscription.prediction_anchor.position, [0.0; 3]);
+    while let Some(event) = transport.try_receive() {
+        assert!(
+            !matches!(
+                event,
+                LocalCoordinateServerEvent::RenderingAnchorUpdated { .. }
+                    | LocalCoordinateServerEvent::PredictionAnchorUpdated { .. }
+            ),
+            "Creature movement must not move either Chunk Loading Anchor"
+        );
+    }
 }
 
 #[test]
@@ -247,19 +289,30 @@ fn only_advertised_chunk_ids_enter_the_response_queue_once() {
         coordinate: [2, 3, 4],
     };
     let current = UpdateVersion::new(7);
-    let mut subscription = PlayerSubscription {
-        anchor: test_anchor(PlayerId(1)),
-        spawned_coordinates: HashSet::new(),
-        advertised_chunks: HashMap::from([(key, current)]),
-        pending_requests: VecDeque::new(),
-    };
+    let connection_id = ConnectionId(7);
+    let mut world = LocalCoordinateServerWorld::default();
+    world.subscriptions.insert(
+        connection_id,
+        PlayerSubscription {
+            anchor: test_anchor(PlayerId(1)),
+            prediction_anchor: test_prediction_anchor(PlayerId(1)),
+            spawned_coordinates: HashSet::new(),
+            advertised_chunks: HashMap::from([(key, current)]),
+            advertised_environment_revisions: HashMap::new(),
+            pending_requests: VecDeque::new(),
+        },
+    );
     let unavailable = ChunkId {
         local_coordinate_id: LocalCoordinateId(1),
         coordinate: [8, 9, 10],
     };
 
-    enqueue_chunk_requests(&mut subscription, [key, key, unavailable]);
+    world.apply_stream_command(LocalCoordinateServerCommand::RequestChunks {
+        connection_id,
+        chunks: vec![key, key, unavailable],
+    });
 
+    let subscription = &world.subscriptions[&connection_id];
     assert_eq!(subscription.pending_requests.len(), 1);
     assert_eq!(subscription.pending_requests[0], key);
 }
@@ -313,8 +366,10 @@ fn subscription_snapshot_drops_chunks_outside_the_latest_observation() {
     };
     let mut subscription = PlayerSubscription {
         anchor: test_anchor(PlayerId(1)),
+        prediction_anchor: test_prediction_anchor(PlayerId(1)),
         spawned_coordinates: HashSet::from([LocalCoordinateId(1)]),
         advertised_chunks: HashMap::from([(removed, UpdateVersion::new(4))]),
+        advertised_environment_revisions: HashMap::new(),
         pending_requests: VecDeque::from([removed]),
     };
 
@@ -343,8 +398,10 @@ fn stale_or_unsubscribed_svo_jobs_are_not_published() {
         connection_id,
         PlayerSubscription {
             anchor: test_anchor(PlayerId(1)),
+            prediction_anchor: test_prediction_anchor(PlayerId(1)),
             spawned_coordinates: HashSet::new(),
             advertised_chunks: HashMap::from([(chunk.id(), chunk.version)]),
+            advertised_environment_revisions: HashMap::new(),
             pending_requests: VecDeque::new(),
         },
     );

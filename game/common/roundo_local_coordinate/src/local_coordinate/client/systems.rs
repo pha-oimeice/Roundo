@@ -5,26 +5,36 @@ use super::*;
 // The chained systems preserve command, decode, and application ordering.
 impl Plugin for LocalCoordinateClientPlugin {
     fn build(&self, app: &mut App) {
-        app.add_plugins(LocalCoordinateBasePlugin)
-            .init_resource::<AtomicVoxelRegistry>()
-            .init_resource::<LocalCoordinateClientWorld>()
-            .init_resource::<ClientChunkViewDistance>()
-            .insert_resource(LocalCoordinateClientPipe(self.pipe.endpoint_b()))
-            .add_systems(
-                Update,
-                (
-                    publish_chunk_view_distance,
-                    ingest_commands,
-                    collect_derived_svo_results,
-                    apply_pending_chunk_updates,
-                )
-                    .chain()
-                    .before(LocalCoordinateSet::RebuildIndex),
+        app.add_plugins((
+            LocalCoordinateBasePlugin,
+            crate::local_coordinate::physics::LocalCoordinatePhysicsPlugin,
+        ))
+        .init_resource::<AtomicVoxelRegistry>()
+        // Physics is prediction-only on clients; begin restricted before the
+        // first rendering chunk can reach the collider sync system.
+        .insert_resource(
+            crate::local_coordinate::physics::LocalCoordinatePhysicsInterests::restricted_empty(),
+        )
+        .init_resource::<LocalCoordinateClientWorld>()
+        .init_resource::<ClientChunkViewDistance>()
+        .insert_resource(LocalCoordinateClientPipe(self.pipe.endpoint_b()))
+        .add_systems(
+            Update,
+            (
+                publish_chunk_view_distance,
+                ingest_commands,
+                collect_derived_svo_results,
+                apply_pending_chunk_updates,
+                reconcile_prediction_physics_interest,
             )
-            .add_systems(
-                Update,
-                discard_client_chunk_changes.after(LocalCoordinateSet::RebuildIndex),
-            );
+                .chain()
+                .before(LocalCoordinateSet::RebuildIndex)
+                .before(crate::local_coordinate::physics::LocalCoordinatePhysicsSet::Sync),
+        )
+        .add_systems(
+            Update,
+            discard_client_chunk_changes.after(LocalCoordinateSet::RebuildIndex),
+        );
     }
 }
 
@@ -33,24 +43,6 @@ impl Plugin for LocalCoordinateClientPlugin {
 struct LocalCoordinateClientPipe(
     CrossbeamThreadPipeEndpointB<LocalCoordinateClientCommand, LocalCoordinateClientEvent>,
 );
-
-/// Immutable decoded SVO retained with its authoritative version.
-pub(super) struct CachedClientChunk {
-    server_version: UpdateVersion,
-    svo: Arc<VoxelChunkSvo>,
-}
-
-/// Latest-wins chunk mutation waiting for its coordinate entity.
-pub(super) enum PendingChunkUpdate {
-    Load {
-        chunk: ChunkVersion,
-        svo: Arc<VoxelChunkSvo>,
-    },
-    Unload {
-        local_coordinate_id: LocalCoordinateId,
-        coordinate: ChunkCoordinate,
-    },
-}
 
 // Publishes only changed, already-clamped view distances.
 fn publish_chunk_view_distance(
@@ -83,9 +75,9 @@ fn ingest_commands(
             break;
         };
 
-        match command {
+        match &command {
             // A session boundary invalidates every prior coordinate and version.
-            LocalCoordinateClientCommand::BeginSession => {
+            LocalCoordinateClientCommand::BeginSession { epoch } => {
                 let chunks = distance.chunks();
                 if pipe
                     .0
@@ -96,22 +88,29 @@ fn ingest_commands(
                         "cannot initialize client Chunk view distance: chunks={chunks}, reason=client_bridge_closed"
                     );
                 }
-                for entity in world.coordinates.drain().map(|(_, entity)| entity) {
+                for entity in world.begin_session(*epoch) {
                     commands.entity(entity).despawn();
                 }
-                world.rendering_anchors.clear();
-                world.cached_chunks.clear();
-                world.active_server_versions.clear();
-                world.requested_server_versions.clear();
-                world.pending_chunk_updates.clear();
+                continue;
             }
+            LocalCoordinateClientCommand::EndSession { epoch } => {
+                for entity in world.end_session(*epoch) {
+                    commands.entity(entity).despawn();
+                }
+                continue;
+            }
+            _ if !world.session_is_active() => continue,
+            _ => {}
+        }
+
+        match command {
+            LocalCoordinateClientCommand::BeginSession { .. }
+            | LocalCoordinateClientCommand::EndSession { .. } => unreachable!(),
             LocalCoordinateClientCommand::RenderingAnchorSpawned(anchor) => {
-                world.rendering_anchors.insert(anchor.id, anchor);
+                world.spawn_rendering_anchor(anchor);
             }
             LocalCoordinateClientCommand::RenderingAnchorUpdated(anchor) => {
-                if let Some(current) = world.rendering_anchors.get_mut(&anchor.id) {
-                    *current = anchor;
-                } else {
+                if !world.update_rendering_anchor(anchor) {
                     log::warn!(
                         "received update for unknown rendering anchor: anchor_id={}",
                         anchor.id.0
@@ -119,76 +118,40 @@ fn ingest_commands(
                 }
             }
             LocalCoordinateClientCommand::RenderingAnchorDespawned(anchor_id) => {
-                world.rendering_anchors.remove(&anchor_id);
+                world.despawn_rendering_anchor(anchor_id);
             }
-            LocalCoordinateClientCommand::ResetRequests => {
-                world.requested_server_versions.clear();
+            LocalCoordinateClientCommand::PredictionAnchorSpawned(anchor) => {
+                world.spawn_prediction_anchor(anchor);
+            }
+            LocalCoordinateClientCommand::PredictionAnchorUpdated(anchor) => {
+                world.update_prediction_anchor(anchor);
+            }
+            LocalCoordinateClientCommand::PredictionAnchorDespawned(anchor_id) => {
+                world.despawn_prediction_anchor(anchor_id);
+            }
+            LocalCoordinateClientCommand::EnvironmentOverrides(overrides) => {
+                world.ingest_environment_overrides(overrides);
             }
             LocalCoordinateClientCommand::Spawn(local_coordinate_id) => {
                 ensure_coordinate(&mut commands, &mut world, local_coordinate_id);
             }
             LocalCoordinateClientCommand::Despawn(local_coordinate_id) => {
-                if let Some(entity) = world.coordinates.remove(&local_coordinate_id) {
+                if let Some(entity) = world.despawn_coordinate(local_coordinate_id) {
                     commands.entity(entity).despawn();
                 }
-                world
-                    .active_server_versions
-                    .retain(|key, _| key.local_coordinate_id != local_coordinate_id);
-                world
-                    .requested_server_versions
-                    .retain(|key, _| key.local_coordinate_id != local_coordinate_id);
-                world
-                    .pending_chunk_updates
-                    .retain(|update| pending_local_coordinate_id(update) != local_coordinate_id);
             }
             LocalCoordinateClientCommand::VersionUpdates(chunks) => {
                 ingest_version_updates(&mut commands, &pipe, &mut world, chunks);
             }
             // Payloads are decoded only when they match the requested version.
             LocalCoordinateClientCommand::LoadChunk { chunk, payload } => {
-                let key = chunk.id();
-                if world.requested_server_versions.get(&key) != Some(&chunk.version) {
-                    continue;
-                }
-                if world
-                    .derived_svo
-                    .submit(DerivedSvoJob::Decode { chunk, payload })
-                    .is_err()
-                {
-                    let removed_request = world.requested_server_versions.remove(&key);
-                    debug_assert_eq!(removed_request, Some(chunk.version));
-                    log::error!(
-                        "cannot queue client Chunk decode: local_coordinate_id={}, coordinate={:?}, version={}, reason=derived_svo_worker_closed",
-                        chunk.local_coordinate_id.0,
-                        chunk.coordinate,
-                        chunk.version.value()
-                    );
-                }
+                world.submit_payload(chunk, payload);
             }
             // Unload retains cached data while removing active state.
             LocalCoordinateClientCommand::UnloadChunk {
                 local_coordinate_id,
                 coordinate,
-            } => {
-                let key = ChunkId {
-                    local_coordinate_id,
-                    coordinate,
-                };
-                let removed_active = world.active_server_versions.remove(&key);
-                let removed_request = world.requested_server_versions.remove(&key);
-                log::trace!(
-                    "queued client Chunk unload: chunk={key:?}, had_active_version={}, had_pending_request={}",
-                    removed_active.is_some(),
-                    removed_request.is_some()
-                );
-                queue_pending_chunk_update(
-                    &mut world,
-                    PendingChunkUpdate::Unload {
-                        local_coordinate_id,
-                        coordinate,
-                    },
-                );
-            }
+            } => world.unload_chunk(local_coordinate_id, coordinate),
         }
     }
 }
@@ -204,7 +167,14 @@ fn collect_derived_svo_results(
             break;
         };
         match result {
-            DerivedSvoResult::Decoded { chunk, svo } => {
+            DerivedSvoResult::Decoded {
+                session_epoch,
+                chunk,
+                svo,
+            } => {
+                if world.session_epoch != Some(session_epoch) {
+                    continue;
+                }
                 let key = chunk.id();
                 if world.requested_server_versions.get(&key) != Some(&chunk.version) {
                     continue;
@@ -236,13 +206,17 @@ fn collect_derived_svo_results(
                 );
                 world.active_server_versions.insert(key, chunk.version);
                 ensure_coordinate(&mut commands, &mut world, chunk.local_coordinate_id);
-                queue_pending_chunk_update(&mut world, PendingChunkUpdate::Load { chunk, svo });
+                world.queue_pending_chunk_update(PendingChunkUpdate::Load { chunk, svo });
             }
             DerivedSvoResult::Failed {
                 connection_id: None,
+                session_epoch: Some(session_epoch),
                 chunk,
                 error,
             } => {
+                if world.session_epoch != Some(session_epoch) {
+                    continue;
+                }
                 let removed_request = world.requested_server_versions.remove(&chunk.id());
                 if removed_request != Some(chunk.version) {
                     log::debug!(
@@ -260,6 +234,11 @@ fn collect_derived_svo_results(
             DerivedSvoResult::Encoded { .. }
             | DerivedSvoResult::Failed {
                 connection_id: Some(_),
+                ..
+            }
+            | DerivedSvoResult::Failed {
+                connection_id: None,
+                session_epoch: None,
                 ..
             } => {}
         }
@@ -293,7 +272,7 @@ fn ingest_version_updates(
             if world.active_server_versions.get(&key) != Some(&chunk.version) {
                 world.active_server_versions.insert(key, chunk.version);
                 let svo = Arc::clone(&cached.svo);
-                queue_pending_chunk_update(world, PendingChunkUpdate::Load { chunk, svo });
+                world.queue_pending_chunk_update(PendingChunkUpdate::Load { chunk, svo });
             }
             continue;
         }
@@ -392,37 +371,15 @@ fn apply_pending_chunk_updates(
     }
 }
 
-// Replaces older pending work for the same chunk identity.
-fn queue_pending_chunk_update(world: &mut LocalCoordinateClientWorld, update: PendingChunkUpdate) {
-    let id = pending_chunk_id(&update);
-    world
-        .pending_chunk_updates
-        .retain(|pending| pending_chunk_id(pending) != id);
-    world.pending_chunk_updates.push_back(update);
-}
-
-// Normalizes load and unload variants to one chunk key.
-fn pending_chunk_id(update: &PendingChunkUpdate) -> ChunkId {
-    match update {
-        PendingChunkUpdate::Load { chunk, .. } => chunk.id(),
-        PendingChunkUpdate::Unload {
-            local_coordinate_id,
-            coordinate,
-        } => ChunkId {
-            local_coordinate_id: *local_coordinate_id,
-            coordinate: *coordinate,
-        },
-    }
-}
-
-// Extracts the coordinate owner without cloning update payloads.
-fn pending_local_coordinate_id(update: &PendingChunkUpdate) -> LocalCoordinateId {
-    match update {
-        PendingChunkUpdate::Load { chunk, .. } => chunk.local_coordinate_id,
-        PendingChunkUpdate::Unload {
-            local_coordinate_id,
-            ..
-        } => *local_coordinate_id,
+/// Keeps collider derivation limited to loaded prediction-interest chunks;
+/// rendering data stays cached independently.
+fn reconcile_prediction_physics_interest(
+    world: Res<LocalCoordinateClientWorld>,
+    mut interests: ResMut<crate::local_coordinate::physics::LocalCoordinatePhysicsInterests>,
+) {
+    let desired = world.prediction_physics_interests();
+    if !interests.matches(&desired) {
+        interests.replace(desired);
     }
 }
 

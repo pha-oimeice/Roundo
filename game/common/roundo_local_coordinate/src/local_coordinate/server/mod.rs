@@ -1,10 +1,12 @@
 //! Authoritative procedural-coordinate streaming and network-facing IPC contracts.
 
 mod generation;
+mod stream_state;
 mod systems;
 
 use generation::{ChunkGenerationJob, ChunkGenerationWorker};
-use systems::{GenerationPlan, ObservationRegion, PlayerSubscription};
+use stream_state::PlayerSubscription;
+use systems::{GenerationPlan, ObservationRegion};
 
 use crate::local_coordinate::{
     base::{LocalCoordinateBasePlugin, LocalCoordinateSet},
@@ -30,8 +32,9 @@ use bevy::prelude::{
     Resource, Startup, SystemSet, Update,
 };
 use roundo_contracts::{
-    ChunkLoadingAnchorId, ConnectionId, PlayerId, RenderingAnchorState, SceneId, SerializedPayload,
-    UpdateVersion,
+    ChunkLoadingAnchorId, ConnectionId, PlayerId, PredictionAnchorId, PredictionAnchorState,
+    RenderingAnchorState, SceneId, SerializedPayload, UpdateVersion,
+    VirtualChunkEnvironmentOverride,
 };
 use roundo_toolbox::{
     CrossbeamThreadPipe, CrossbeamThreadPipeEndpointA, CrossbeamThreadPipeEndpointB,
@@ -43,7 +46,8 @@ pub const DEFAULT_PCG_LOCAL_COORDINATE_ID: LocalCoordinateId = LocalCoordinateId
 const MAX_CHUNKS_GENERATED_PER_TICK: usize = 16;
 const MAX_CHUNK_GENERATION_JOBS_IN_FLIGHT: usize = 32;
 const MAX_CHUNKS_EVICTED_PER_TICK: usize = 32;
-const PHYSICS_CHUNK_RADIUS: f64 = 4.0;
+/// Dummy radius for the independent controlled-Creature prediction interest.
+pub const PREDICTION_CHUNK_RADIUS: u16 = 4;
 const MAX_CHUNK_RESPONSES_PER_TICK_PER_CONNECTION: usize = 16;
 const MAX_DERIVED_SVO_RESULTS_PER_TICK: usize = 16;
 const MAX_DERIVED_SVO_JOBS_IN_FLIGHT: usize = 32;
@@ -175,6 +179,11 @@ pub enum LocalCoordinateServerCommand {
         connection_id: ConnectionId,
         chunks: u16,
     },
+    /// Updates separate server-owned anchors from a controlled Creature pose.
+    UpdateControlledCreaturePosition {
+        connection_id: ConnectionId,
+        position: [f64; 3],
+    },
 }
 
 /// Connection-addressed lifecycle, version, and payload output.
@@ -191,6 +200,22 @@ pub enum LocalCoordinateServerEvent {
     RenderingAnchorDespawned {
         connection_id: ConnectionId,
         anchor_id: ChunkLoadingAnchorId,
+    },
+    PredictionAnchorSpawned {
+        connection_id: ConnectionId,
+        anchor: PredictionAnchorState,
+    },
+    PredictionAnchorUpdated {
+        connection_id: ConnectionId,
+        anchor: PredictionAnchorState,
+    },
+    PredictionAnchorDespawned {
+        connection_id: ConnectionId,
+        anchor_id: PredictionAnchorId,
+    },
+    EnvironmentOverrides {
+        connection_id: ConnectionId,
+        overrides: Vec<VirtualChunkEnvironmentOverride>,
     },
     Spawned {
         connection_id: ConnectionId,
@@ -230,6 +255,7 @@ pub struct LocalCoordinateServerWorld {
     observation_by_anchor: HashMap<ChunkLoadingAnchorId, ObservationRegion>,
     subscriptions: HashMap<ConnectionId, PlayerSubscription>,
     next_anchor_id: u64,
+    next_prediction_anchor_id: u64,
     requested_view_distances: HashMap<ConnectionId, u16>,
     derived_svo_jobs: HashMap<(ConnectionId, ChunkId), UpdateVersion>,
     derived_svo: DerivedSvoWorker,
@@ -246,6 +272,7 @@ impl Default for LocalCoordinateServerWorld {
             observation_by_anchor: HashMap::new(),
             subscriptions: HashMap::new(),
             next_anchor_id: 1,
+            next_prediction_anchor_id: 1,
             requested_view_distances: HashMap::new(),
             derived_svo_jobs: HashMap::new(),
             derived_svo: DerivedSvoWorker::spawn("roundo-server-derived-svo"),

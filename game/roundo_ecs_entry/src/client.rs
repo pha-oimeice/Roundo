@@ -1,5 +1,7 @@
 //! Composes the standalone Bevy client and its bound IPC endpoints.
 
+use crate::creature_prediction::CreaturePredictionPlugin;
+use avian3d::PhysicsPlugins;
 use bevy::{
     DefaultPlugins,
     app::{App, PostStartup},
@@ -64,9 +66,11 @@ impl ClientEcsRuntime {
                     ..default()
                 }),
                 RoundoRenderingPlugin,
+                PhysicsPlugins::default(),
                 presence,
                 local_coordinate,
                 marionette,
+                CreaturePredictionPlugin,
             ));
         app.add_systems(PostStartup, bind_player_controller_to_debug_camera)
             .add_systems(Update, sync_local_player_marker_visibility);

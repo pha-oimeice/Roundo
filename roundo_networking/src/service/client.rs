@@ -69,15 +69,17 @@ impl ClientNetwork {
     ///
     /// Admission success guarantees only insertion into the selected local
     /// queue; it does not imply an active connection or peer delivery. Messages
-    /// admitted while disconnected wait for a later session, but a message
-    /// already forwarded to a failed connection is not retried. Session-
-    /// negotiation messages cannot be submitted through this method.
+    /// not consumed by the current transport attempt are discarded at the next
+    /// session boundary and never migrate to another authoritative session.
+    /// Session-negotiation messages cannot be submitted through this method.
     ///
     /// # Errors
     ///
     /// Returns an error when the message belongs to another stream, the bounded
-    /// queue is full, or the worker has stopped. The converted message is not
-    /// returned on failure.
+    /// queue is full, or the worker has stopped. Messages are scoped to the
+    /// currently establishing/active transport attempt: anything still queued
+    /// when a later session is established is discarded before that session's
+    /// callback. The converted message is not returned on failure.
     pub fn send<Message>(&self, stream: StreamId, message: Message) -> Result<(), NetworkError>
     where
         Message: Into<ClientMessage>,
@@ -190,6 +192,13 @@ async fn run_client(
                     config.quic_address,
                     config.server_name
                 );
+                let (discarded_stream0, discarded_stream1) =
+                    discard_stale_outbound(&mut stream0_outbound, &mut stream1_outbound);
+                if discarded_stream0 != 0 || discarded_stream1 != 0 {
+                    log::warn!(
+                        "discarded stale client outbound messages at session boundary: stream0={discarded_stream0}, stream1={discarded_stream1}"
+                    );
+                }
                 hooks.on_connection_established();
                 run_client_sessions(
                     sessions,
@@ -227,6 +236,20 @@ async fn run_client(
             _ = tokio::time::sleep(config.reconnect_delay) => {}
         }
     }
+}
+
+fn discard_stale_outbound(
+    stream0: &mut mpsc::Receiver<ClientMessage>,
+    stream1: &mut mpsc::Receiver<ClientMessage>,
+) -> (usize, usize) {
+    fn drain(receiver: &mut mpsc::Receiver<ClientMessage>) -> usize {
+        let mut count = 0;
+        while receiver.try_recv().is_ok() {
+            count += 1;
+        }
+        count
+    }
+    (drain(stream0), drain(stream1))
 }
 
 struct ClientSessions {
@@ -388,5 +411,32 @@ fn server_message_kind(message: &ServerMessage) -> &'static str {
         ServerMessage::Error { .. } => "Error",
         ServerMessage::Game(message) => message.kind(),
         ServerMessage::Resource(message) => message.kind(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_new_transport_session_discards_all_queued_application_messages() {
+        let (stream0_sender, mut stream0) = mpsc::channel(4);
+        let (stream1_sender, mut stream1) = mpsc::channel(4);
+        stream0_sender
+            .try_send(ClientMessage::Ready {
+                stream: StreamId::Stream0,
+                protocol_version: 1,
+            })
+            .unwrap();
+        stream1_sender
+            .try_send(ClientMessage::Ready {
+                stream: StreamId::Stream1,
+                protocol_version: 1,
+            })
+            .unwrap();
+
+        assert_eq!(discard_stale_outbound(&mut stream0, &mut stream1), (1, 1));
+        assert!(stream0.try_recv().is_err());
+        assert!(stream1.try_recv().is_err());
     }
 }

@@ -170,7 +170,7 @@ pub(super) async fn process_server_connection(
         user_session.user_id.0,
         user_session.session_id.0
     );
-    hooks.on_session_connected(connection_id, user_session);
+    hooks.on_session_connected(connection_id, user_session, peer_address);
 
     loop {
         tokio::select! {
@@ -242,7 +242,7 @@ pub(super) async fn process_server_connection(
     stream1.shutdown();
     close_quic_connection(&connection, 0, b"session closed");
     if registry.unregister(connection_id, user_session) {
-        hooks.on_session_disconnected(connection_id, user_session);
+        hooks.on_session_disconnected(connection_id, user_session, peer_address);
     }
     log::info!(
         "QUIC connection closed: peer={peer_address}, connection_id={}, user_id={}, session_id={}",

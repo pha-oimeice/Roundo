@@ -1,0 +1,8 @@
+[package]
+name = "roundo_player"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+bevy.workspace = true
+roundo_contracts.workspace = true

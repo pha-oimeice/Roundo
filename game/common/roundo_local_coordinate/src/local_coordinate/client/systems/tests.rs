@@ -20,6 +20,14 @@ fn add_ingest_systems(app: &mut App) {
     );
 }
 
+fn begin_test_session(client: &LocalCoordinateClientIpc, app: &mut App) {
+    client
+        .try_send(LocalCoordinateClientCommand::BeginSession { epoch: 1 })
+        .unwrap();
+    app.update();
+    while client.try_receive().is_some() {}
+}
+
 #[test]
 fn rendering_anchors_are_server_projected_and_removed_by_identity() {
     let transport = CrossbeamThreadPipe::new();
@@ -29,6 +37,7 @@ fn rendering_anchors_are_server_projected_and_removed_by_identity() {
         .init_resource::<ClientChunkViewDistance>()
         .insert_resource(LocalCoordinateClientPipe(transport.endpoint_b()))
         .add_systems(Update, ingest_commands);
+    begin_test_session(&server_projection, &mut app);
     let anchor = RenderingAnchorState {
         id: ChunkLoadingAnchorId(7),
         owner: roundo_contracts::PlayerId(3),
@@ -89,6 +98,7 @@ fn matching_cached_versions_do_not_request_chunk_data_again() {
     app.init_resource::<LocalCoordinateClientWorld>()
         .insert_resource(LocalCoordinateClientPipe(transport.endpoint_b()));
     add_ingest_systems(&mut app);
+    begin_test_session(&client, &mut app);
     let chunk = ChunkVersion {
         local_coordinate_id: LocalCoordinateId(1),
         coordinate: [2, 3, 4],
@@ -133,6 +143,7 @@ fn version_updates_do_not_unload_chunks_omitted_from_the_event() {
     app.init_resource::<LocalCoordinateClientWorld>()
         .insert_resource(LocalCoordinateClientPipe(transport.endpoint_b()));
     add_ingest_systems(&mut app);
+    begin_test_session(&client, &mut app);
     let active = ChunkVersion {
         local_coordinate_id: LocalCoordinateId(1),
         coordinate: [0, 0, 0],
@@ -166,6 +177,7 @@ fn unloading_a_chunk_keeps_its_transferred_data_cached() {
     app.init_resource::<LocalCoordinateClientWorld>()
         .insert_resource(LocalCoordinateClientPipe(transport.endpoint_b()));
     add_ingest_systems(&mut app);
+    begin_test_session(&client, &mut app);
     let chunk = ChunkVersion {
         local_coordinate_id: LocalCoordinateId(1),
         coordinate: [2, 3, 4],
@@ -205,33 +217,76 @@ fn pending_chunk_updates_are_latest_wins_per_chunk() {
         coordinate: [2, 0, 3],
     };
     let mut world = LocalCoordinateClientWorld::default();
-    queue_pending_chunk_update(
-        &mut world,
-        PendingChunkUpdate::Unload {
-            local_coordinate_id: id.local_coordinate_id,
-            coordinate: id.coordinate,
-        },
-    );
+    world.queue_pending_chunk_update(PendingChunkUpdate::Unload {
+        local_coordinate_id: id.local_coordinate_id,
+        coordinate: id.coordinate,
+    });
     let source = UnoptimizedOctree::new(0, AtomicVoxel::default());
     let svo = Arc::new(
         BreadthFirstLosslessSvo::from_unoptimized_mapped(&source, 4, |data| *data).unwrap(),
     );
-    queue_pending_chunk_update(
-        &mut world,
-        PendingChunkUpdate::Load {
-            chunk: ChunkVersion {
-                local_coordinate_id: id.local_coordinate_id,
-                coordinate: id.coordinate,
-                version: UpdateVersion::INITIAL,
-            },
-            svo,
+    world.queue_pending_chunk_update(PendingChunkUpdate::Load {
+        chunk: ChunkVersion {
+            local_coordinate_id: id.local_coordinate_id,
+            coordinate: id.coordinate,
+            version: UpdateVersion::INITIAL,
         },
-    );
+        svo,
+    });
     assert_eq!(world.pending_chunk_updates.len(), 1);
     assert!(matches!(
         world.pending_chunk_updates.front(),
         Some(PendingChunkUpdate::Load { .. })
     ));
+}
+
+#[test]
+fn an_old_session_decode_cannot_populate_the_replacement_session() {
+    let transport = CrossbeamThreadPipe::new();
+    let client = transport.endpoint_a();
+    let mut app = App::new();
+    app.init_resource::<LocalCoordinateClientWorld>()
+        .insert_resource(LocalCoordinateClientPipe(transport.endpoint_b()));
+    add_ingest_systems(&mut app);
+    let chunk = ChunkVersion {
+        local_coordinate_id: LocalCoordinateId(1),
+        coordinate: [4, 5, 6],
+        version: UpdateVersion::new(7),
+    };
+    let source = UnoptimizedOctree::new(0, crate::EMPTY_VOXEL_ID);
+    let svo = BreadthFirstLosslessSvo::from_unoptimized_mapped(&source, 4, |data| *data).unwrap();
+    let payload = SerializedPayload::encode(&svo).unwrap();
+
+    client
+        .try_send(LocalCoordinateClientCommand::BeginSession { epoch: 1 })
+        .unwrap();
+    client
+        .try_send(LocalCoordinateClientCommand::VersionUpdates(vec![chunk]))
+        .unwrap();
+    client
+        .try_send(LocalCoordinateClientCommand::LoadChunk { chunk, payload })
+        .unwrap();
+    client
+        .try_send(LocalCoordinateClientCommand::EndSession { epoch: 1 })
+        .unwrap();
+    client
+        .try_send(LocalCoordinateClientCommand::BeginSession { epoch: 2 })
+        .unwrap();
+    client
+        .try_send(LocalCoordinateClientCommand::VersionUpdates(vec![chunk]))
+        .unwrap();
+
+    for _ in 0..100 {
+        app.update();
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+
+    let world = app.world().resource::<LocalCoordinateClientWorld>();
+    assert_eq!(world.cached_chunk_count(), 0);
+    assert_eq!(
+        world.requested_server_versions.get(&chunk.id()),
+        Some(&chunk.version)
+    );
 }
 
 #[test]
@@ -244,7 +299,7 @@ fn a_new_session_publishes_the_configured_chunk_view_distance() {
         .insert_resource(LocalCoordinateClientPipe(transport.endpoint_b()))
         .add_systems(Update, ingest_commands);
     client
-        .try_send(LocalCoordinateClientCommand::BeginSession)
+        .try_send(LocalCoordinateClientCommand::BeginSession { epoch: 1 })
         .unwrap();
     app.update();
     assert!(matches!(
@@ -286,7 +341,7 @@ fn a_new_session_clears_old_active_and_cached_chunks() {
     }
 
     client
-        .try_send(LocalCoordinateClientCommand::BeginSession)
+        .try_send(LocalCoordinateClientCommand::BeginSession { epoch: 1 })
         .unwrap();
     app.update();
 

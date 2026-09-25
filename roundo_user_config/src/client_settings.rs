@@ -66,6 +66,18 @@ impl ClientSettingsConfig {
         let mut seen = BTreeSet::new();
         self.input_bindings
             .retain(|binding| seen.insert((binding.slot.clone(), binding.key)));
+        // Existing development configs predate this Mod slot. Preserve any
+        // explicit rebind, but backfill the default edge when the slot is absent.
+        if !self
+            .input_bindings
+            .iter()
+            .any(|binding| binding.slot == "roundo.spawn-test-creature")
+        {
+            self.input_bindings.push(ClientInputBindingConfig::new(
+                "roundo.spawn-test-creature",
+                ClientInputKey::Digit1,
+            ));
+        }
     }
 }
 
@@ -85,6 +97,7 @@ impl Default for ClientSettingsConfig {
                 ClientInputBindingConfig::new("roundo.spirit-camera", ClientInputKey::F1),
                 ClientInputBindingConfig::new("roundo.destroy-block", ClientInputKey::MouseLeft),
                 ClientInputBindingConfig::new("roundo.place-block", ClientInputKey::MouseRight),
+                ClientInputBindingConfig::new("roundo.spawn-test-creature", ClientInputKey::Digit1),
             ],
         }
     }
@@ -250,18 +263,33 @@ mod tests {
             DEFAULT_JOINABLE_WORLD_RADIUS
         );
         assert_eq!(settings.world.chunk_view_distance, 64.0);
-        assert_eq!(settings.input_bindings.len(), 9);
+        assert_eq!(settings.input_bindings.len(), 10);
+    }
+
+    #[test]
+    fn normalization_backfills_spawn_test_creature_for_existing_configs() {
+        let mut settings = ClientSettingsConfig::default();
+        settings
+            .input_bindings
+            .retain(|binding| binding.slot != "roundo.spawn-test-creature");
+        settings.normalize();
+        assert!(settings.input_bindings.iter().any(|binding| {
+            binding.slot == "roundo.spawn-test-creature" && binding.key == ClientInputKey::Digit1
+        }));
     }
 
     #[test]
     fn defaults_cover_every_builtin_slot_without_escape() {
         let settings = ClientSettingsConfig::default();
-        assert_eq!(settings.input_bindings.len(), 9);
+        assert_eq!(settings.input_bindings.len(), 10);
         assert!(
             settings
                 .input_bindings
                 .iter()
                 .any(|binding| binding.key == ClientInputKey::F1)
         );
+        assert!(settings.input_bindings.iter().any(|binding| {
+            binding.slot == "roundo.spawn-test-creature" && binding.key == ClientInputKey::Digit1
+        }));
     }
 }

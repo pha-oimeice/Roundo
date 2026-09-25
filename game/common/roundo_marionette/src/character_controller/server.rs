@@ -6,8 +6,11 @@ use super::{
         BlockInteractionMessage, DestroyBlockControllerMessage, PlaceBlockControllerMessage,
         accept_block_interactions,
     },
-    movement::{Movement3DAction, Movement3DMessage, accept_movement_commands, apply_movement},
-    rotation::{RotationSyncMessage, apply_rotation_sync},
+    movement::{Movement3DAction, Movement3DMessage, accept_movement_commands},
+    rotation::{AcceptedGazeIntent, GazeController, GazeIntentMessage},
+    test_creature::{
+        SpawnTestCreatureControllerMessage, SpawnTestCreatureIntent, accept_spawn_test_creature,
+    },
 };
 use bevy::prelude::{
     App, Component, Entity, FixedUpdate, IntoScheduleConfigs, MessageWriter, Plugin, Query, Res,
@@ -17,18 +20,19 @@ pub use roundo_contracts::ConnectionId;
 use roundo_toolbox::{
     CrossbeamThreadPipe, CrossbeamThreadPipeEndpointA, CrossbeamThreadPipeEndpointB,
 };
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 // The fixed budget bounds work when a client floods controller commands.
 const MAX_CONTROL_COMMANDS_PER_TICK: usize = 4096;
 
 /// Network-facing endpoint for authoritative controller commands.
-pub type ServerMarionetteIpc = CrossbeamThreadPipeEndpointA<ServerMarionetteCommand, ()>;
+pub type ServerMarionetteIpc =
+    CrossbeamThreadPipeEndpointA<ServerMarionetteCommand, ServerMarionetteEvent>;
 
 #[derive(Clone)]
 /// Installs controller routing and authoritative application systems.
 pub struct MarionetteServerPlugin {
-    pipe: CrossbeamThreadPipe<ServerMarionetteCommand, ()>,
+    pipe: CrossbeamThreadPipe<ServerMarionetteCommand, ServerMarionetteEvent>,
 }
 
 impl MarionetteServerPlugin {
@@ -55,11 +59,16 @@ impl Default for MarionetteServerPlugin {
 impl Plugin for MarionetteServerPlugin {
     fn build(&self, app: &mut App) {
         app.insert_resource(ServerPipeResource(self.pipe.endpoint_b()))
+            .insert_resource(ServerMarionetteSnapshotSender(self.pipe.endpoint_b()))
             .add_message::<Movement3DMessage>()
-            .add_message::<RotationSyncMessage>()
+            .add_message::<super::AcceptedMovementIntent>()
+            .add_message::<GazeIntentMessage>()
+            .add_message::<AcceptedGazeIntent>()
             .add_message::<DestroyBlockControllerMessage>()
             .add_message::<PlaceBlockControllerMessage>()
             .add_message::<BlockInteractionMessage>()
+            .add_message::<SpawnTestCreatureControllerMessage>()
+            .add_message::<SpawnTestCreatureIntent>()
             .configure_sets(
                 FixedUpdate,
                 (
@@ -77,15 +86,12 @@ impl Plugin for MarionetteServerPlugin {
             .add_systems(
                 FixedUpdate,
                 (
-                    apply_rotation_sync,
                     accept_movement_commands,
+                    accept_gaze_commands,
                     accept_block_interactions,
+                    accept_spawn_test_creature,
                 )
                     .in_set(MarionetteServerSet::Controllers),
-            )
-            .add_systems(
-                FixedUpdate,
-                apply_movement.in_set(MarionetteServerSet::Movement),
             );
     }
 }
@@ -107,6 +113,14 @@ pub struct NetworkControllerTarget {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 /// Controller intent received from an authenticated connection.
+pub enum ServerMarionetteEvent {
+    CreatureMotionSnapshot {
+        connection_id: ConnectionId,
+        snapshot: roundo_contracts::CreatureMotionSnapshot,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum ServerMarionetteCommand {
     UsePlayerController {
         connection_id: ConnectionId,
@@ -116,7 +130,15 @@ pub enum ServerMarionetteCommand {
 
 #[derive(Resource, Clone)]
 /// ECS-side endpoint consumed during fixed updates.
-struct ServerPipeResource(CrossbeamThreadPipeEndpointB<ServerMarionetteCommand, ()>);
+struct ServerPipeResource(
+    CrossbeamThreadPipeEndpointB<ServerMarionetteCommand, ServerMarionetteEvent>,
+);
+
+/// Composition adapter sends committed opaque Creature snapshots through this endpoint.
+#[derive(Resource, Clone)]
+pub struct ServerMarionetteSnapshotSender(
+    pub CrossbeamThreadPipeEndpointB<ServerMarionetteCommand, ServerMarionetteEvent>,
+);
 
 // Resolves connection ownership and compacts commands before simulation.
 fn process_controller_commands(
@@ -124,9 +146,11 @@ fn process_controller_commands(
     targets: Query<(Entity, &NetworkControllerTarget)>,
     movements: Query<&super::Movement3D>,
     mut movement_messages: MessageWriter<Movement3DMessage>,
-    mut rotation_messages: MessageWriter<RotationSyncMessage>,
+    gazes: Query<&GazeController>,
+    mut gaze_messages: MessageWriter<GazeIntentMessage>,
     mut destroy_block_messages: MessageWriter<DestroyBlockControllerMessage>,
     mut place_block_messages: MessageWriter<PlaceBlockControllerMessage>,
+    mut spawn_test_creature_messages: MessageWriter<SpawnTestCreatureControllerMessage>,
 ) {
     let targets = targets
         .iter()
@@ -135,16 +159,19 @@ fn process_controller_commands(
     // Movement intent is latest-wins while retaining monotonic sequencing.
     let mut movement_by_entity =
         HashMap::<Entity, roundo_contracts::ControllerCommand<Movement3DAction>>::new();
-    let mut rotation_by_entity = HashMap::new();
+    // Gaze commands are deltas, so every unacknowledged sequence contributes.
+    // Grouping by sequence deduplicates retries and makes the same-tick sum
+    // independent of arrival order while acknowledging the highest sequence.
+    let mut gaze_by_entity = HashMap::<Entity, BTreeMap<u64, super::GazeIntent>>::new();
 
     for _ in 0..MAX_CONTROL_COMMANDS_PER_TICK {
-        let Some(ServerMarionetteCommand::UsePlayerController {
-            connection_id,
-            command,
-        }) = pipe.0.try_receive()
-        else {
+        let Some(command) = pipe.0.try_receive() else {
             break;
         };
+        let ServerMarionetteCommand::UsePlayerController {
+            connection_id,
+            command,
+        } = command;
         let Some(&entity) = targets.get(&connection_id) else {
             continue;
         };
@@ -165,9 +192,17 @@ fn process_controller_commands(
                     })
                     .or_insert(command);
             }
-            // Rotation is latest-wins within one fixed tick.
-            PlayerControllerCommand::SyncRotation(sync) => {
-                rotation_by_entity.insert(entity, sync);
+            PlayerControllerCommand::Gaze(command) => {
+                if gazes.get(entity).map_or(true, |gaze| {
+                    command.sequence > gaze.last_accepted_sequence()
+                }) && command.action.yaw_delta.is_finite()
+                    && command.action.pitch_delta.is_finite()
+                {
+                    gaze_by_entity
+                        .entry(entity)
+                        .or_default()
+                        .insert(command.sequence, command.action);
+                }
             }
             PlayerControllerCommand::DestroyBlock(command) => {
                 let message = DestroyBlockControllerMessage { entity, command };
@@ -177,21 +212,61 @@ fn process_controller_commands(
                 let message = PlaceBlockControllerMessage { entity, command };
                 let _place_message = place_block_messages.write(message);
             }
+            PlayerControllerCommand::SpawnTestCreature(command) => {
+                spawn_test_creature_messages
+                    .write(SpawnTestCreatureControllerMessage { entity, command });
+            }
         }
     }
 
     for (entity, command) in movement_by_entity {
         let _movement_message = movement_messages.write(Movement3DMessage { entity, command });
     }
-    for (entity, sync) in rotation_by_entity {
-        let _rotation_message = rotation_messages.write(RotationSyncMessage { entity, sync });
+    for (entity, commands) in gaze_by_entity {
+        let Some((&sequence, _)) = commands.last_key_value() else {
+            continue;
+        };
+        let (yaw_delta, pitch_delta) = commands.values().fold((0.0_f32, 0.0_f32), |sum, intent| {
+            (sum.0 + intent.yaw_delta, sum.1 + intent.pitch_delta)
+        });
+        if yaw_delta.is_finite() && pitch_delta.is_finite() {
+            let _gaze_message = gaze_messages.write(GazeIntentMessage {
+                entity,
+                command: roundo_contracts::ControllerCommand {
+                    sequence,
+                    action: super::GazeIntent {
+                        yaw_delta,
+                        pitch_delta,
+                    },
+                },
+            });
+        }
+    }
+}
+
+fn accept_gaze_commands(
+    mut messages: bevy::prelude::MessageReader<GazeIntentMessage>,
+    mut controllers: Query<&mut GazeController>,
+    mut accepted: MessageWriter<AcceptedGazeIntent>,
+) {
+    for message in messages.read() {
+        if let Ok(mut controller) = controllers.get_mut(message.entity)
+            && controller.accept(message.command.sequence, message.command.action)
+        {
+            accepted.write(AcceptedGazeIntent {
+                controller: message.entity,
+                sequence: message.command.sequence,
+                yaw_delta: message.command.action.yaw_delta,
+                pitch_delta: message.command.action.pitch_delta,
+            });
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{ControllerCommand, Movement3D, Movement3DAction, PlayerControllers, RotationSync};
+    use crate::{ControllerCommand, GazeIntent, Movement3D, Movement3DAction, PlayerControllers};
     use bevy::prelude::{App, Quat, Time, Transform, Vec3};
     use std::time::Duration;
 
@@ -230,21 +305,25 @@ mod tests {
 
         assert_eq!(
             app.world().get::<Transform>(entity).unwrap().translation,
+            Vec3::ZERO
+        );
+        assert_eq!(
+            app.world().get::<Movement3D>(entity).unwrap().direction(),
             Vec3::X
         );
     }
 
     #[test]
-    fn rotation_sync_sets_transform_without_a_rotation_controller() {
+    fn gaze_intent_does_not_set_controller_transform() {
         let plugin = MarionetteServerPlugin::new();
         let ipc = plugin.ipc();
         let mut app = App::new();
         app.init_resource::<Time<bevy::prelude::Fixed>>()
             .add_plugins(plugin);
-        let expected = Quat::from_rotation_y(0.25);
         let entity = app
             .world_mut()
             .spawn((
+                GazeController::default(),
                 NetworkControllerTarget {
                     connection_id: ConnectionId(8),
                 },
@@ -254,8 +333,12 @@ mod tests {
 
         ipc.try_send(ServerMarionetteCommand::UsePlayerController {
             connection_id: ConnectionId(8),
-            command: PlayerControllerCommand::SyncRotation(RotationSync {
-                rotation: expected.to_array(),
+            command: PlayerControllerCommand::Gaze(ControllerCommand {
+                sequence: 1,
+                action: GazeIntent {
+                    yaw_delta: 0.25,
+                    pitch_delta: 0.0,
+                },
             }),
         })
         .unwrap();
@@ -266,7 +349,7 @@ mod tests {
                 .get::<Transform>(entity)
                 .unwrap()
                 .rotation
-                .abs_diff_eq(expected, f32::EPSILON)
+                .abs_diff_eq(Quat::IDENTITY, f32::EPSILON)
         );
         assert!(app.world().get::<Movement3D>(entity).is_none());
     }
@@ -311,7 +394,7 @@ mod tests {
                 .get::<Transform>(entity)
                 .unwrap()
                 .translation
-                .abs_diff_eq(Vec3::X, 0.0001)
+                .abs_diff_eq(Vec3::ZERO, 0.0001)
         );
         assert_eq!(
             app.world()
@@ -359,7 +442,7 @@ mod tests {
 
         assert_eq!(
             app.world().get::<Transform>(entity).unwrap().translation,
-            Vec3::X
+            Vec3::ZERO
         );
     }
 }

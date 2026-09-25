@@ -14,6 +14,152 @@ pub const VIRTUAL_CHUNK_EDGE_LENGTH: i64 = CHUNK_EDGE_LENGTH as i64;
 /// Signed absolute-space virtual-cell coordinate `[x, y, z]`.
 pub type VirtualChunkCoordinate = [i64; 3];
 
+/// Complete environment values used when a virtual cell has no sparse override.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CompleteEnvironmentDefaults {
+    pub gravity: Vec3,
+    pub static_friction: f32,
+    pub kinetic_friction: f32,
+}
+
+impl Default for CompleteEnvironmentDefaults {
+    fn default() -> Self {
+        Self {
+            gravity: Vec3::new(0.0, -9.81, 0.0),
+            static_friction: 0.6,
+            kinetic_friction: 0.5,
+        }
+    }
+}
+
+/// Changed environment fields for one virtual cell. `None` means use default.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct SparseEnvironmentOverride {
+    pub gravity: Option<Vec3>,
+    pub static_friction: Option<f32>,
+    pub kinetic_friction: Option<f32>,
+}
+
+/// Independent authoritative environment storage; it deliberately does not
+/// consult the derived, potentially stale [`VirtualChunkIndex`].
+#[derive(Resource, Clone, Debug)]
+pub struct VirtualChunkEnvironmentMap {
+    default: CompleteEnvironmentDefaults,
+    overrides: HashMap<VirtualChunkCoordinate, SparseEnvironmentOverride>,
+    revisions: HashMap<VirtualChunkCoordinate, u64>,
+}
+
+impl Default for VirtualChunkEnvironmentMap {
+    fn default() -> Self {
+        Self {
+            default: CompleteEnvironmentDefaults::default(),
+            overrides: HashMap::new(),
+            revisions: HashMap::new(),
+        }
+    }
+}
+
+impl VirtualChunkEnvironmentMap {
+    pub fn new(default: CompleteEnvironmentDefaults) -> Option<Self> {
+        validate_environment(
+            default.gravity,
+            default.static_friction,
+            default.kinetic_friction,
+        )
+        .then_some(Self {
+            default,
+            ..Default::default()
+        })
+    }
+    pub fn defaults(&self) -> CompleteEnvironmentDefaults {
+        self.default
+    }
+    pub fn sample(&self, position: Vec3) -> Option<(CompleteEnvironmentDefaults, u64)> {
+        let coordinate = virtual_chunk_coordinate_for_position(position)?;
+        let override_ = self.overrides.get(&coordinate).copied().unwrap_or_default();
+        Some((
+            CompleteEnvironmentDefaults {
+                gravity: override_.gravity.unwrap_or(self.default.gravity),
+                static_friction: override_
+                    .static_friction
+                    .unwrap_or(self.default.static_friction),
+                kinetic_friction: override_
+                    .kinetic_friction
+                    .unwrap_or(self.default.kinetic_friction),
+            },
+            self.revisions.get(&coordinate).copied().unwrap_or(0),
+        ))
+    }
+    /// Returns the sparse stored values and monotonically advanced revision.
+    /// A missing override still has a revision after it has been removed.
+    pub fn override_at(
+        &self,
+        coordinate: VirtualChunkCoordinate,
+    ) -> (SparseEnvironmentOverride, u64) {
+        (
+            self.overrides.get(&coordinate).copied().unwrap_or_default(),
+            self.revisions.get(&coordinate).copied().unwrap_or(0),
+        )
+    }
+
+    pub fn set_override(
+        &mut self,
+        coordinate: VirtualChunkCoordinate,
+        mut override_: SparseEnvironmentOverride,
+    ) -> bool {
+        let candidate = CompleteEnvironmentDefaults {
+            gravity: override_.gravity.unwrap_or(self.default.gravity),
+            static_friction: override_
+                .static_friction
+                .unwrap_or(self.default.static_friction),
+            kinetic_friction: override_
+                .kinetic_friction
+                .unwrap_or(self.default.kinetic_friction),
+        };
+        if !validate_environment(
+            candidate.gravity,
+            candidate.static_friction,
+            candidate.kinetic_friction,
+        ) {
+            return false;
+        }
+        if override_.gravity == Some(self.default.gravity) {
+            override_.gravity = None;
+        }
+        if override_.static_friction == Some(self.default.static_friction) {
+            override_.static_friction = None;
+        }
+        if override_.kinetic_friction == Some(self.default.kinetic_friction) {
+            override_.kinetic_friction = None;
+        }
+        if override_ == SparseEnvironmentOverride::default() {
+            self.overrides.remove(&coordinate);
+        } else {
+            self.overrides.insert(coordinate, override_);
+        }
+        *self.revisions.entry(coordinate).or_default() += 1;
+        true
+    }
+}
+
+/// Maps an absolute point to its virtual cell using Euclidean floor semantics.
+pub fn virtual_chunk_coordinate_for_position(position: Vec3) -> Option<VirtualChunkCoordinate> {
+    position.is_finite().then(|| {
+        position
+            .to_array()
+            .map(|value| (value as f64 / VIRTUAL_CHUNK_EDGE_LENGTH as f64).floor() as i64)
+    })
+}
+
+fn validate_environment(gravity: Vec3, static_friction: f32, kinetic_friction: f32) -> bool {
+    gravity.is_finite()
+        && static_friction.is_finite()
+        && kinetic_friction.is_finite()
+        && static_friction >= 0.0
+        && kinetic_friction >= 0.0
+        && kinetic_friction <= static_friction
+}
+
 /// Logical reference from an absolute-space virtual cell to one local chunk.
 ///
 /// Identity is the pair of owner entity and owner-local chunk position. It is
@@ -270,6 +416,14 @@ fn virtual_chunk_intersects_radius(
 }
 
 // Enumerates virtual AABBs whose closed bounds intersect the query sphere.
+/// Enumerates environment cells in a radius for stream publication.
+pub(crate) fn virtual_chunks_in_radius_for_streaming(
+    center: [f64; 3],
+    radius: f64,
+) -> Vec<VirtualChunkCoordinate> {
+    virtual_chunks_intersecting_radius(center, radius)
+}
+
 fn virtual_chunks_intersecting_radius(
     center: [f64; 3],
     radius: f64,
@@ -403,5 +557,42 @@ mod tests {
         let index = VirtualChunkIndex::default();
         assert!(index.chunks_in_radius(0.0, 0.0, 0.0, -1.0).is_empty());
         assert!(index.chunks_in_radius(f64::NAN, 0.0, 0.0, 1.0).is_empty());
+    }
+
+    #[test]
+    fn environment_uses_euclidean_floor_and_sparse_defaults() {
+        assert_eq!(
+            virtual_chunk_coordinate_for_position(Vec3::new(-0.1, 0.0, 16.0)),
+            Some([-1, 0, 1])
+        );
+        let mut environment = VirtualChunkEnvironmentMap::default();
+        assert_eq!(
+            environment.sample(Vec3::ZERO).unwrap().0.gravity,
+            Vec3::new(0.0, -9.81, 0.0)
+        );
+        assert!(environment.set_override(
+            [0, 0, 0],
+            SparseEnvironmentOverride {
+                gravity: Some(Vec3::Y),
+                ..SparseEnvironmentOverride::default()
+            }
+        ));
+        let (sample, revision) = environment.sample(Vec3::ZERO).unwrap();
+        assert_eq!(sample.gravity, Vec3::Y);
+        assert_eq!(revision, 1);
+        // Resetting fields removes the sparse entry but must still publish a
+        // newer revision so clients replace the prior override with defaults.
+        assert!(environment.set_override([0, 0, 0], SparseEnvironmentOverride::default()));
+        let (sample, revision) = environment.sample(Vec3::ZERO).unwrap();
+        assert_eq!(sample, CompleteEnvironmentDefaults::default());
+        assert_eq!(revision, 2);
+        assert!(!environment.set_override(
+            [0, 0, 0],
+            SparseEnvironmentOverride {
+                static_friction: Some(0.1),
+                kinetic_friction: Some(0.2),
+                ..SparseEnvironmentOverride::default()
+            }
+        ));
     }
 }

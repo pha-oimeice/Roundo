@@ -11,6 +11,7 @@ impl Plugin for LocalCoordinateServerPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins((LocalCoordinateBasePlugin, LocalCoordinatePhysicsPlugin))
             .init_resource::<crate::AtomicVoxelRegistry>()
+            .init_resource::<crate::local_coordinate::virtual_chunk::VirtualChunkEnvironmentMap>()
             .insert_resource(GeneratedLocalCoordinates(
                 self.generated_coordinates.clone(),
             ))
@@ -57,14 +58,6 @@ struct GeneratedLocalCoordinates(Vec<PcgLocalCoordinate>);
 struct LocalCoordinateServerPipe(
     CrossbeamThreadPipeEndpointB<LocalCoordinateServerCommand, LocalCoordinateServerEvent>,
 );
-
-/// Per-connection view and the exact state last advertised to that connection.
-pub(super) struct PlayerSubscription {
-    anchor: RenderingAnchorState,
-    spawned_coordinates: HashSet<LocalCoordinateId>,
-    advertised_chunks: HashMap<ChunkId, UpdateVersion>,
-    pending_requests: VecDeque<ChunkId>,
-}
 
 /// Spherical observation region expressed in absolute or coordinate-local units.
 #[derive(Clone, Copy)]
@@ -114,110 +107,12 @@ fn prepare_player_chunks(
     mut local_coordinates: Query<(&PcgLocalCoordinate, &GlobalTransform, &mut LocalCoordinate)>,
 ) {
     while let Some(command) = pipe.0.try_receive() {
-        match command {
-            LocalCoordinateServerCommand::SubscribePlayer {
-                connection_id,
-                player_id,
-            } => {
-                let radius_chunks = world
-                    .requested_view_distances
-                    .get(&connection_id)
-                    .copied()
-                    .unwrap_or(DEFAULT_CHUNK_VIEW_DISTANCE);
-                let anchor = RenderingAnchorState {
-                    id: ChunkLoadingAnchorId(world.next_anchor_id),
-                    owner: player_id,
-                    scene_id: SceneId::S1,
-                    position: [0.0; 3],
-                    radius_chunks,
-                };
-                world.next_anchor_id = world.next_anchor_id.saturating_add(1);
-                world.subscriptions.insert(
-                    connection_id,
-                    PlayerSubscription {
-                        anchor,
-                        spawned_coordinates: HashSet::new(),
-                        advertised_chunks: HashMap::new(),
-                        pending_requests: VecDeque::new(),
-                    },
+        for event in world.apply_stream_command(command) {
+            if pipe.0.try_send(event).is_err() {
+                log::error!(
+                    "cannot publish Local Coordinate stream event: reason=server_bridge_closed"
                 );
-                if pipe
-                    .0
-                    .try_send(LocalCoordinateServerEvent::RenderingAnchorSpawned {
-                        connection_id,
-                        anchor,
-                    })
-                    .is_err()
-                {
-                    log::error!(
-                        "cannot publish rendering anchor spawn: connection_id={}, anchor_id={}, reason=server_bridge_closed",
-                        connection_id.0,
-                        anchor.id.0
-                    );
-                }
-            }
-            LocalCoordinateServerCommand::UnsubscribePlayer { connection_id } => {
-                let removed_subscription = world.subscriptions.remove(&connection_id);
-                let removed_distance = world.requested_view_distances.remove(&connection_id);
-                if let Some(subscription) = removed_subscription {
-                    if pipe
-                        .0
-                        .try_send(LocalCoordinateServerEvent::RenderingAnchorDespawned {
-                            connection_id,
-                            anchor_id: subscription.anchor.id,
-                        })
-                        .is_err()
-                    {
-                        log::error!(
-                            "cannot publish rendering anchor despawn: connection_id={}, anchor_id={}, reason=server_bridge_closed",
-                            connection_id.0,
-                            subscription.anchor.id.0
-                        );
-                    }
-                } else {
-                    log::debug!(
-                        "ignored unsubscribe for unknown Local Coordinate subscription: connection_id={}, had_view_distance={}",
-                        connection_id.0,
-                        removed_distance.is_some()
-                    );
-                }
-                world
-                    .derived_svo_jobs
-                    .retain(|(candidate, _), _| *candidate != connection_id);
-            }
-            LocalCoordinateServerCommand::RequestChunks {
-                connection_id,
-                chunks,
-            } => {
-                let Some(subscription) = world.subscriptions.get_mut(&connection_id) else {
-                    continue;
-                };
-                enqueue_chunk_requests(subscription, chunks);
-            }
-            LocalCoordinateServerCommand::SetChunkViewDistance {
-                connection_id,
-                chunks,
-            } => {
-                let chunks = chunks.clamp(MIN_CHUNK_VIEW_DISTANCE, MAX_CHUNK_VIEW_DISTANCE);
-                world.requested_view_distances.insert(connection_id, chunks);
-                if let Some(subscription) = world.subscriptions.get_mut(&connection_id) {
-                    subscription.anchor.radius_chunks = chunks;
-                    let anchor = subscription.anchor;
-                    if pipe
-                        .0
-                        .try_send(LocalCoordinateServerEvent::RenderingAnchorUpdated {
-                            connection_id,
-                            anchor,
-                        })
-                        .is_err()
-                    {
-                        log::error!(
-                            "cannot publish rendering anchor update: connection_id={}, anchor_id={}, reason=server_bridge_closed",
-                            connection_id.0,
-                            anchor.id.0
-                        );
-                    }
-                }
+                break;
             }
         }
     }
@@ -260,7 +155,7 @@ fn prepare_player_chunks(
                 .flat_map(|observation| {
                     superflat_chunks_intersecting_radius(
                         observation.center,
-                        PHYSICS_CHUNK_RADIUS * CHUNK_EDGE_LENGTH as f64,
+                        f64::from(PREDICTION_CHUNK_RADIUS) * CHUNK_EDGE_LENGTH as f64,
                         generated.generator.height,
                     )
                 })
@@ -445,23 +340,6 @@ fn commit_generated_chunks(
     }
 }
 
-/// Queues advertised chunks once, preserving request order.
-///
-/// Unknown/unadvertised chunks and duplicate pending requests are ignored.
-fn enqueue_chunk_requests(
-    subscription: &mut PlayerSubscription,
-    chunks: impl IntoIterator<Item = ChunkId>,
-) {
-    for chunk in chunks {
-        if !subscription.advertised_chunks.contains_key(&chunk)
-            || subscription.pending_requests.contains(&chunk)
-        {
-            continue;
-        }
-        subscription.pending_requests.push_back(chunk);
-    }
-}
-
 // Consumes dirty chunk positions and advances only currently loaded versions.
 fn update_authoritative_chunk_versions(
     mut world: ResMut<LocalCoordinateServerWorld>,
@@ -527,18 +405,20 @@ fn changed_chunk_versions(
 fn publish_subscription_changes(
     pipe: Res<LocalCoordinateServerPipe>,
     virtual_chunks: Res<VirtualChunkIndex>,
+    environment: Res<crate::local_coordinate::virtual_chunk::VirtualChunkEnvironmentMap>,
     mut world: ResMut<LocalCoordinateServerWorld>,
     generated_coordinates: Query<(&PcgLocalCoordinate, &LocalCoordinate)>,
 ) {
     let subscription_ids = world.subscriptions.keys().copied().collect::<Vec<_>>();
 
     for connection_id in subscription_ids {
-        let (anchor_id, spawned_coordinates, advertised_chunks) = {
+        let (anchor_id, spawned_coordinates, advertised_chunks, advertised_environment_revisions) = {
             let subscription = &world.subscriptions[&connection_id];
             (
                 subscription.anchor.id,
                 subscription.spawned_coordinates.clone(),
                 subscription.advertised_chunks.clone(),
+                subscription.advertised_environment_revisions.clone(),
             )
         };
         let observation = world.observation_by_anchor.get(&anchor_id).copied();
@@ -562,6 +442,29 @@ fn publish_subscription_changes(
                 })
                 .collect()
         });
+        // Materialization is the union of independent rendering and prediction
+        // demands; neither anchor changes the other's identity or radius.
+        let prediction = world.subscriptions[&connection_id].prediction_anchor;
+        let prediction_chunks = virtual_chunks
+            .chunks_in_radius(
+                prediction.position[0],
+                prediction.position[1],
+                prediction.position[2],
+                f64::from(prediction.radius_chunks) * CHUNK_EDGE_LENGTH as f64,
+            )
+            .into_iter()
+            .filter_map(|chunk_reference| {
+                streamed_chunk(
+                    chunk_reference,
+                    &generated_coordinates,
+                    &world.loaded_chunks,
+                    &world.chunk_versions,
+                    prediction.scene_id,
+                )
+            })
+            .collect::<HashMap<_, _>>();
+        let mut desired_chunks = desired_chunks;
+        desired_chunks.extend(prediction_chunks);
         let desired_coordinates = desired_chunks
             .keys()
             .map(|chunk| chunk.local_coordinate_id)
@@ -639,6 +542,66 @@ fn publish_subscription_changes(
             }
         }
 
+        // Stream1 remains sparse: an untouched default cell is absent. A later
+        // removal has a newer revision and emits one fields=0 tombstone so the
+        // client can discard a previously streamed override.
+        let environment_updates =
+            crate::local_coordinate::virtual_chunk::virtual_chunks_in_radius_for_streaming(
+                prediction.position,
+                f64::from(prediction.radius_chunks) * CHUNK_EDGE_LENGTH as f64,
+            )
+            .into_iter()
+            .filter_map(|coordinate| {
+                let (values, revision) = environment.override_at(coordinate);
+                let mut fields = 0;
+                if values.gravity.is_some() {
+                    fields |= 1;
+                }
+                if values.static_friction.is_some() {
+                    fields |= 2;
+                }
+                if values.kinetic_friction.is_some() {
+                    fields |= 4;
+                }
+                let previous = advertised_environment_revisions.get(&coordinate);
+                let changed_override = fields != 0 && previous != Some(&revision);
+                let removal_tombstone = fields == 0
+                    && previous.is_some_and(|previous_revision| *previous_revision < revision);
+                (changed_override || removal_tombstone).then_some((
+                    coordinate,
+                    revision,
+                    VirtualChunkEnvironmentOverride {
+                        coordinate,
+                        revision: roundo_contracts::EnvironmentRevision(revision),
+                        fields,
+                        gravity: values.gravity.unwrap_or_default().to_array(),
+                        static_friction: values.static_friction.unwrap_or_default(),
+                        kinetic_friction: values.kinetic_friction.unwrap_or_default(),
+                    },
+                ))
+            })
+            .collect::<Vec<_>>();
+        if !environment_updates.is_empty() {
+            let overrides = environment_updates
+                .iter()
+                .map(|(_, _, update)| *update)
+                .collect::<Vec<_>>();
+            if pipe
+                .0
+                .try_send(LocalCoordinateServerEvent::EnvironmentOverrides {
+                    connection_id,
+                    overrides,
+                })
+                .is_ok()
+            {
+                let subscription = world.subscriptions.get_mut(&connection_id).unwrap();
+                for (coordinate, revision, _) in environment_updates {
+                    subscription
+                        .advertised_environment_revisions
+                        .insert(coordinate, revision);
+                }
+            }
+        }
         if let Some(subscription) = world.subscriptions.get_mut(&connection_id) {
             update_subscription_snapshot(subscription, desired_coordinates, desired_chunks);
         }
@@ -793,6 +756,7 @@ fn publish_derived_svo_results(
                 connection_id: Some(connection_id),
                 chunk,
                 error,
+                ..
             } => {
                 let removed_job = world.derived_svo_jobs.remove(&(connection_id, chunk.id()));
                 if removed_job.is_none() {

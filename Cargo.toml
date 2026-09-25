@@ -2,6 +2,8 @@
 members = [
     "game/common/roundo_block_interaction",
     "game/common/roundo_contracts",
+    "game/common/roundo_controller",
+    "game/common/roundo_creature",
     "game/common/roundo_marionette",
     "game/common/roundo_local_coordinate",
     "game/common/roundo_lifecycle",
@@ -16,6 +18,7 @@ members = [
     "game/client/roundo_rendering",
     "game/common/roundo_presence",
     "game/common/roundo_portal",
+    "game/common/roundo_player",
     "roundo_client/roundo_webui",
     "game/common/roundo_mod_loader",
     "roundo_proc_macros",
@@ -88,6 +91,8 @@ roundo_proc_macros = { path = "roundo_proc_macros" }
 roundo_algorithm = {path = "game/common/roundo_algorithm" }
 roundo_block_interaction = { path = "game/common/roundo_block_interaction" }
 roundo_contracts = { path = "game/common/roundo_contracts" }
+roundo_controller = { path = "game/common/roundo_controller" }
+roundo_creature = { path = "game/common/roundo_creature" }
 roundo_cli = { path = "roundo_cli" }
 roundo_ecs_entry = { path = "game/roundo_ecs_entry" }
 roundo_lifecycle = { path = "game/common/roundo_lifecycle" }
@@ -95,6 +100,7 @@ roundo_marionette = { path = "game/common/roundo_marionette" }
 roundo_networking = {path = "roundo_networking" }
 roundo_rendering = {path = "game/client/roundo_rendering" }
 roundo_presence = { path = "game/common/roundo_presence" }
+roundo_player = { path = "game/common/roundo_player" }
 roundo_portal = { path = "game/common/roundo_portal" }
 roundo_local_coordinate = { path = "game/common/roundo_local_coordinate" }
 roundo_mod_loader = { path = "game/common/roundo_mod_loader" }

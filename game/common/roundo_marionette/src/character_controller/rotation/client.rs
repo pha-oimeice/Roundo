@@ -1,12 +1,15 @@
 //! Immediate local camera rotation with rate-limited server synchronization.
 
-use super::{ROTATION_SYNC_INTERVAL_SECS, RotationSync};
+use super::ROTATION_SYNC_INTERVAL_SECS;
 use crate::character_controller::client::{
-    AuthoritativePlayerState, ClientMarionetteEvent, ClientPipeResource, ClientPlayerController,
+    ClientMarionetteEvent, ClientPipeResource, ClientPlayerController,
+    ClientPlayerControllerAccess, LocallyRoutedControllerIntent,
 };
 use bevy::{
     input::mouse::AccumulatedMouseMotion,
-    prelude::{Camera, EulerRot, Query, Res, ResMut, Resource, Time, Transform, With},
+    prelude::{
+        Camera, EulerRot, MessageWriter, Query, Res, ResMut, Resource, Time, Transform, With,
+    },
 };
 use roundo_contracts::PlayerControllerCommand;
 
@@ -15,6 +18,9 @@ use roundo_contracts::PlayerControllerCommand;
 pub(crate) struct ClientRotationSyncState {
     elapsed_secs: f32,
     pending: bool,
+    next_sequence: u64,
+    yaw_delta: f32,
+    pitch_delta: f32,
 }
 
 impl Default for ClientRotationSyncState {
@@ -22,14 +28,26 @@ impl Default for ClientRotationSyncState {
         Self {
             elapsed_secs: ROTATION_SYNC_INTERVAL_SECS,
             pending: false,
+            next_sequence: 0,
+            yaw_delta: 0.0,
+            pitch_delta: 0.0,
         }
     }
 }
 
 impl ClientRotationSyncState {
-    /// Restores an immediately eligible, non-pending synchronization state.
+    /// Clears all connection-scoped gaze sequencing and pending state.
     pub(crate) fn reset(&mut self) {
         *self = Self::default();
+    }
+
+    /// Drops only unsent camera motion while preserving the controller's
+    /// monotonic sequence across detach/rebind transitions.
+    pub(crate) fn discard_pending(&mut self) {
+        self.elapsed_secs = ROTATION_SYNC_INTERVAL_SECS;
+        self.pending = false;
+        self.yaw_delta = 0.0;
+        self.pitch_delta = 0.0;
     }
 }
 
@@ -55,8 +73,11 @@ pub(crate) fn rotate_camera(
     if !apply_camera_rotation(&mut transform, yaw_delta, pitch_delta) {
         return;
     }
-    // Spirit rotation is local-only and must not alter the controlled player.
+    // Detached-camera rotation is local-only: it must not enter the controlled
+    // Creature's gaze accumulator or be replayed after binding again.
     if !controller.spirit_walking {
+        rotation_sync.yaw_delta += yaw_delta;
+        rotation_sync.pitch_delta += pitch_delta;
         rotation_sync.pending = true;
     }
 }
@@ -65,14 +86,25 @@ pub(crate) fn rotate_camera(
 pub(crate) fn synchronize_rotation(
     time: Res<Time>,
     controller: Res<ClientPlayerController>,
-    authoritative: Res<AuthoritativePlayerState>,
+    access: Option<Res<ClientPlayerControllerAccess>>,
     pipe: Res<ClientPipeResource>,
     mut rotation_sync: ResMut<ClientRotationSyncState>,
+    mut routed_intents: MessageWriter<LocallyRoutedControllerIntent>,
     cameras: Query<&Transform, With<Camera>>,
 ) {
-    if !controller.input_enabled || controller.spirit_walking || authoritative.0.is_none() {
+    if !controller.input_enabled || controller.spirit_walking {
         return;
     }
+    let controller_id = match access {
+        Some(access) => match access
+            .gaze_controller()
+            .filter(|id| access.is_controlled_by_self(*id))
+        {
+            Some(id) => Some(id),
+            None => return,
+        },
+        None => None,
+    };
     rotation_sync.elapsed_secs += time.delta_secs();
     if !rotation_sync.pending || rotation_sync.elapsed_secs < ROTATION_SYNC_INTERVAL_SECS {
         return;
@@ -80,20 +112,41 @@ pub(crate) fn synchronize_rotation(
     let Some(camera) = controller.camera else {
         return;
     };
-    let Ok(transform) = cameras.get(camera) else {
+    let Ok(_transform) = cameras.get(camera) else {
         return;
     };
+    let routed = PlayerControllerCommand::Gaze(roundo_contracts::ControllerCommand {
+        sequence: rotation_sync.next_sequence.wrapping_add(1),
+        action: roundo_contracts::GazeIntent {
+            yaw_delta: rotation_sync.yaw_delta,
+            pitch_delta: rotation_sync.pitch_delta,
+        },
+    });
     let sent = pipe
         .0
-        .try_send(ClientMarionetteEvent::UsePlayerController(
-            PlayerControllerCommand::SyncRotation(RotationSync {
-                rotation: transform.rotation.to_array(),
-            }),
-        ))
+        .try_send(match controller_id {
+            Some(controller_id) => ClientMarionetteEvent::SubmitControllerInput {
+                controller_id,
+                input: roundo_contracts::DirectedControllerInput::Gaze(
+                    roundo_contracts::ControllerCommand {
+                        sequence: rotation_sync.next_sequence.wrapping_add(1),
+                        action: roundo_contracts::GazeIntent {
+                            yaw_delta: rotation_sync.yaw_delta,
+                            pitch_delta: rotation_sync.pitch_delta,
+                        },
+                    },
+                ),
+            },
+            None => ClientMarionetteEvent::UsePlayerController(routed),
+        })
         .is_ok();
     // Failed delivery remains pending for the next interval.
     rotation_sync.elapsed_secs = 0.0;
     if sent {
+        rotation_sync.next_sequence = rotation_sync.next_sequence.wrapping_add(1);
+        routed_intents.write(LocallyRoutedControllerIntent(routed));
+        rotation_sync.yaw_delta = 0.0;
+        rotation_sync.pitch_delta = 0.0;
         rotation_sync.pending = false;
     } else {
         log::warn!("cannot synchronize player rotation: reason=client_bridge_closed");

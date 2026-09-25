@@ -1,6 +1,8 @@
 //! Composes one fixed-tick authoritative ECS server and its bound IPC endpoints.
 
-use crate::server_integration::ServerDomainIntegrationPlugin;
+use crate::{
+    authoritative_creature::AuthoritativeCreaturePlugin, player_control::PlayerControlServerPlugin,
+};
 use avian3d::PhysicsPlugins;
 use bevy::{
     MinimalPlugins,
@@ -47,6 +49,8 @@ pub struct ServerEcsEndpoints {
     pub presence: PresenceServerIpc,
     /// Resource-stream endpoint connected to this runtime's Local Coordinate plugin.
     pub local_coordinate: LocalCoordinateServerIpc,
+    /// Player identity, Access, and Controller-Control endpoint.
+    pub player_control: crate::PlayerControlServerIpc,
 }
 
 /// One fully assembled authoritative App and exactly its plugin endpoints.
@@ -60,10 +64,12 @@ impl ServerEcsRuntime {
         let presence = RoundoPresenceServerPlugin::new();
         let marionette = MarionetteServerPlugin::new();
         let local_coordinate = LocalCoordinateServerPlugin::new();
+        let player_control = PlayerControlServerPlugin::new();
         let endpoints = ServerEcsEndpoints {
             marionette: marionette.ipc(),
             presence: presence.ipc(),
             local_coordinate: local_coordinate.ipc(),
+            player_control: player_control.ipc(),
         };
         let mut app = App::new();
         app.insert_resource(voxels)
@@ -76,9 +82,10 @@ impl ServerEcsRuntime {
             PhysicsPlugins::default(),
             RoundoPortalPlugin,
             marionette,
+            player_control,
             presence,
             local_coordinate,
-            ServerDomainIntegrationPlugin,
+            AuthoritativeCreaturePlugin::new(endpoints.local_coordinate.clone()),
             BlockInteractionPlugin::default(),
         ));
         Self { app, endpoints }

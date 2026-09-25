@@ -31,5 +31,5 @@ sqlx.workspace = true
 toml.workspace = true
 
 [features]
-dev = []
+dev = ["roundo_ecs_entry/dev", "roundo_marionette/dev"]
 release = []

@@ -28,9 +28,9 @@ macro_rules! identifier {
 }
 
 /// Exact stream-0 application version required during session setup.
-pub const GAME_PROTOCOL_VERSION: u16 = 15;
+pub const GAME_PROTOCOL_VERSION: u16 = 18;
 /// Exact stream-1 application version required during session setup.
-pub const RESOURCE_PROTOCOL_VERSION: u16 = 3;
+pub const RESOURCE_PROTOCOL_VERSION: u16 = 4;
 
 /// Logical QUIC stream role encoded as one wire byte during stream pairing.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
@@ -57,10 +57,15 @@ impl StreamId {
 }
 
 identifier!(ConnectionId);
+identifier!(ControllerId);
 identifier!(LocalCoordinateId);
 identifier!(PlayerId);
 identifier!(ChunkLoadingAnchorId);
+identifier!(PredictionAnchorId);
 identifier!(JoinableWorldId);
+identifier!(SimulationTick);
+identifier!(InputSequence);
+identifier!(EnvironmentRevision);
 
 /// Read-only client projection of one server-owned rendering anchor.
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
@@ -70,6 +75,30 @@ pub struct RenderingAnchorState {
     pub scene_id: SceneId,
     pub position: [f64; 3],
     pub radius_chunks: u16,
+}
+
+/// Read-only client projection of the server-owned physics-prediction interest.
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
+pub struct PredictionAnchorState {
+    pub id: PredictionAnchorId,
+    pub owner: PlayerId,
+    pub scene_id: SceneId,
+    pub position: [f64; 3],
+    pub radius_chunks: u16,
+}
+
+/// Versioned sparse virtual-cell environment update carried by stream 1.
+///
+/// `fields` uses bit 0 for gravity, bit 1 for static friction, and bit 2 for
+/// kinetic friction. Fields not selected by the mask use protocol defaults.
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
+pub struct VirtualChunkEnvironmentOverride {
+    pub coordinate: [i64; 3],
+    pub revision: EnvironmentRevision,
+    pub fields: u8,
+    pub gravity: [f32; 3],
+    pub static_friction: f32,
+    pub kinetic_friction: f32,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
@@ -83,6 +112,18 @@ pub struct SessionId(pub i32);
 pub struct UserSession {
     pub user_id: UserId,
     pub session_id: SessionId,
+}
+
+/// A Player's authorization level for one Controller.
+///
+/// The value is a contract-level capability description only. Controller
+/// registration and exclusive current-control arbitration remain domain logic.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+pub enum ControllerAccessLevel {
+    #[default]
+    None,
+    Read,
+    ReadWrite,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -140,21 +181,54 @@ pub struct ControllerCommand<Action> {
     pub action: Action,
 }
 
-/// Requested normalized world-space movement direction.
+/// Requested normalized movement axis in the controlled body's local frame.
 ///
-/// The authoritative server owns movement speed and displacement. The wire
-/// type does not enforce finite components or unit length.
+/// The authoritative server owns orientation, speed, and displacement. The
+/// wire type does not enforce finite components or unit length.
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
 pub struct Movement3DAction {
     pub direction: [f32; 3],
 }
 
-/// Requested player orientation in quaternion `[x, y, z, w]` order.
-///
-/// The wire type does not enforce finiteness, nonzero length, or normalization.
+/// Local view delta requested by a controller.
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Serialize)]
-pub struct RotationSync {
-    pub rotation: [f32; 4],
+pub struct GazeIntent {
+    pub yaw_delta: f32,
+    pub pitch_delta: f32,
+}
+
+/// Pure wire locomotion state; it deliberately has no ECS representation.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub enum CreatureLocomotion {
+    Grounded,
+    #[default]
+    Floating,
+}
+
+/// Complete environment sample used for an authoritative Creature tick.
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Serialize)]
+pub struct CreatureEnvironmentSample {
+    pub gravity: [f32; 3],
+    pub static_friction: f32,
+    pub kinetic_friction: f32,
+    pub revision: EnvironmentRevision,
+}
+
+/// Opaque semantic state committed by the authoritative Creature solver.
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Serialize)]
+pub struct CreatureMotionSnapshot {
+    /// Authoritative fixed logic step in seconds. Rendering deltas never advance
+    /// Creature simulation and clients replay against this exact step.
+    pub fixed_dt_seconds: f32,
+    pub simulation_tick: SimulationTick,
+    pub translation: [f32; 3],
+    pub body_orientation: [f32; 4],
+    pub gaze_orientation: [f32; 4],
+    pub velocity: [f32; 3],
+    pub locomotion: CreatureLocomotion,
+    pub environment: CreatureEnvironmentSample,
+    pub acknowledged_movement: InputSequence,
+    pub acknowledged_gaze: InputSequence,
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -169,12 +243,16 @@ pub struct PlaceBlockControllerAction {
     pub voxel_id: u32,
 }
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct SpawnTestCreatureAction;
+
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
 pub enum PlayerControllerCommand {
     Movement3D(ControllerCommand<Movement3DAction>),
-    SyncRotation(RotationSync),
+    Gaze(ControllerCommand<GazeIntent>),
     DestroyBlock(ControllerCommand<DestroyBlockControllerAction>),
     PlaceBlock(ControllerCommand<PlaceBlockControllerAction>),
+    SpawnTestCreature(ControllerCommand<SpawnTestCreatureAction>),
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, Hash, PartialEq, Serialize)]
@@ -302,14 +380,90 @@ impl SerializedPayload {
     }
 }
 
+/// Read-only control state without disclosing another Player's identity.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub enum ControllerControlState {
+    Uncontrolled,
+    ControlledBySelf,
+    ControlledByOther,
+}
+
+/// Closed intent domain exposed for client-side Controller selection.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub enum ControllerIntentDomain {
+    Movement,
+    Gaze,
+}
+
+/// One Controller visible in the current Player's access snapshot.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct PlayerControllerAccess {
+    pub controller_id: ControllerId,
+    pub intent_domain: ControllerIntentDomain,
+    pub access_level: ControllerAccessLevel,
+    pub control_state: ControllerControlState,
+}
+
+/// Server-authoritative projection of the Player represented by this connection.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct PlayerControllerAccessSnapshot {
+    pub player_id: PlayerId,
+    pub controllers: Vec<PlayerControllerAccess>,
+}
+
+/// The rejected request identity echoed without its input payload.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub enum PlayerControllerOperation {
+    RequestAccess,
+    Acquire { controller_id: ControllerId },
+    Release { controller_id: ControllerId },
+    SubmitInput { controller_id: ControllerId },
+}
+
+/// Stable rejection for Player/Controller operations.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub enum ControllerOperationError {
+    ControllerNotFound,
+    AccessDenied,
+    ControlledByOther,
+    NotCurrentController,
+    InputOutsideDomain,
+}
+
+/// Directed Controller input admitted only after server-side ownership checks.
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
+pub enum DirectedControllerInput {
+    Movement3D(ControllerCommand<Movement3DAction>),
+    Gaze(ControllerCommand<GazeIntent>),
+}
+
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub enum ClientGameMessage {
-    UsePlayerController { command: PlayerControllerCommand },
+    RequestPlayerControllerAccess,
+    AcquireController {
+        controller_id: ControllerId,
+    },
+    ReleaseController {
+        controller_id: ControllerId,
+    },
+    SubmitControllerInput {
+        controller_id: ControllerId,
+        input: DirectedControllerInput,
+    },
+    /// Legacy connection-addressed input. Kept only for existing clients during
+    /// migration; new Controller paths must use `SubmitControllerInput`.
+    UsePlayerController {
+        command: PlayerControllerCommand,
+    },
 }
 
 impl ClientGameMessage {
     pub const fn kind(&self) -> &'static str {
         match self {
+            Self::RequestPlayerControllerAccess => "RequestPlayerControllerAccess",
+            Self::AcquireController { .. } => "AcquireController",
+            Self::ReleaseController { .. } => "ReleaseController",
+            Self::SubmitControllerInput { .. } => "SubmitControllerInput",
             Self::UsePlayerController { .. } => "UsePlayerController",
         }
     }
@@ -344,13 +498,38 @@ impl From<ClientResourceMessage> for ClientMessage {
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub enum ServerGameMessage {
-    PlayerState { state: PlayerState },
-    PresenceSnapshot { snapshot: PresenceSnapshot },
+    PlayerControllerAccessSnapshot {
+        snapshot: PlayerControllerAccessSnapshot,
+    },
+    ControllerOperationRejected {
+        operation: PlayerControllerOperation,
+        error: ControllerOperationError,
+    },
+    ControllerAcquired {
+        controller_id: ControllerId,
+    },
+    ControllerReleased {
+        controller_id: ControllerId,
+    },
+    CreatureMotionSnapshot {
+        snapshot: CreatureMotionSnapshot,
+    },
+    PlayerState {
+        state: PlayerState,
+    },
+    PresenceSnapshot {
+        snapshot: PresenceSnapshot,
+    },
 }
 
 impl ServerGameMessage {
     pub const fn kind(&self) -> &'static str {
         match self {
+            Self::PlayerControllerAccessSnapshot { .. } => "PlayerControllerAccessSnapshot",
+            Self::ControllerOperationRejected { .. } => "ControllerOperationRejected",
+            Self::ControllerAcquired { .. } => "ControllerAcquired",
+            Self::ControllerReleased { .. } => "ControllerReleased",
+            Self::CreatureMotionSnapshot { .. } => "CreatureMotionSnapshot",
             Self::PlayerState { .. } => "PlayerState",
             Self::PresenceSnapshot { .. } => "PresenceSnapshot",
         }
@@ -373,6 +552,18 @@ pub enum ServerResourceMessage {
     },
     RenderingAnchorDespawned {
         anchor_id: ChunkLoadingAnchorId,
+    },
+    PredictionAnchorSpawned {
+        anchor: PredictionAnchorState,
+    },
+    PredictionAnchorUpdated {
+        anchor: PredictionAnchorState,
+    },
+    PredictionAnchorDespawned {
+        anchor_id: PredictionAnchorId,
+    },
+    VirtualChunkEnvironmentOverrides {
+        overrides: Vec<VirtualChunkEnvironmentOverride>,
     },
     LocalCoordinateSpawned {
         local_coordinate_id: LocalCoordinateId,
@@ -400,6 +591,10 @@ impl ServerResourceMessage {
             Self::RenderingAnchorSpawned { .. } => "RenderingAnchorSpawned",
             Self::RenderingAnchorUpdated { .. } => "RenderingAnchorUpdated",
             Self::RenderingAnchorDespawned { .. } => "RenderingAnchorDespawned",
+            Self::PredictionAnchorSpawned { .. } => "PredictionAnchorSpawned",
+            Self::PredictionAnchorUpdated { .. } => "PredictionAnchorUpdated",
+            Self::PredictionAnchorDespawned { .. } => "PredictionAnchorDespawned",
+            Self::VirtualChunkEnvironmentOverrides { .. } => "VirtualChunkEnvironmentOverrides",
             Self::LocalCoordinateSpawned { .. } => "LocalCoordinateSpawned",
             Self::LocalCoordinateDespawned { .. } => "LocalCoordinateDespawned",
             Self::LocalCoordinateChunkVersions { .. } => "LocalCoordinateChunkVersions",
@@ -417,7 +612,7 @@ impl From<ServerResourceMessage> for ServerMessage {
 
 #[cfg(test)]
 mod tests {
-    use super::UpdateVersion;
+    use super::*;
 
     #[test]
     fn update_version_advances_and_wraps_without_a_sentinel() {
@@ -425,5 +620,53 @@ mod tests {
         assert_eq!(version.advance(), UpdateVersion::new(1));
         assert_eq!(version.value(), 1);
         assert_eq!(UpdateVersion::new(u64::MAX).next(), UpdateVersion::INITIAL);
+    }
+
+    #[test]
+    fn directed_controller_messages_round_trip_and_use_stable_kinds() {
+        let message = ClientGameMessage::SubmitControllerInput {
+            controller_id: ControllerId(7),
+            input: DirectedControllerInput::Gaze(ControllerCommand {
+                sequence: 3,
+                action: GazeIntent {
+                    yaw_delta: 0.5,
+                    pitch_delta: -0.25,
+                },
+            }),
+        };
+        let bytes = postcard::to_allocvec(&message).unwrap();
+        assert_eq!(
+            postcard::from_bytes::<ClientGameMessage>(&bytes).unwrap(),
+            message
+        );
+        assert_eq!(message.kind(), "SubmitControllerInput");
+        assert_eq!(
+            ServerGameMessage::ControllerOperationRejected {
+                operation: PlayerControllerOperation::Acquire {
+                    controller_id: ControllerId(7),
+                },
+                error: ControllerOperationError::ControllerNotFound,
+            }
+            .kind(),
+            "ControllerOperationRejected"
+        );
+    }
+
+    #[test]
+    fn access_snapshot_hides_other_player_identity() {
+        let snapshot = PlayerControllerAccessSnapshot {
+            player_id: PlayerId(3),
+            controllers: vec![PlayerControllerAccess {
+                controller_id: ControllerId(9),
+                intent_domain: ControllerIntentDomain::Movement,
+                access_level: ControllerAccessLevel::ReadWrite,
+                control_state: ControllerControlState::ControlledByOther,
+            }],
+        };
+        let encoded = postcard::to_allocvec(&snapshot).unwrap();
+        assert_eq!(
+            postcard::from_bytes::<PlayerControllerAccessSnapshot>(&encoded).unwrap(),
+            snapshot
+        );
     }
 }

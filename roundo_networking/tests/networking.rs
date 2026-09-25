@@ -1,12 +1,12 @@
 use roundo_contracts::UpdateVersion;
 use roundo_contracts::{
     ChunkLoadingAnchorId, ChunkVersion, ClientGameMessage, ClientMessage, ClientResourceMessage,
-    ControllerCommand, DestroyBlockControllerAction, JoinableWorldId, LocalCoordinateId,
-    Movement3DAction, NearbyJoinableWorld, NearbyPlayer, PlaceBlockControllerAction,
-    PlayerControllerCommand, PlayerId, PlayerState, PresenceSnapshot, ProtocolErrorCode,
-    RenderingAnchorState, ResourceCatalogFingerprint, RotationSync, SceneId, SerializedPayload,
-    ServerGameMessage, ServerMessage, ServerResourceMessage, SessionId, SessionInfo, StreamId,
-    UserId, UserSession,
+    ControllerCommand, DestroyBlockControllerAction, GazeIntent, JoinableWorldId,
+    LocalCoordinateId, Movement3DAction, NearbyJoinableWorld, NearbyPlayer,
+    PlaceBlockControllerAction, PlayerControllerCommand, PlayerId, PlayerState, PresenceSnapshot,
+    ProtocolErrorCode, RenderingAnchorState, ResourceCatalogFingerprint, SceneId,
+    SerializedPayload, ServerGameMessage, ServerMessage, ServerResourceMessage, SessionId,
+    SessionInfo, SpawnTestCreatureAction, StreamId, UserId, UserSession,
 };
 use roundo_networking::ProtocolError;
 use roundo_networking::connection::{
@@ -80,8 +80,12 @@ async fn consecutive_frames_preserve_boundaries_and_order() {
 async fn arbitrarily_fragmented_frame_decodes_once_complete() {
     let (mut writer, reader) = tokio::io::duplex(1024);
     let message = ClientMessage::Game(ClientGameMessage::UsePlayerController {
-        command: PlayerControllerCommand::SyncRotation(RotationSync {
-            rotation: [0.0, 0.25, -0.5, 1.0],
+        command: PlayerControllerCommand::Gaze(ControllerCommand {
+            sequence: 1,
+            action: GazeIntent {
+                yaw_delta: 0.0,
+                pitch_delta: 0.0,
+            },
         }),
     });
     let payload = frame::encode(&message).expect("message should encode");
@@ -294,8 +298,12 @@ fn client_messages() -> Vec<ClientMessage> {
             }),
         }),
         ClientMessage::Game(ClientGameMessage::UsePlayerController {
-            command: PlayerControllerCommand::SyncRotation(RotationSync {
-                rotation: [0.0, 0.125, -0.25, 1.0],
+            command: PlayerControllerCommand::Gaze(ControllerCommand {
+                sequence: 1,
+                action: GazeIntent {
+                    yaw_delta: 0.0,
+                    pitch_delta: 0.0,
+                },
             }),
         }),
         ClientMessage::Game(ClientGameMessage::UsePlayerController {
@@ -308,6 +316,12 @@ fn client_messages() -> Vec<ClientMessage> {
             command: PlayerControllerCommand::PlaceBlock(ControllerCommand {
                 sequence: 3,
                 action: PlaceBlockControllerAction { voxel_id: 1 },
+            }),
+        }),
+        ClientMessage::Game(ClientGameMessage::UsePlayerController {
+            command: PlayerControllerCommand::SpawnTestCreature(ControllerCommand {
+                sequence: 1,
+                action: SpawnTestCreatureAction,
             }),
         }),
         ClientMessage::Resource(ClientResourceMessage::RequestLocalCoordinateChunks {

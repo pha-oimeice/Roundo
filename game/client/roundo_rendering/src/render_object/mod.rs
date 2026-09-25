@@ -139,6 +139,16 @@ impl RenderMesh {
         Self(Mesh::from(Cuboid::new(size.x, size.y, size.z)))
     }
 
+    /// Creates a line segment from the origin along local negative Z.
+    pub fn sight_line(length: f32) -> Self {
+        let mut mesh = Mesh::new(PrimitiveTopology::LineList, RenderAssetUsages::default());
+        mesh.insert_attribute(
+            Mesh::ATTRIBUTE_POSITION,
+            vec![[0.0, 0.0, 0.0], [0.0, 0.0, -length]],
+        );
+        Self(mesh)
+    }
+
     pub fn vertex_count(&self) -> usize {
         self.0.count_vertices()
     }

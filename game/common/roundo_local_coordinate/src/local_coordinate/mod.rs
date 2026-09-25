@@ -39,6 +39,7 @@ pub use data::{
     LocalCoordinate, LocalCoordinateCRUDMessage, LocalCoordinateCRUDMessageEnum,
     LocalCoordinateChunkView, LocalCoordinateIdentity, PositionedAtomicVoxel, SOLID_VOXEL_ID,
 };
+pub use physics::LocalCoordinatePhysicsInterests;
 pub use raycast::{VoxelRaycastHit, VoxelRaycaster};
 pub use server::{
     DEFAULT_PCG_LOCAL_COORDINATE_ID, LocalCoordinateServerCommand, LocalCoordinateServerEvent,
@@ -47,7 +48,9 @@ pub use server::{
 };
 pub use transform::LocalCoordinateTransform;
 pub use virtual_chunk::{
-    ChunkReference, VIRTUAL_CHUNK_EDGE_LENGTH, VirtualChunkCoordinate, VirtualChunkIndex,
+    ChunkReference, CompleteEnvironmentDefaults, SparseEnvironmentOverride,
+    VIRTUAL_CHUNK_EDGE_LENGTH, VirtualChunkCoordinate, VirtualChunkEnvironmentMap,
+    VirtualChunkIndex, virtual_chunk_coordinate_for_position,
 };
 pub use voxel_registry::{
     AtomicVoxelRegistry, AtomicVoxelRegistryError, DEFAULT_PLACED_VOXEL_SLOT,

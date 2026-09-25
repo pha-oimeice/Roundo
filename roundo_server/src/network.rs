@@ -10,15 +10,16 @@ use roundo_contracts::{
     ClientGameMessage, ClientResourceMessage, ConnectionId, ResourceCatalogFingerprint,
     ServerGameMessage, ServerResourceMessage, SessionId, StreamId, UserId, UserSession,
 };
+use roundo_ecs_entry::{PlayerControlCommand, PlayerControlEvent, PlayerControlServerIpc};
 use roundo_local_coordinate::{
     CHUNK_EDGE_LENGTH, LocalCoordinateServerCommand, LocalCoordinateServerEvent,
     LocalCoordinateServerIpc,
 };
-use roundo_marionette::{ServerMarionetteCommand, ServerMarionetteIpc};
+use roundo_marionette::{ServerMarionetteCommand, ServerMarionetteEvent, ServerMarionetteIpc};
 use roundo_networking::{
     HookFuture, PublicSession, ServerHooks, ServerNetwork, ServerNetworkConfig,
 };
-use roundo_presence::{PresenceServerCommand, PresenceServerEvent, PresenceServerIpc};
+use roundo_presence::{PresenceServerEvent, PresenceServerIpc};
 use roundo_toolbox::{BridgeStep, BridgeThreadGroup, run_polling_bridge};
 use std::path::PathBuf;
 use std::sync::{Arc, atomic::AtomicBool};
@@ -46,6 +47,7 @@ impl ServerNetworkRuntime {
         marionette_ipc: ServerMarionetteIpc,
         presence_ipc: PresenceServerIpc,
         local_coordinate_ipc: LocalCoordinateServerIpc,
+        player_control_ipc: PlayerControlServerIpc,
         resource_fingerprint: ResourceCatalogFingerprint,
     ) -> Self {
         let config = network_config();
@@ -55,9 +57,9 @@ impl ServerNetworkRuntime {
             config.certificate_directory.display()
         );
         let hooks = Arc::new(ServerHooksAdapter {
-            marionette_ipc,
-            presence_ipc: presence_ipc.clone(),
+            marionette_ipc: marionette_ipc.clone(),
             local_coordinate_ipc: local_coordinate_ipc.clone(),
+            player_control_ipc: player_control_ipc.clone(),
             resource_fingerprint,
         });
         let network = Arc::new(
@@ -72,7 +74,14 @@ impl ServerNetworkRuntime {
         let game_local_coordinate_ipc = local_coordinate_ipc.clone();
         bridges
             .spawn("roundo-server-game-bridge", move |stop| {
-                bridge_game_ecs_events(presence_ipc, game_local_coordinate_ipc, game_network, stop)
+                bridge_game_ecs_events(
+                    marionette_ipc,
+                    presence_ipc,
+                    game_local_coordinate_ipc,
+                    player_control_ipc,
+                    game_network,
+                    stop,
+                )
             })
             .unwrap_or_else(|error| panic!("failed to start server game bridge: {error}"));
         let resource_network = Arc::clone(&network);
@@ -100,6 +109,11 @@ impl Drop for ServerNetworkRuntime {
     }
 }
 
+/// Temporary identity adapter: peer address is an opaque external key, never a PlayerId.
+fn peer_identity_key(peer_address: std::net::SocketAddr) -> String {
+    peer_address.to_string()
+}
+
 /// Converts persistent process configuration into networking-service input.
 ///
 /// Certificate paths remain relative to the process working directory unless
@@ -118,8 +132,8 @@ fn network_config() -> ServerNetworkConfig {
 /// Non-blocking adapter from networking-runtime callbacks to ECS domain queues.
 struct ServerHooksAdapter {
     marionette_ipc: ServerMarionetteIpc,
-    presence_ipc: PresenceServerIpc,
     local_coordinate_ipc: LocalCoordinateServerIpc,
+    player_control_ipc: PlayerControlServerIpc,
     resource_fingerprint: ResourceCatalogFingerprint,
 }
 
@@ -172,31 +186,44 @@ impl ServerHooks for ServerHooksAdapter {
         })
     }
 
-    fn on_session_connected(&self, connection_id: ConnectionId, user_session: UserSession) {
+    fn on_session_connected(
+        &self,
+        connection_id: ConnectionId,
+        user_session: UserSession,
+        peer_address: std::net::SocketAddr,
+    ) {
         debug!(
             "Forwarding session connection to ECS: connection_id={}, user_id={}, session_id={}",
             connection_id.0, user_session.user_id.0, user_session.session_id.0
         );
         if self
-            .presence_ipc
-            .try_send(PresenceServerCommand::Connect { connection_id })
+            .player_control_ipc
+            .try_send(PlayerControlCommand::Connected {
+                connection_id,
+                external_identity: peer_identity_key(peer_address),
+            })
             .is_err()
         {
             warn!(
-                "Failed to create player presence: connection_id={}",
+                "Failed to resolve player identity: connection_id={}",
                 connection_id.0
             );
         }
     }
 
-    fn on_session_disconnected(&self, connection_id: ConnectionId, _: UserSession) {
+    fn on_session_disconnected(
+        &self,
+        connection_id: ConnectionId,
+        _: UserSession,
+        _: std::net::SocketAddr,
+    ) {
         if self
-            .presence_ipc
-            .try_send(PresenceServerCommand::Disconnect { connection_id })
+            .player_control_ipc
+            .try_send(PlayerControlCommand::Disconnected { connection_id })
             .is_err()
         {
             warn!(
-                "Failed to remove player presence: connection_id={}",
+                "Failed to unbind player identity: connection_id={}",
                 connection_id.0
             );
         }
@@ -219,6 +246,39 @@ impl ServerHooks for ServerHooksAdapter {
         message: ClientGameMessage,
     ) {
         match message {
+            ClientGameMessage::RequestPlayerControllerAccess => {
+                let _ = self
+                    .player_control_ipc
+                    .try_send(PlayerControlCommand::RequestAccess { connection_id });
+            }
+            ClientGameMessage::AcquireController { controller_id } => {
+                let _ = self
+                    .player_control_ipc
+                    .try_send(PlayerControlCommand::Acquire {
+                        connection_id,
+                        controller_id,
+                    });
+            }
+            ClientGameMessage::ReleaseController { controller_id } => {
+                let _ = self
+                    .player_control_ipc
+                    .try_send(PlayerControlCommand::Release {
+                        connection_id,
+                        controller_id,
+                    });
+            }
+            ClientGameMessage::SubmitControllerInput {
+                controller_id,
+                input,
+            } => {
+                let _ = self
+                    .player_control_ipc
+                    .try_send(PlayerControlCommand::Submit {
+                        connection_id,
+                        controller_id,
+                        input,
+                    });
+            }
             ClientGameMessage::UsePlayerController { command } => {
                 if self
                     .marionette_ipc
@@ -284,13 +344,80 @@ impl ServerHooks for ServerHooksAdapter {
 /// Failed ECS or network admission is logged by the relevant adapter and is not
 /// retried here.
 fn bridge_game_ecs_events(
+    marionette_ipc: ServerMarionetteIpc,
     presence_ipc: PresenceServerIpc,
     local_coordinate_ipc: LocalCoordinateServerIpc,
+    player_control_ipc: PlayerControlServerIpc,
     network: Arc<ServerNetwork>,
     stop: Arc<AtomicBool>,
 ) {
     debug!("Started server game IPC bridge");
     run_polling_bridge(&stop, || {
+        if let Some(event) = player_control_ipc.try_receive() {
+            let (connection_id, message) = match event {
+                PlayerControlEvent::Connected {
+                    connection_id,
+                    player_id,
+                } => {
+                    if local_coordinate_ipc
+                        .try_send(LocalCoordinateServerCommand::SubscribePlayer {
+                            connection_id,
+                            player_id,
+                        })
+                        .is_err()
+                    {
+                        warn!(
+                            "Failed to subscribe Player to local-coordinate updates: connection_id={}, player_id={}",
+                            connection_id.0, player_id.0
+                        );
+                    }
+                    return BridgeStep::Forwarded;
+                }
+                PlayerControlEvent::AccessSnapshot {
+                    connection_id,
+                    snapshot,
+                } => (
+                    connection_id,
+                    ServerGameMessage::PlayerControllerAccessSnapshot { snapshot },
+                ),
+                PlayerControlEvent::Acquired {
+                    connection_id,
+                    controller_id,
+                } => (
+                    connection_id,
+                    ServerGameMessage::ControllerAcquired { controller_id },
+                ),
+                PlayerControlEvent::Released {
+                    connection_id,
+                    controller_id,
+                } => (
+                    connection_id,
+                    ServerGameMessage::ControllerReleased { controller_id },
+                ),
+                PlayerControlEvent::Rejected {
+                    connection_id,
+                    operation,
+                    error,
+                } => (
+                    connection_id,
+                    ServerGameMessage::ControllerOperationRejected { operation, error },
+                ),
+            };
+            network.send_to_connection(connection_id, StreamId::Stream0, message);
+            return BridgeStep::Forwarded;
+        }
+        if let Some(ServerMarionetteEvent::CreatureMotionSnapshot {
+            connection_id,
+            snapshot,
+        }) = marionette_ipc.try_receive()
+        {
+            network.send_to_connection(
+                connection_id,
+                StreamId::Stream0,
+                ServerGameMessage::CreatureMotionSnapshot { snapshot },
+            );
+            return BridgeStep::Forwarded;
+        }
         let Some(event) = presence_ipc.try_receive() else {
             return BridgeStep::Idle;
         };
@@ -382,6 +509,46 @@ fn bridge_resource_ecs_events(
                     ServerResourceMessage::RenderingAnchorDespawned { anchor_id },
                 );
             }
+            LocalCoordinateServerEvent::PredictionAnchorSpawned {
+                connection_id,
+                anchor,
+            } => {
+                network.send_to_connection(
+                    connection_id,
+                    StreamId::Stream1,
+                    ServerResourceMessage::PredictionAnchorSpawned { anchor },
+                );
+            }
+            LocalCoordinateServerEvent::PredictionAnchorUpdated {
+                connection_id,
+                anchor,
+            } => {
+                network.send_to_connection(
+                    connection_id,
+                    StreamId::Stream1,
+                    ServerResourceMessage::PredictionAnchorUpdated { anchor },
+                );
+            }
+            LocalCoordinateServerEvent::PredictionAnchorDespawned {
+                connection_id,
+                anchor_id,
+            } => {
+                network.send_to_connection(
+                    connection_id,
+                    StreamId::Stream1,
+                    ServerResourceMessage::PredictionAnchorDespawned { anchor_id },
+                );
+            }
+            LocalCoordinateServerEvent::EnvironmentOverrides {
+                connection_id,
+                overrides,
+            } => {
+                network.send_to_connection(
+                    connection_id,
+                    StreamId::Stream1,
+                    ServerResourceMessage::VirtualChunkEnvironmentOverrides { overrides },
+                );
+            }
             LocalCoordinateServerEvent::Spawned {
                 connection_id,
                 local_coordinate_id,
@@ -448,4 +615,15 @@ fn bridge_resource_ecs_events(
         }
         BridgeStep::Forwarded
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::peer_identity_key;
+
+    #[test]
+    fn peer_address_becomes_only_an_opaque_external_identity_key() {
+        let address = "127.0.0.1:4111".parse().unwrap();
+        assert_eq!(peer_identity_key(address), "127.0.0.1:4111");
+    }
 }
