@@ -1,0 +1,7 @@
+[package]
+name = "roundo_lifecycle"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+roundo_dsa.workspace = true

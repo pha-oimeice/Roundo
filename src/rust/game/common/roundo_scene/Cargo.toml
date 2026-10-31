@@ -1,0 +1,4 @@
+[package]
+name = "roundo_scene"
+version.workspace = true
+edition.workspace = true

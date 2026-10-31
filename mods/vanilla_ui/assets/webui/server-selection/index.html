@@ -1,0 +1,186 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Servers</title>
+  <style>
+    body { margin: 0; background: #10151d; color: #f4f7fb; font: 18px sans-serif; display: grid; place-items: center; min-height: 100vh; user-select: none }
+    main { min-width: 620px }
+    button, input { margin: 5px; padding: 9px; background: #26384c; border: 1px solid #8eb9db; color: white; font: inherit }
+    input { user-select: text }
+    button:disabled { cursor: wait; opacity: .65 }
+    li { list-style: none; padding: 8px; border-bottom: 1px solid #425 }
+    li.selected { background: #26384c }
+    .muted { color: #aab }
+  </style>
+</head>
+<body>
+<main>
+  <h1>Servers</h1>
+  <ul id="servers"></ul>
+  <button id="connect" type="button">Connect selected</button>
+  <button id="refresh" type="button">Refresh probes</button>
+  <form id="editor">
+    <input id="name" placeholder="Name" required>
+    <input id="address" placeholder="host:port" required>
+    <button id="add">Add</button>
+    <button id="edit" type="button">Edit selected</button>
+  </form>
+  <p id="error" role="alert"></p>
+  <button id="back" type="button">Back</button>
+</main>
+<script>
+let debugOpening = false;
+roundo.subscribe('client.input', async events => {
+  if (debugOpening || !events.some(event => event.slot === 'roundo.debug' && event.state === 'pressed')) return;
+  debugOpening = true;
+  try { await roundo.execute({version: 1, command: 'ui.open', arguments: {import: 'debug'}}); }
+  catch (error) { console.error(error); }
+  finally { debugOpening = false; }
+});
+let servers = [];
+let selected = null;
+let selectedSnapshot = null;
+let mutationPending = false;
+const listElement = document.querySelector('#servers');
+const nameInput = document.querySelector('#name');
+const addressInput = document.querySelector('#address');
+const editor = document.querySelector('#editor');
+const errorElement = document.querySelector('#error');
+const mutationButtons = ['#connect', '#refresh', '#add', '#edit', '#back'].map(selector => document.querySelector(selector));
+
+function showError(value) {
+  errorElement.textContent = value || '';
+}
+
+function showResult(result) {
+  if (result?.ok) return true;
+  showError(`[${result?.error?.code || 'command_error'}] ${result?.error?.message || 'Command failed'}`);
+  return false;
+}
+
+function setMutationPending(value) {
+  mutationPending = value;
+  for (const button of mutationButtons) button.disabled = value;
+  listElement.querySelectorAll('button').forEach(button => button.disabled = value);
+}
+
+async function mutate(command, argumentsValue) {
+  if (mutationPending) return null;
+  setMutationPending(true);
+  try {
+    return await roundo.execute({ version: 1, command, arguments: argumentsValue });
+  } finally {
+    setMutationPending(false);
+  }
+}
+
+function clearSelection() {
+  selected = null;
+  selectedSnapshot = null;
+  nameInput.value = '';
+  addressInput.value = '';
+}
+
+function select(index) {
+  const server = servers.find(entry => entry.index === index);
+  if (!server) return;
+  selected = server.index;
+  selectedSnapshot = { name: server.name, address: server.address };
+  nameInput.value = server.name;
+  addressInput.value = server.address;
+  render();
+}
+
+function render() {
+  const rows = servers.map(server => {
+    const row = document.createElement('li');
+    row.classList.toggle('selected', selected === server.index);
+    row.addEventListener('click', () => select(server.index));
+
+    const title = document.createElement('b');
+    title.textContent = `${server.index}: ${server.name}`;
+    const status = document.createElement('span');
+    status.className = 'muted';
+    status.textContent = ` ${server.address} — ${server.probe.status}${server.probe.message ? `: ${server.probe.message}` : ''}`;
+    const remove = document.createElement('button');
+    remove.type = 'button';
+    remove.textContent = 'Delete';
+    remove.disabled = mutationPending;
+    remove.addEventListener('click', event => {
+      event.stopPropagation();
+      removeServer(server.index);
+    });
+    row.append(title, status, remove);
+    return row;
+  });
+  listElement.replaceChildren(...rows);
+}
+
+function receiveServers(snapshot) {
+  const next = snapshot?.servers;
+  if (!Array.isArray(next)) return;
+  servers = next;
+  if (selected !== null) {
+    const current = servers.find(server => server.index === selected);
+    if (!current || current.name !== selectedSnapshot?.name || current.address !== selectedSnapshot?.address) {
+      clearSelection();
+    }
+  }
+  render();
+  if (servers.every(server => server.probe.status !== 'probing')) showError('');
+}
+
+async function back() {
+  const result = await mutate('ui.back', {});
+  if (result) showResult(result);
+}
+
+async function refresh() {
+  const result = await mutate('server.refresh', {});
+  if (result) showResult(result);
+}
+
+async function connect() {
+  if (selected === null) return showError('Select a server first');
+  const result = await mutate('server.connect', { index: selected });
+  if (!result || !showResult(result)) return;
+  const opened = await mutate('ui.open', { import: 'connecting' });
+  if (opened) showResult(opened);
+}
+
+async function addServer(event) {
+  event.preventDefault();
+  const result = await mutate('server.add', { name: nameInput.value, address: addressInput.value });
+  if (result && showResult(result)) {
+    editor.reset();
+    clearSelection();
+  }
+}
+
+async function editServer() {
+  if (selected === null) return showError('Select a server first');
+  const replacement = { name: nameInput.value, address: addressInput.value };
+  selectedSnapshot = replacement;
+  const result = await mutate('server.edit', { index: selected, server: replacement });
+  if (result) showResult(result);
+}
+
+async function removeServer(index) {
+  // An indexed list cannot preserve selection identity across removal.
+  clearSelection();
+  render();
+  const result = await mutate('server.delete', { index });
+  if (result) showResult(result);
+}
+
+document.querySelector('#connect').addEventListener('click', connect);
+document.querySelector('#refresh').addEventListener('click', refresh);
+document.querySelector('#edit').addEventListener('click', editServer);
+document.querySelector('#back').addEventListener('click', back);
+editor.addEventListener('submit', addServer);
+roundo.subscribe('client.servers', receiveServers);
+void refresh();
+</script>
+</body>
+</html>

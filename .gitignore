@@ -5,13 +5,12 @@ idl/schema/java
 .architecture-report-temp
 .agents
 skills
-mods
 docs
 .pi
 .obsidian
 skills-lock.json
 *.bat
-
+.scratch
 
 NUL
 target
@@ -266,6 +265,8 @@ _pkginfo.txt
 *.appx
 *.appxbundle
 *.appxupload
+
+NUL
 
 # Visual Studio cache files
 # files ending in .cache can be ignored

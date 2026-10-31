@@ -1,0 +1,12 @@
+[package]
+name = "roundo_block_interaction"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+bevy.workspace = true
+roundo_life.workspace = true
+roundo_contracts.workspace = true
+roundo_inventory.workspace = true
+roundo_items.workspace = true
+roundo_local_coordinate.workspace = true

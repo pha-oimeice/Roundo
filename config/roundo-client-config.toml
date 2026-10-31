@@ -1,0 +1,61 @@
+dev_mode = false
+
+[network]
+ca_verification = false
+
+[network.endpoint]
+host = "127.0.0.1"
+quic_port = 12358
+
+[[servers]]
+name = "Local server"
+address = "127.0.0.1:12358"
+
+[settings.controls]
+mouse_sensitivity = 0.002
+player_movement_prediction = false
+
+[settings.camera]
+move_speed = 25.0
+voxel_raycast_distance = 8.0
+
+[settings.world]
+joinable_world_radius = 4.0
+chunk_view_distance = 64.0
+geometry_lod_pixel_error = 1.0
+
+[[settings.input_bindings]]
+slot = "roundo.move-up"
+key = "space"
+
+[[settings.input_bindings]]
+slot = "roundo.move-down"
+key = "shift_left"
+
+[[settings.input_bindings]]
+slot = "roundo.move-left"
+key = "key_a"
+
+[[settings.input_bindings]]
+slot = "roundo.move-right"
+key = "key_d"
+
+[[settings.input_bindings]]
+slot = "roundo.move-forward"
+key = "key_w"
+
+[[settings.input_bindings]]
+slot = "roundo.move-backward"
+key = "key_s"
+
+[[settings.input_bindings]]
+slot = "roundo.spirit-camera"
+key = "f1"
+
+[[settings.input_bindings]]
+slot = "roundo.destroy-block"
+key = "mouse_left"
+
+[[settings.input_bindings]]
+slot = "roundo.place-block"
+key = "mouse_right"

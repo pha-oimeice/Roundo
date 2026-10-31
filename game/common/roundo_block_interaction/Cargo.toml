@@ -1,9 +1,0 @@
-[package]
-name = "roundo_block_interaction"
-version.workspace = true
-edition.workspace = true
-
-[dependencies]
-bevy.workspace = true
-roundo_local_coordinate.workspace = true
-roundo_marionette.workspace = true

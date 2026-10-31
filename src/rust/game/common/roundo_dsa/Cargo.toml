@@ -1,0 +1,9 @@
+[package]
+name = "roundo_dsa"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+rand.workspace = true
+rand_chacha.workspace = true
+serde.workspace = true

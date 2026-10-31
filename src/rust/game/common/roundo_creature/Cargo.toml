@@ -1,0 +1,13 @@
+[package]
+name = "roundo_creature"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+avian3d.workspace = true
+bevy.workspace = true
+roundo_life.workspace = true
+
+[features]
+dev = ["bevy/debug", "bevy/file_watcher"]
+release = []

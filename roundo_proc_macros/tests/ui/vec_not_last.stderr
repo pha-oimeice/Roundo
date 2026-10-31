@@ -1,5 +1,0 @@
-error: a Unix positional Vec<T> must be the final positional field
- --> tests/ui/vec_not_last.rs:4:13
-  |
-4 |     values: Vec<String>,
-  |             ^^^^^^^^^^^

@@ -1,0 +1,8 @@
+[[resource]]
+name = "stone"
+id = 1
+placeable = true
+
+[slots]
+"roundo.default-placed-voxel" = "stone"
+"roundo.generated-solid-voxel" = "stone"

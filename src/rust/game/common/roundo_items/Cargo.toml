@@ -1,0 +1,12 @@
+[package]
+name = "roundo_items"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+bevy.workspace = true
+roundo_dsa.workspace = true
+roundo_inventory.workspace = true
+roundo_mod_loader.workspace = true
+serde.workspace = true
+toml.workspace = true

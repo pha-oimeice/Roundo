@@ -1,0 +1,34 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Roundo</title>
+  <style>
+    body { margin: 0; background: #10151d; color: #f4f7fb; display: grid; place-items: center; height: 100vh; overflow: hidden; user-select: none }
+    h1 { margin: 0; font: 72px sans-serif; letter-spacing: 12px; animation: intro 2.4s ease both }
+    @keyframes intro {
+      0% { opacity: 0; transform: scale(.75) }
+      25% { opacity: 1; transform: scale(1) }
+      70% { opacity: 1; transform: scale(1) }
+      100% { opacity: 0; transform: scale(1.08) }
+    }
+  </style>
+</head>
+<body tabindex="-1">
+<h1>ROUNDO</h1>
+<script>
+let finished = false;
+
+function finish() {
+  if (finished) return;
+  finished = true;
+  parent.postMessage('roundo:startup-complete', '*');
+}
+
+document.querySelector('h1').addEventListener('animationend', finish, { once: true });
+document.querySelector('h1').addEventListener('click', finish, { once: true });
+window.focus();
+document.body.focus({ preventScroll: true });
+</script>
+</body>
+</html>
