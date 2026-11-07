@@ -2,7 +2,7 @@
 
 use super::SpawnTestCreatureAction;
 use crate::character_controller::{
-    ClientInputFrame, SPAWN_TEST_CREATURE_INPUT_SLOT,
+    ClientFunctionFrame, SPAWN_TEST_CREATURE_FUNCTION,
     client::{
         AuthoritativePlayerState, ClientControllerCommandState, ClientMarionetteEvent,
         ClientPipeResource, ClientPlayerController,
@@ -12,7 +12,7 @@ use bevy::prelude::{MessageReader, Res, ResMut};
 use roundo_contracts::PlayerControllerCommand;
 
 pub(crate) fn route_spawn_test_creature(
-    mut inputs: MessageReader<ClientInputFrame>,
+    mut inputs: MessageReader<ClientFunctionFrame>,
     controller: Res<ClientPlayerController>,
     authoritative: Res<AuthoritativePlayerState>,
     pipe: Res<ClientPipeResource>,
@@ -22,7 +22,7 @@ pub(crate) fn route_spawn_test_creature(
     if !controller.input_enabled || controller.spirit_walking || authoritative.0.is_none() {
         return;
     }
-    if input.just_pressed(SPAWN_TEST_CREATURE_INPUT_SLOT)
+    if input.just_pressed(SPAWN_TEST_CREATURE_FUNCTION)
         && let Ok(command) = commands.spawn_test_creature.issue(SpawnTestCreatureAction)
         && pipe
             .0

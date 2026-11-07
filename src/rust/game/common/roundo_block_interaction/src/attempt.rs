@@ -2,7 +2,7 @@
 
 use bevy::{
     ecs::{system::SystemParam, world::WorldId},
-    prelude::{FromWorld, ResMut, Resource, World},
+    prelude::{App, FromWorld, Plugin, ResMut, Resource, World},
 };
 
 /// One activation's correlation space, distinct even across independent Apps.
@@ -51,8 +51,17 @@ impl FromWorld for InteractionSpaces {
     }
 }
 
+/// Installs local correlation identities only: no Life data, application,
+/// controller, behavior or voxel-edit system is registered.
+pub struct InteractionIdsPlugin;
+impl Plugin for InteractionIdsPlugin {
+    fn build(&self, app: &mut App) {
+        app.init_resource::<InteractionSpaces>();
+    }
+}
+
 /// Narrow App-local source of fresh correlation spaces, backed by one private
-/// Resource installed by the schema Plugin. This does not activate an application.
+/// Resource installed by the identity Plugin. This does not activate an application.
 #[derive(SystemParam)]
 pub struct InteractionAttemptIds<'w> {
     spaces: ResMut<'w, InteractionSpaces>,

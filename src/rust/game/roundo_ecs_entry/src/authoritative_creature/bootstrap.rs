@@ -14,7 +14,6 @@ pub(super) struct BootstrapRegistrations<'w, 's> {
     movement: LifeStateRegistrations<'w, 's, MovementCommandState>,
     gaze: LifeEventRegistrations<'w, 's, GazeCommandEvent>,
     look: LifeStateRegistrations<'w, 's, GazeCommandState>,
-    interaction: LifeEventRegistrations<'w, 's, roundo_block_interaction::ItemUseCommandEvent>,
     experience: LifeStateRegistrations<'w, 's, CreatureMotionExperienceState>,
 }
 impl BootstrapRegistrations<'_, '_> {
@@ -26,8 +25,6 @@ impl BootstrapRegistrations<'_, '_> {
         self.look.validate_writer(life, m.intent)?;
         self.look.validate_reader(life, m.intent)?;
         self.look.validate_reader(life, m.execution)?;
-        self.interaction.validate_writer(life, m.intent)?;
-        self.interaction.validate_reader(life, m.execution)?;
         self.gaze.validate_writer(life, m.intent)?;
         self.gaze.validate_reader(life, m.execution)?;
         self.experience.validate_writer(life, m.execution)?;
@@ -90,7 +87,6 @@ pub(super) fn prepare_creature_data(
     mut managers: ParamSet<(
         LifeStateManagement<MovementCommandState>,
         LifeStateManagement<GazeCommandState>,
-        LifeEventManagement<roundo_block_interaction::ItemUseCommandEvent>,
     )>,
     mut commands: Commands,
 ) -> Result<CreatureMotionExperienceState, CreatureAssemblyError> {
@@ -117,12 +113,6 @@ pub(super) fn prepare_creature_data(
     look.approve_reader(assembly.life, assembly.members.intent)?;
     look.approve_reader(assembly.life, assembly.members.execution)?;
     drop(look);
-    let mut interaction = managers.p2();
-    interaction.approve_writer(assembly.life, assembly.members.intent)?;
-    interaction.approve_reader(assembly.life, assembly.members.execution)?;
-    interaction.register_writer(assembly.life, assembly.members.intent)?;
-    interaction.register_reader(assembly.life, assembly.members.execution)?;
-    drop(interaction);
     let mut movement = managers.p0();
     movement.approve_origin(assembly.life, assembly.members.intent)?;
     movement.approve_reader(assembly.life, assembly.members.execution)?;
@@ -184,23 +174,6 @@ pub(super) fn finish_creature_data(
     Ok(())
 }
 
-pub(super) fn attach_block_interaction(
-    In(assembly): In<UnpublishedCreatureLife>,
-    instances: LifeInstances,
-    executions: Query<&roundo_creature::AabbDimensions, With<ExecutionBodyId>>,
-    mut commands: Commands,
-) -> Result<(), CreatureAssemblyError> {
-    let [_, execution, _] = assembly.resolve(&instances)?;
-    let aabb = executions
-        .get(execution)
-        .map_err(|_| CreatureAssemblyError::InvalidBootstrap)?;
-    commands.entity(execution).insert((
-        BlockInteractionPose,
-        BlockInteractionOriginOffset(aabb.center_offset()),
-    ));
-    Ok(())
-}
-
 fn validate_controllers(
     ids: TestLifeControllers,
     intent: ConceptBodyHandle,
@@ -249,14 +222,7 @@ pub(super) fn publish_test_life(
     instances: LifeInstances,
     controller_registry: Res<ControllerRegistry>,
     controllers: Query<&Controller>,
-    markers: Query<(
-        &TestLifeControllers,
-        &ExecutionBodyId,
-        &BlockInteractionPose,
-        &BlockInteractionOriginOffset,
-        &roundo_creature::AabbDimensions,
-    )>,
-    interaction_controllers: Query<&TestInteractionController>,
+    markers: Query<&TestLifeControllers, With<ExecutionBodyId>>,
     routes: Query<(&FactoryMotionRoute, &IntentBodyId)>,
     records: Query<(&CreatureMotionRecord, &RecordBodyId)>,
     player_registry: Res<PlayerRegistry>,
@@ -276,12 +242,7 @@ pub(super) fn publish_test_life(
         &controllers,
     )?;
     if routes.get(intent).map(|(route, _)| *route).ok() != Some(assembly.route())
-        || markers
-            .get(execution)
-            .ok()
-            .filter(|(_, _, _, origin, aabb)| origin.0 == aabb.center_offset())
-            .map(|(ids, _, _, _, _)| *ids)
-            != Some(ids)
+        || markers.get(execution).copied().ok() != Some(ids)
     {
         return Err(CreatureAssemblyError::InvalidBootstrap);
     }
@@ -308,33 +269,9 @@ pub(super) fn publish_test_life(
     if player_registry.player_entity(player.id()) != Some(player_entity) {
         return Err(CreatureAssemblyError::InvalidBootstrap);
     }
-    let interaction_id = interaction_controllers
-        .get(execution)
-        .ok()
-        .map(|controller| controller.0);
-    if let Some(id) = interaction_id {
-        let controller = controller_registry
-            .controller_entity(id)
-            .and_then(|entity| controllers.get(entity).ok())
-            .ok_or(CreatureAssemblyError::InvalidBootstrap)?;
-        if controller.id() != id
-            || controller.intent_body_handle() != Some(assembly.members.intent)
-            || controller.domain() != IntentDomain::block_interaction()
-            || controller.current_owner().is_some()
-            || assemblies.life_by_controller.contains_key(&id)
-        {
-            return Err(CreatureAssemblyError::InvalidBootstrap);
-        }
-    }
     assemblies.insert_with_controllers(assembly.life, assembly.members, ids)?;
-    if let Some(id) = interaction_id {
-        assemblies.life_by_controller.insert(id, assembly.life);
-    }
     player.set_controller_access(ids.movement, ControllerAccessLevel::ReadWrite);
     player.set_controller_access(ids.gaze, ControllerAccessLevel::ReadWrite);
-    if let Some(id) = interaction_id {
-        player.set_controller_access(id, ControllerAccessLevel::ReadWrite);
-    }
     commands.entity(player_entity).insert(BootstrappedTestLife {
         life: assembly.life,
     });
@@ -350,12 +287,9 @@ pub(super) fn clear_failed_bootstrap(
 ) {
     cleanup.remove_mapping(life);
     if let Ok(entity) = instances.resolve_body(execution) {
-        cleanup.commands.entity(entity).try_remove::<(
-            BlockInteractionPose,
-            BlockInteractionOriginOffset,
-            TestLifeControllers,
-            TestInteractionController,
-            player_interaction::PlayerBlockBehaviors,
-        )>();
+        cleanup
+            .commands
+            .entity(entity)
+            .try_remove::<TestLifeControllers>();
     }
 }

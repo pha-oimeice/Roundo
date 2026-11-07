@@ -68,7 +68,6 @@ impl Plugin for MarionetteServerPlugin {
                     MarionetteServerSet::Commands,
                     MarionetteServerSet::Controllers,
                     MarionetteServerSet::Movement,
-                    MarionetteServerSet::BlockInteractions,
                 )
                     .chain(),
             )
@@ -94,7 +93,6 @@ pub enum MarionetteServerSet {
     Commands,
     Controllers,
     Movement,
-    BlockInteractions,
 }
 
 #[derive(Component, Clone, Copy, Debug, Eq, PartialEq)]

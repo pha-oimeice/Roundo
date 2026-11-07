@@ -1,6 +1,5 @@
 //! Unified client/server player-controller domain.
 
-mod block_interaction;
 mod client;
 mod input;
 mod movement;
@@ -20,10 +19,10 @@ pub use self::client::{
     MarionetteClientPlugin, MarionetteClientSet,
 };
 pub use self::input::{
-    ClientInputFrame, DESTROY_BLOCK_INPUT_SLOT, InputDefinition, InputRegistry, InputRegistryError,
-    LOOK_INPUT_SLOT, MOVE_BACKWARD_INPUT_SLOT, MOVE_DOWN_INPUT_SLOT, MOVE_FORWARD_INPUT_SLOT,
-    MOVE_LEFT_INPUT_SLOT, MOVE_RIGHT_INPUT_SLOT, MOVE_UP_INPUT_SLOT, PLACE_BLOCK_INPUT_SLOT,
-    SPAWN_TEST_CREATURE_INPUT_SLOT, SPIRIT_CAMERA_INPUT_SLOT,
+    ClientFunctionFrame, InputFunctionDefinition, InputFunctionRegistry,
+    InputFunctionRegistryError, LOOK_FUNCTION, MOVE_BACKWARD_FUNCTION, MOVE_DOWN_FUNCTION,
+    MOVE_FORWARD_FUNCTION, MOVE_LEFT_FUNCTION, MOVE_RIGHT_FUNCTION, MOVE_UP_FUNCTION,
+    SPAWN_TEST_CREATURE_FUNCTION, SPIRIT_CAMERA_FUNCTION,
 };
 pub use self::movement::{AcceptedMovementIntent, Movement3D, Movement3DAction};
 pub use self::rotation::{

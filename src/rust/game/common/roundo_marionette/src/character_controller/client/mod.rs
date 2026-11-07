@@ -225,17 +225,6 @@ impl ClientPlayerControllerAccess {
     pub fn gaze_controller(&self) -> Option<ControllerId> {
         self.gaze
     }
-    pub fn block_interaction_controller(&self) -> Option<ControllerId> {
-        self.snapshot
-            .as_ref()?
-            .controllers
-            .iter()
-            .find_map(|entry| {
-                (entry.intent_domain == roundo_contracts::ControllerIntentDomain::BlockInteraction
-                    && entry.access_level == roundo_contracts::ControllerAccessLevel::ReadWrite)
-                    .then_some(entry.controller_id)
-            })
-    }
     pub fn last_rejection(&self) -> Option<(PlayerControllerOperation, ControllerOperationError)> {
         self.last_rejection
     }
@@ -453,7 +442,6 @@ pub(super) struct AuthoritativePlayerState(pub(super) Option<PlayerState>);
 
 #[derive(Resource, Clone, Debug, Default)]
 pub(super) struct ClientControllerCommandState {
-    pub(super) block_sequence: u64,
     pub(super) movement: Movement3D,
     #[cfg(feature = "dev")]
     pub(super) spawn_test_creature: SpawnTestCreatureController,

@@ -1,24 +1,19 @@
-//! Client configuration loading and effective Mod/user binding resolution.
+//! Client-owned shortcut resources, references and configuration loading.
 
-use roundo_marionette::{ClientMarionetteInputSettings, InputRegistry};
+use roundo_marionette::{ClientMarionetteInputSettings, InputFunctionRegistry};
 use roundo_presence::ClientPresenceSettings;
-use roundo_user_config::{
-    ClientConfig, ClientInputBindingConfig, ClientNetworkConfig, ClientSettingsConfig, CommonConfig,
-};
+use roundo_user_config::{ClientConfig, ClientNetworkConfig, ClientSettingsConfig, CommonConfig};
 use std::{
     path::PathBuf,
     sync::{LazyLock, RwLock},
 };
 
-const CONFIG_FILE_NAME: &str = "roundo-client-config.toml";
 static COMMON_CONFIG: LazyLock<CommonConfig> =
     LazyLock::new(roundo_user_config::load_common_config);
 static CLIENT_CONFIG: LazyLock<RwLock<ClientConfig>> = LazyLock::new(|| RwLock::new(load_config()));
 
 pub fn load_config() -> ClientConfig {
-    let mut config = roundo_user_config::load_client_config(CONFIG_FILE_NAME);
-    config.settings.normalize();
-    config
+    roundo_user_config::load_client_config()
 }
 pub fn network_config() -> ClientNetworkConfig {
     read_config().network.clone()
@@ -40,63 +35,54 @@ pub fn runtime_input_settings(settings: &ClientSettingsConfig) -> ClientMarionet
     }
 }
 
-/// User edges override a slot's optional Mod defaults. An explicit empty override
-/// stays empty on reload; no default binding is invented by native code.
-pub fn effective_input_bindings(
+/// Validates the complete reference graph before startup or publication. Nothing
+/// is silently repaired, inherited or filled with native shortcut defaults.
+pub fn validate_input_configuration(
     settings: &ClientSettingsConfig,
-    registry: Option<&InputRegistry>,
-) -> Result<Vec<ClientInputBindingConfig>, String> {
-    let mut bindings = settings.input_bindings.clone();
-    if let Some(registry) = registry {
-        for binding in &bindings {
-            if !registry.contains_slot(&binding.slot) {
-                return Err(format!("unknown input slot `{}`", binding.slot));
-            }
+    registry: &InputFunctionRegistry,
+) -> Result<(), String> {
+    for (id, slot) in &settings.input_slots {
+        if id.trim().is_empty() || id.trim() != id || slot.display_name.trim().is_empty() {
+            return Err(format!("invalid shortcut slot `{id}` or display name"));
         }
-        for (slot, definition) in registry.slots() {
-            // Validate defaults even when overridden: malformed Mod data must
-            // fail startup, not remain latent until the user clears a binding.
-            let defaults = definition
-                .default_bindings
-                .iter()
-                .map(|key| {
-                    serde_json::from_value(serde_json::Value::String(key.clone()))
-                        .map(|key| ClientInputBindingConfig::new(slot, key))
-                        .map_err(|error| format!("invalid default binding for `{slot}`: {error}"))
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-            if !settings.input_binding_overrides.contains(slot)
-                && !settings
-                    .input_bindings
-                    .iter()
-                    .any(|binding| binding.slot == slot)
-            {
-                for binding in defaults {
-                    if !bindings.contains(&binding) {
-                        bindings.push(binding);
-                    }
-                }
+        for function in &slot.functions {
+            if registry.function(function).is_none() {
+                return Err(format!("unknown function `{function}` in slot `{id}`"));
             }
         }
     }
-    Ok(bindings)
+    let mut seen = std::collections::BTreeSet::new();
+    for binding in &settings.input_bindings {
+        if !settings.input_slots.contains_key(&binding.slot) {
+            return Err(format!("unknown shortcut slot `{}`", binding.slot));
+        }
+        if !seen.insert((&binding.slot, binding.key)) {
+            return Err(format!(
+                "duplicate input binding for slot `{}`",
+                binding.slot
+            ));
+        }
+    }
+    Ok(())
 }
 
-/// Materializes only the slot being edited, preserving inheritance for all others.
-pub fn customize_input_slot(
-    settings: &mut ClientSettingsConfig,
-    registry: Option<&InputRegistry>,
+/// Sources resolve the same local slot resource without synthesizing a physical
+/// key. The returned association set is not an execution order or permission.
+pub fn resolve_slot_functions<'a>(
+    settings: &'a ClientSettingsConfig,
+    registry: &InputFunctionRegistry,
     slot: &str,
-) -> Result<(), String> {
-    let effective = effective_input_bindings(settings, registry)?;
-    settings
-        .input_bindings
-        .retain(|binding| binding.slot != slot);
-    settings
-        .input_bindings
-        .extend(effective.into_iter().filter(|binding| binding.slot == slot));
-    settings.input_binding_overrides.insert(slot.to_owned());
-    Ok(())
+) -> Result<&'a std::collections::BTreeSet<String>, String> {
+    let resource = settings
+        .input_slots
+        .get(slot)
+        .ok_or_else(|| format!("unknown shortcut slot `{slot}`"))?;
+    for function in &resource.functions {
+        if registry.function(function).is_none() {
+            return Err(format!("unknown function `{function}` in slot `{slot}`"));
+        }
+    }
+    Ok(&resource.functions)
 }
 
 fn read_config() -> std::sync::RwLockReadGuard<'static, ClientConfig> {

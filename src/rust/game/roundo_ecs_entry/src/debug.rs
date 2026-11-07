@@ -7,7 +7,6 @@ use crate::{
     player_control::{PlayerControlEvent, PlayerControlPipe, PlayerControlServerSet},
 };
 use bevy::prelude::*;
-use roundo_block_interaction::BlockInteractionCommandEvent;
 use roundo_contracts::{AttributeId, ConnectionId, debug::*};
 use roundo_creature::{
     CreatureMotionExperienceState, ExecutionBodyId, GazeCommandEvent, GazeCommandState,
@@ -20,6 +19,9 @@ use roundo_life::{
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 mod inventory;
+mod items;
+
+pub use items::DebugItemIssuer;
 
 const MAX_TARGETS: usize = 4096;
 const MAX_WORK: usize = 64;
@@ -52,6 +54,16 @@ impl DebugIngress {
                 data_type,
                 ..
             } => short(body) && short(life) && short(data_type),
+            DebugOperation::CreateItem {
+                inventory,
+                placement_reach,
+                destruction_reach,
+            } => {
+                short(inventory)
+                    && [placement_reach, destruction_reach]
+                        .into_iter()
+                        .all(|reach| reach.is_none_or(|value| value.is_finite() && value > 0.0))
+            }
             DebugOperation::Inventory(operation) => match operation {
                 DebugInventoryOperation::List { body, .. } => body.as_deref().is_none_or(short),
                 DebugInventoryOperation::Create { body } => short(body),
@@ -71,7 +83,7 @@ impl DebugIngress {
         if !valid {
             return Err(DebugFailure::new(
                 "invalid_request",
-                "诊断选择器或数据类型名称无效",
+                "诊断选择器或参数无效；物品功能距离必须为有限正数",
             ));
         }
         let id = request
@@ -115,7 +127,6 @@ impl Plugin for DebugPlugin {
                     state_type::<CreatureMotionExperienceState>,
                     event_type::<GazeCommandEvent>,
                     event_type::<JumpCommandEvent>,
-                    event_type::<BlockInteractionCommandEvent>,
                     finish,
                 )
                     .chain()
@@ -126,7 +137,7 @@ impl Plugin for DebugPlugin {
             app.init_resource::<inventory::InventorySelectors>()
                 .add_systems(
                     FixedUpdate,
-                    (describe_public, inventory::manage)
+                    (describe_public, inventory::manage, items::manage)
                         .chain()
                         .after(begin)
                         .before(finish),
@@ -221,11 +232,7 @@ fn data_types() -> Vec<DebugDataType> {
         GazeCommandState::KEY,
         CreatureMotionExperienceState::KEY,
     ];
-    let events = [
-        GazeCommandEvent::KEY,
-        JumpCommandEvent::KEY,
-        BlockInteractionCommandEvent::KEY,
-    ];
+    let events = [GazeCommandEvent::KEY, JumpCommandEvent::KEY];
     states
         .into_iter()
         .map(|key| (key, "state"))
@@ -245,7 +252,6 @@ fn life_recipe() -> LifePrototype {
         .with_state_policy::<CreatureMotionExperienceState>(policy)
         .with_event_interface::<GazeCommandEvent>(events)
         .with_event_interface::<JumpCommandEvent>(events)
-        .with_event_interface::<BlockInteractionCommandEvent>(events)
 }
 fn body_values(values: DebugBodyValues) -> Result<impl Bundle, DebugFailure> {
     Ok((
@@ -563,7 +569,7 @@ fn begin(
                     work.deferred = true;
                     Ok(None)
                 }
-                DebugOperation::Inventory(_) => Ok(None),
+                DebugOperation::Inventory(_) | DebugOperation::CreateItem { .. } => Ok(None),
                 DebugOperation::Relation {
                     body,
                     life,

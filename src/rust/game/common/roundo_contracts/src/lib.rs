@@ -286,48 +286,6 @@ pub struct SetGazeIntent {
     pub orientation: [f32; 4],
 }
 
-/// Instance identity only; neither an item prototype nor permission to use it.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-#[repr(transparent)]
-pub struct ItemInstanceId(pub u128);
-
-impl Serialize for ItemInstanceId {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        if serializer.is_human_readable() {
-            serializer.serialize_str(&self.0.to_string())
-        } else {
-            serializer.serialize_u128(self.0)
-        }
-    }
-}
-
-impl<'de> Deserialize<'de> for ItemInstanceId {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        if deserializer.is_human_readable() {
-            String::deserialize(deserializer)?
-                .parse::<u128>()
-                .map(Self)
-                .map_err(serde::de::Error::custom)
-        } else {
-            u128::deserialize(deserializer).map(Self)
-        }
-    }
-}
-
-/// Code-implemented use methods. Item data permits a method but contains no code.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub enum ItemUseMethod {
-    DestroyBlock,
-    PlaceBlock,
-}
-
-/// Selects an exact item and a method, never a client hit or world-edit result.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct ItemUseIntent {
-    pub item: ItemInstanceId,
-    pub method: ItemUseMethod,
-}
-
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct SpawnTestCreatureAction;
 
@@ -477,7 +435,6 @@ pub enum ControllerControlState {
 pub enum ControllerIntentDomain {
     Movement,
     Gaze,
-    BlockInteraction,
 }
 
 /// One Controller visible in the current Player's access snapshot.
@@ -494,8 +451,6 @@ pub struct PlayerControllerAccess {
 pub struct PlayerControllerAccessSnapshot {
     pub player_id: PlayerId,
     pub controllers: Vec<PlayerControllerAccess>,
-    /// The vertical slice's explicitly supplied item, not an equipment slot or grant.
-    pub block_item: Option<ItemInstanceId>,
 }
 
 /// The rejected request identity echoed without its input payload.
@@ -521,7 +476,6 @@ pub enum ControllerOperationError {
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
 pub enum DirectedControllerInput {
     SetGaze(ControllerCommand<SetGazeIntent>),
-    UseItem(ControllerCommand<ItemUseIntent>),
     Movement3D(ControllerCommand<Movement3DAction>),
     Gaze(ControllerCommand<GazeIntent>),
 }

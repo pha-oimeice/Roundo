@@ -3,11 +3,9 @@
 #[cfg(feature = "server")]
 mod authoritative_creature;
 #[cfg(feature = "server")]
-mod block_item;
-#[cfg(feature = "server")]
-pub use block_item::{BlockItemEdits, BlockItemPermissions, create_block_item};
-#[cfg(feature = "server")]
 pub mod authority_admission;
+#[cfg(feature = "server")]
+mod block_item;
 #[cfg(feature = "server")]
 pub use authoritative_creature::minimal_application::{
     MinimalCleanupError, MinimalLifeApplicationPlugin, MinimalLifeApplicationSet,
@@ -25,6 +23,8 @@ mod creature_prediction;
 mod creature_snapshot;
 #[cfg(feature = "server")]
 mod debug;
+#[cfg(feature = "server")]
+pub use debug::DebugItemIssuer;
 #[cfg(feature = "server")]
 pub mod physics;
 #[cfg(feature = "server")]

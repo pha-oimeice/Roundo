@@ -9,7 +9,6 @@ use super::*;
 pub(crate) struct ControllerInputSequences {
     movement: HashMap<ControllerId, u64>,
     gaze: HashMap<ControllerId, u64>,
-    interaction: HashMap<ControllerId, u64>,
 }
 
 impl ControllerInputSequences {
@@ -21,17 +20,9 @@ impl ControllerInputSequences {
         self.gaze.get(&controller_id).copied().unwrap_or(0)
     }
 
-    pub(in crate::player_control) fn interaction_sequence(
-        &self,
-        controller_id: ControllerId,
-    ) -> u64 {
-        self.interaction.get(&controller_id).copied().unwrap_or(0)
-    }
-
     pub(in crate::player_control) fn forget_controller(&mut self, controller_id: ControllerId) {
         self.movement.remove(&controller_id);
         self.gaze.remove(&controller_id);
-        self.interaction.remove(&controller_id);
     }
 }
 
@@ -80,37 +71,6 @@ impl ControllerTickInputs {
                         .resource_mut::<ControllerInputSequences>()
                         .gaze
                         .insert(controller_id, command.sequence);
-                }
-                published
-            }
-            DirectedControllerInput::UseItem(command)
-                if route
-                    .domain
-                    .contains(roundo_controller::IntentKind::BlockInteraction) =>
-            {
-                if command.sequence
-                    <= world
-                        .resource::<ControllerInputSequences>()
-                        .interaction_sequence(controller_id)
-                {
-                    return false;
-                }
-                let use_item = roundo_block_interaction::ItemUseCommandEvent {
-                    item: roundo_inventory::ItemId::from_u128(command.action.item.0),
-                    method: command.action.method,
-                };
-                let published = world
-                    .run_system_once_with(commands::publish_interaction, (controller_id, use_item))
-                    .expect("block Command uses native registered Intent writer");
-                if published {
-                    world
-                        .resource_mut::<ControllerInputSequences>()
-                        .interaction
-                        .insert(controller_id, command.sequence);
-                    world.run_system_once_with(crate::authoritative_creature::player_interaction::trigger,
-                        FactoryMotionRoute::new(route.life, route.intent, route.execution,
-                            world.resource::<crate::authoritative_creature::CreatureAssemblyRegistry>().get(route.life).unwrap().record))
-                        .expect("Execution triggers through native read registrations");
                 }
                 published
             }

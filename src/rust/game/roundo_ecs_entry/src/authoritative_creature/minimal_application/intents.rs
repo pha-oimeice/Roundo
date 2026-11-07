@@ -28,7 +28,6 @@ pub struct MinimalLifeIntents<'w, 's> {
             LifeStateWriter<'w, 's, MovementCommandState>,
             LifeEventWriter<'w, 's, GazeCommandEvent>,
             LifeEventWriter<'w, 's, JumpCommandEvent>,
-            LifeEventWriter<'w, 's, BlockInteractionCommandEvent>,
         ),
     >,
 }
@@ -117,43 +116,6 @@ impl MinimalLifeIntents<'_, '_> {
         self.instances
             .with_body(entity, |body| {
                 writer.write_event(&body, members.life, JumpCommandEvent, 1)
-            })
-            .map_err(MinimalLifeSubmitError::Factory)?
-            .map_err(MinimalLifeSubmitError::Event)
-    }
-    /// Publishes an intention only. Readiness, world work and Recorder policy
-    /// do not participate in admission; an unread Event may expire normally.
-    pub fn destroy(&mut self, id: InteractionActivationId) -> Result<(), MinimalLifeSubmitError> {
-        self.interaction(id, BlockInteractionOperation::destroy())
-    }
-    pub fn place(
-        &mut self,
-        id: InteractionActivationId,
-        voxel: AtomicVoxelId,
-    ) -> Result<(), MinimalLifeSubmitError> {
-        let operation = BlockInteractionOperation::place(voxel)
-            .map_err(|_| MinimalLifeSubmitError::InvalidValue)?;
-        self.interaction(id, operation)
-    }
-    fn interaction(
-        &mut self,
-        id: InteractionActivationId,
-        operation: BlockInteractionOperation,
-    ) -> Result<(), MinimalLifeSubmitError> {
-        let members = self.subject(id)?;
-        let entity = self
-            .instances
-            .resolve_body(members.intent)
-            .map_err(MinimalLifeSubmitError::Factory)?;
-        let mut writer = self.data.p3();
-        self.instances
-            .with_body(entity, |body| {
-                writer.write_event(
-                    &body,
-                    members.life,
-                    BlockInteractionCommandEvent::new(operation),
-                    1,
-                )
             })
             .map_err(MinimalLifeSubmitError::Factory)?
             .map_err(MinimalLifeSubmitError::Event)

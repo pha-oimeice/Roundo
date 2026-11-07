@@ -25,7 +25,7 @@
 <script>
 let debugOpening = false;
 roundo.subscribe('client.input', async events => {
-  if (debugOpening || !events.some(event => event.slot === 'roundo.debug' && event.state === 'pressed')) return;
+  if (debugOpening || !events.some(event => event.function === 'roundo.debug' && event.state === 'pressed')) return;
   debugOpening = true;
   try { await roundo.execute({version: 1, command: 'ui.open', arguments: {import: 'debug'}}); }
   catch (error) { console.error(error); }

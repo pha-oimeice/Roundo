@@ -12,6 +12,7 @@
 "roundo.debug-life" = "debug-life"
 "roundo.debug-runtime" = "debug-runtime"
 "roundo.debug-inventory" = "debug-inventory"
+"roundo.debug-items" = "debug-items"
 
 [[resource]]
 name = "main-menu"
@@ -105,6 +106,8 @@ slot = "roundo.debug-life"
 slot = "roundo.debug-runtime"
 [resource.imports.inventory]
 slot = "roundo.debug-inventory"
+[resource.imports.items]
+slot = "roundo.debug-items"
 [resource.imports.settings]
 slot = "roundo.settings"
 
@@ -141,6 +144,20 @@ world_visibility = "visible"
 max_instances = 1
 presentation = "exclusive"
 layout = "fullscreen"
+[resource.imports.settings]
+slot = "roundo.settings"
+
+[[resource]]
+name = "debug-items"
+project = "debug"
+entry = "items.html"
+interaction_mode = "web-ui"
+world_visibility = "visible"
+max_instances = 1
+presentation = "exclusive"
+layout = "fullscreen"
+[resource.imports.inventory]
+slot = "roundo.debug-inventory"
 [resource.imports.settings]
 slot = "roundo.settings"
 

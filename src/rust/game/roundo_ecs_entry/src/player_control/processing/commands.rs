@@ -81,31 +81,6 @@ pub(super) fn publish_set_gaze(
         .is_ok_and(|result| result.is_ok())
 }
 
-pub(super) fn publish_interaction(
-    In((id, command)): In<(ControllerId, roundo_block_interaction::ItemUseCommandEvent)>,
-    routes: ControllerCommandRoutes,
-    mut events: LifeEventWriter<roundo_block_interaction::ItemUseCommandEvent>,
-) -> bool {
-    let Some(route) = routes.resolve(id) else {
-        return false;
-    };
-    if !route
-        .domain
-        .contains(roundo_controller::IntentKind::BlockInteraction)
-    {
-        return false;
-    }
-    let Ok(intent) = routes.instances.resolve_body(route.intent) else {
-        return false;
-    };
-    routes
-        .instances
-        .with_body(intent, |body| {
-            events.write_event(&body, route.life, command, 1)
-        })
-        .is_ok_and(|result| result.is_ok())
-}
-
 /// Preserves the old ordered, domain-scoped semantics: typed neutralization must
 /// succeed before clearing that domain's Action. This is not a cross-Slot atomic
 /// transaction; accepted State writes/cursor advances are not rolled back when
@@ -117,12 +92,6 @@ pub(super) struct CommandNeutralization<'w, 's> {
     gaze: LifeEventReader<'w, 's, GazeCommandEvent>,
     movement_actions: Query<'w, 's, &'static mut MovementAction>,
     gaze_actions: Query<'w, 's, &'static mut GazeAction>,
-    interactions: LifeEventReader<'w, 's, roundo_block_interaction::ItemUseCommandEvent>,
-    behaviors: Query<
-        'w,
-        's,
-        &'static mut crate::authoritative_creature::player_interaction::PlayerBlockBehaviors,
-    >,
 }
 
 impl CommandNeutralization<'_, '_> {
@@ -171,31 +140,6 @@ impl CommandNeutralization<'_, '_> {
                 return false;
             };
             *action = GazeAction::default();
-        }
-        if route
-            .domain
-            .contains(roundo_controller::IntentKind::BlockInteraction)
-        {
-            let drained = self
-                .routes
-                .instances
-                .with_body(execution, |body| {
-                    loop {
-                        match self.interactions.read_next_with(&body, route.life, |_| ()) {
-                            Ok(Some(())) => {}
-                            Ok(None) => return true,
-                            Err(_) => return false,
-                        }
-                    }
-                })
-                .is_ok_and(|result| result);
-            if !drained {
-                return false;
-            }
-            let Ok(mut work) = self.behaviors.get_mut(execution) else {
-                return false;
-            };
-            work.clear();
         }
         true
     }

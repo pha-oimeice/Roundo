@@ -155,7 +155,6 @@ impl ClientPlayerControllerAccess {
         let controller_id = match domain {
             ControllerIntentDomain::Movement => self.movement_controller(),
             ControllerIntentDomain::Gaze => self.gaze_controller(),
-            ControllerIntentDomain::BlockInteraction => self.block_interaction_controller(),
         }?;
         (self.is_controlled_by_self(controller_id) && !self.frozen.blocks(controller_id))
             .then_some(controller_id)
@@ -228,7 +227,6 @@ impl ClientPlayerControllerAccess {
         if self.active_epoch() != Some(epoch)
             || !(self.movement_controller() == Some(preparing.controller_id)
                 || self.gaze_controller() == Some(preparing.controller_id)
-                || self.block_interaction_controller() == Some(preparing.controller_id)
                 || self.ticket_bindings.movement_controller == Some(preparing.controller_id)
                 || self.ticket_bindings.gaze_controller == Some(preparing.controller_id))
             || !self.frozen.prepare(preparing)
@@ -236,9 +234,6 @@ impl ClientPlayerControllerAccess {
             return None;
         }
         self.revoke_bindings(preparing.controller_id, commands, rotation);
-        if self.block_interaction_controller() == Some(preparing.controller_id) {
-            commands.block_sequence = 0;
-        }
         if self.movement_controller() == Some(preparing.controller_id) {
             commands.movement = Default::default();
         }
@@ -266,8 +261,7 @@ impl ClientPlayerControllerAccess {
     ) -> Option<CreatureAuthorityUpdate> {
         if self.active_epoch() != Some(epoch)
             || !(self.movement_controller() == Some(controller_id)
-                || self.gaze_controller() == Some(controller_id)
-                || self.block_interaction_controller() == Some(controller_id))
+                || self.gaze_controller() == Some(controller_id))
             || !self.frozen.install(controller_id, request_id)
         {
             return None;
@@ -280,7 +274,6 @@ impl ClientPlayerControllerAccess {
             self.ticket_bindings.gaze = Some(binding);
             self.ticket_bindings.gaze_controller = Some(controller_id);
         }
-        // Block has no prediction binding slot, but install still marks its entry.
         Some(CreatureAuthorityUpdate::BindingInstalled {
             epoch,
             request_id,
@@ -298,8 +291,7 @@ impl ClientPlayerControllerAccess {
     ) -> bool {
         if self.active_epoch() != Some(epoch)
             || !(self.ticket_bindings.movement_controller == Some(controller_id)
-                || self.ticket_bindings.gaze_controller == Some(controller_id)
-                || self.block_interaction_controller() == Some(controller_id))
+                || self.ticket_bindings.gaze_controller == Some(controller_id))
             || !self.frozen.unfreeze(controller_id, request_id)
         {
             return false;
@@ -374,7 +366,6 @@ impl ClientPlayerControllerAccess {
         };
         let movement = select(ControllerIntentDomain::Movement);
         let gaze = select(ControllerIntentDomain::Gaze);
-        let block = select(ControllerIntentDomain::BlockInteraction);
         if self.gaze != gaze {
             rotation.discard_pending();
         }
@@ -382,7 +373,7 @@ impl ClientPlayerControllerAccess {
         self.gaze = gaze;
         self.snapshot = Some(snapshot);
         self.last_rejection = None;
-        [movement, gaze, block]
+        [movement, gaze]
             .into_iter()
             .flatten()
             .filter(|controller_id| {

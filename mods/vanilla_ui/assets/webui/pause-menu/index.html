@@ -53,7 +53,7 @@ async function leave() {
 }
 
 roundo.subscribe('client.input', events => {
-  if (events.some(event => event.slot === 'roundo.debug' && event.state === 'pressed')) openDebug();
+  if (events.some(event => event.function === 'roundo.debug' && event.state === 'pressed')) openDebug();
 });
 window.addEventListener('roundo:focus', event => {
   if (event.detail?.state === 'focused') focusMenu();

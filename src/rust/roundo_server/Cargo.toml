@@ -18,7 +18,6 @@ roundo_scene.workspace = true
 roundo_game_network_bridge = { workspace = true, default-features = false, features = ["server"] }
 roundo_ecs_entry = { workspace = true, features = ["server"] }
 roundo_local_coordinate.workspace = true
-roundo_block_interaction.workspace = true
 roundo_items.workspace = true
 roundo_marionette.workspace = true
 roundo_mod_loader.workspace = true
@@ -30,7 +29,6 @@ schemars.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sqlx.workspace = true
-toml.workspace = true
 
 [features]
 dev = ["roundo_ecs_entry/dev", "roundo_marionette/dev"]

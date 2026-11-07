@@ -109,6 +109,37 @@ impl TryFrom<BindingArguments> for ClientInputBindingConfig {
     }
 }
 
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(super) struct SlotArguments {
+    pub(super) slot: String,
+}
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(super) struct SlotNameArguments {
+    pub(super) slot: String,
+    pub(super) display_name: String,
+}
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(super) struct SlotFunctionArguments {
+    pub(super) slot: String,
+    pub(super) function: String,
+}
+#[derive(Serialize, JsonSchema)]
+pub(super) struct FunctionsListOutput {
+    pub(super) functions: Vec<FunctionDisplay>,
+}
+#[derive(Serialize, JsonSchema)]
+pub(super) struct FunctionDisplay {
+    pub(super) function: String,
+    pub(super) display_name: String,
+}
+#[derive(Serialize, JsonSchema)]
+pub(super) struct SlotsListOutput {
+    pub(super) slots: Vec<SupportedSlotDisplay>,
+}
+
 #[derive(Serialize, JsonSchema)]
 pub(super) struct BindingDisplay {
     pub(super) slot: String,
@@ -123,12 +154,14 @@ pub(super) struct SupportedKeyDisplay {
 pub(super) struct SupportedSlotDisplay {
     pub(super) slot: String,
     pub(super) display_name: String,
+    pub(super) functions: Vec<String>,
 }
 #[derive(Serialize, JsonSchema)]
 pub(super) struct BindingsListOutput {
     pub(super) bindings: Vec<BindingDisplay>,
     pub(super) supported_keys: Vec<SupportedKeyDisplay>,
     pub(super) supported_slots: Vec<SupportedSlotDisplay>,
+    pub(super) supported_functions: Vec<FunctionDisplay>,
 }
 #[derive(Serialize, JsonSchema)]
 pub(super) struct BindingMutationOutput {}
@@ -539,38 +572,65 @@ pub(super) fn settings_show_output(config: &ClientConfigStore) -> SettingsShowOu
     }
 }
 
-pub(super) fn validate_binding_slot(
-    binding: &ClientInputBindingConfig,
-    registry: Option<&InputRegistry>,
-) -> Result<(), roundo_cli::json_command::CommandError> {
-    if registry.is_some_and(|registry| !registry.contains_slot(&binding.slot)) {
-        return Err(roundo_cli::json_command::CommandError::new(
-            "unknown_input_slot",
-            format!("input slot `{}` is not registered", binding.slot),
-        ));
+pub(super) fn edit_input_configuration(
+    config: &mut ClientConfigStore,
+    registry: &InputFunctionRegistry,
+    edit: impl FnOnce(
+        &mut roundo_user_config::ClientSettingsConfig,
+    ) -> Result<(), roundo_cli::json_command::CommandError>,
+) -> Result<EmptyOutput, roundo_cli::json_command::CommandError> {
+    let mut settings = config.settings().clone();
+    edit(&mut settings)?;
+    crate::config::validate_input_configuration(&settings, registry).map_err(|error| {
+        roundo_cli::json_command::CommandError::new("invalid_input_configuration", error)
+    })?;
+    config.replace_input_settings(settings).map_err(|error| {
+        roundo_cli::json_command::CommandError::new("config_save_failed", error)
+    })?;
+    Ok(EmptyOutput {})
+}
+
+pub(super) fn slots_list_output(config: &ClientConfigStore) -> SlotsListOutput {
+    SlotsListOutput {
+        slots: config
+            .settings()
+            .input_slots
+            .iter()
+            .map(|(id, slot)| SupportedSlotDisplay {
+                slot: id.clone(),
+                display_name: slot.display_name.clone(),
+                functions: slot.functions.iter().cloned().collect(),
+            })
+            .collect(),
     }
-    Ok(())
+}
+
+pub(super) fn functions_list_output(registry: &InputFunctionRegistry) -> FunctionsListOutput {
+    FunctionsListOutput {
+        functions: registry
+            .functions()
+            .map(|(name, definition)| FunctionDisplay {
+                function: name.into(),
+                display_name: definition.display_name.clone(),
+            })
+            .collect(),
+    }
 }
 
 pub(super) fn bindings_list_output(
     config: &ClientConfigStore,
-    registry: Option<&InputRegistry>,
+    registry: &InputFunctionRegistry,
 ) -> BindingsListOutput {
     BindingsListOutput {
-        bindings: crate::config::effective_input_bindings(config.settings(), registry)
-            .expect("published binding configuration is valid")
+        bindings: config
+            .settings()
+            .input_bindings
             .iter()
             .map(binding_display)
             .collect(),
         supported_keys: supported_keys(),
-        supported_slots: registry
-            .into_iter()
-            .flat_map(InputRegistry::slots)
-            .map(|(slot, definition)| SupportedSlotDisplay {
-                slot: slot.into(),
-                display_name: definition.display_name.clone(),
-            })
-            .collect(),
+        supported_slots: slots_list_output(config).slots,
+        supported_functions: functions_list_output(registry).functions,
     }
 }
 
@@ -724,6 +784,55 @@ definition!(
     0
 );
 definition!(
+    SlotsListDefinition,
+    EmptyArguments,
+    SlotsListOutput,
+    "slots.list",
+    0
+);
+definition!(
+    SlotsCreateDefinition,
+    SlotNameArguments,
+    EmptyOutput,
+    "slots.create",
+    0
+);
+definition!(
+    SlotsRenameDefinition,
+    SlotNameArguments,
+    EmptyOutput,
+    "slots.rename",
+    0
+);
+definition!(
+    SlotsDeleteDefinition,
+    SlotArguments,
+    EmptyOutput,
+    "slots.delete",
+    0
+);
+definition!(
+    SlotsAssignDefinition,
+    SlotFunctionArguments,
+    EmptyOutput,
+    "slots.assign",
+    0
+);
+definition!(
+    SlotsUnassignDefinition,
+    SlotFunctionArguments,
+    EmptyOutput,
+    "slots.unassign",
+    0
+);
+definition!(
+    FunctionsListDefinition,
+    EmptyArguments,
+    FunctionsListOutput,
+    "functions.list",
+    0
+);
+definition!(
     BindingsListDefinition,
     EmptyArguments,
     BindingsListOutput,
@@ -824,6 +933,13 @@ pub(super) const CLIENT_COMMANDS: &[ClientCommandCatalogEntry] = &[
     ClientCommandCatalogEntry::of::<ServerStatusDefinition>(),
     ClientCommandCatalogEntry::of::<SettingsShowDefinition>(),
     ClientCommandCatalogEntry::of::<SettingsSetDefinition>(),
+    ClientCommandCatalogEntry::of::<SlotsListDefinition>(),
+    ClientCommandCatalogEntry::of::<SlotsCreateDefinition>(),
+    ClientCommandCatalogEntry::of::<SlotsRenameDefinition>(),
+    ClientCommandCatalogEntry::of::<SlotsDeleteDefinition>(),
+    ClientCommandCatalogEntry::of::<SlotsAssignDefinition>(),
+    ClientCommandCatalogEntry::of::<SlotsUnassignDefinition>(),
+    ClientCommandCatalogEntry::of::<FunctionsListDefinition>(),
     ClientCommandCatalogEntry::of::<BindingsListDefinition>(),
     ClientCommandCatalogEntry::of::<BindingsBindDefinition>(),
     ClientCommandCatalogEntry::of::<BindingsUnbindDefinition>(),

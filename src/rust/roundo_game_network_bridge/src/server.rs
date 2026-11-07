@@ -464,7 +464,6 @@ impl ServerHooks for ServerHooksAdapter {
                     }
                     roundo_contracts::DirectedControllerInput::Gaze(command) => command.sequence,
                     roundo_contracts::DirectedControllerInput::SetGaze(command) => command.sequence,
-                    roundo_contracts::DirectedControllerInput::UseItem(command) => command.sequence,
                 };
                 let queued = self
                     .player_control_ipc

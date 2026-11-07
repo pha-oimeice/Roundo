@@ -86,7 +86,6 @@ pub fn remove_ai(world: &mut World, ai: AiControllerId) -> Result<usize, Control
 pub enum IntentKind {
     Movement,
     Gaze,
-    BlockInteraction,
 }
 
 /// Immutable non-empty set of Intent kinds emitted by one Controller.
@@ -96,12 +95,6 @@ pub struct IntentDomain(u8);
 impl IntentDomain {
     const MOVEMENT: u8 = 1;
     const GAZE: u8 = 2;
-    const BLOCK_INTERACTION: u8 = 4;
-
-    pub const fn block_interaction() -> Self {
-        Self(Self::BLOCK_INTERACTION)
-    }
-
     /// The singleton domain for movement intents.
     pub const fn movement() -> Self {
         Self(Self::MOVEMENT)
@@ -119,7 +112,6 @@ impl IntentDomain {
             bits |= match kind {
                 IntentKind::Movement => Self::MOVEMENT,
                 IntentKind::Gaze => Self::GAZE,
-                IntentKind::BlockInteraction => Self::BLOCK_INTERACTION,
             };
         }
         if bits == 0 {
@@ -132,7 +124,6 @@ impl IntentDomain {
         let bit = match kind {
             IntentKind::Movement => Self::MOVEMENT,
             IntentKind::Gaze => Self::GAZE,
-            IntentKind::BlockInteraction => Self::BLOCK_INTERACTION,
         };
         self.0 & bit != 0
     }

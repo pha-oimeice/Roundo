@@ -4,10 +4,9 @@ use super::*;
 #[cfg(feature = "dev")]
 use crate::character_controller::test_creature::route_spawn_test_creature;
 use crate::character_controller::{
-    ClientInputFrame, SPIRIT_CAMERA_INPUT_SLOT,
-    block_interaction::route_gaze_and_block_interactions,
+    ClientFunctionFrame, SPIRIT_CAMERA_FUNCTION,
     movement::{move_spirit_camera, route_player_movement},
-    rotation::{ClientRotationSyncState, rotate_camera},
+    rotation::{ClientRotationSyncState, rotate_camera, route_current_gaze},
 };
 use bevy::prelude::{
     Camera, IntoScheduleConfigs, MessageReader, MessageWriter, Query, Res, ResMut, Transform,
@@ -20,7 +19,7 @@ impl Plugin for MarionetteClientPlugin {
         app.init_resource::<ClientPlayerController>()
             .init_resource::<ClientPlayerControllerAccess>()
             .init_resource::<ClientMarionetteInputSettings>()
-            .add_message::<ClientInputFrame>()
+            .add_message::<ClientFunctionFrame>()
             .init_resource::<AuthoritativePlayerState>()
             .init_resource::<ClientControllerCommandState>()
             .init_resource::<ClientRotationSyncState>()
@@ -42,7 +41,7 @@ impl Plugin for MarionetteClientPlugin {
                     rotate_camera,
                     move_spirit_camera,
                     route_player_movement,
-                    route_gaze_and_block_interactions,
+                    route_current_gaze,
                 )
                     .chain()
                     .in_set(MarionetteClientSet::Input),
@@ -51,7 +50,7 @@ impl Plugin for MarionetteClientPlugin {
         app.add_systems(
             Update,
             route_spawn_test_creature
-                .after(route_gaze_and_block_interactions)
+                .after(route_current_gaze)
                 .in_set(MarionetteClientSet::Input),
         );
     }
@@ -258,14 +257,14 @@ fn process_server_commands(
 
 // The registered spirit-camera action changes only the local projection mode.
 fn toggle_spirit_walking(
-    mut inputs: MessageReader<ClientInputFrame>,
+    mut inputs: MessageReader<ClientFunctionFrame>,
     authoritative: Res<AuthoritativePlayerState>,
     mut controller: ResMut<ClientPlayerController>,
     mut rotation_sync: ResMut<ClientRotationSyncState>,
     mut cameras: Query<&mut Transform, With<Camera>>,
 ) {
     let input = inputs.read().last().cloned().unwrap_or_default();
-    if !controller.input_enabled || !input.just_pressed(SPIRIT_CAMERA_INPUT_SLOT) {
+    if !controller.input_enabled || !input.just_pressed(SPIRIT_CAMERA_FUNCTION) {
         return;
     }
     let Some(camera) = controller.camera else {

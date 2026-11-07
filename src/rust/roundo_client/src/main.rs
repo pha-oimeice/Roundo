@@ -45,7 +45,7 @@ fn main() {
         .register(
             roundo_mod_loader::INPUT_RESOURCE_TYPE,
             &[],
-            roundo_marionette::InputRegistry::load,
+            roundo_marionette::InputFunctionRegistry::load,
         )
         .load(
             &mods_root,
@@ -70,9 +70,9 @@ fn main() {
         .take::<roundo_webui::UiRegistry>(roundo_mod_loader::WEB_UI_RESOURCE_TYPE)
         .expect("Web UI Resource Type must be published");
     let input_registry = resources
-        .take::<roundo_marionette::InputRegistry>(roundo_mod_loader::INPUT_RESOURCE_TYPE)
+        .take::<roundo_marionette::InputFunctionRegistry>(roundo_mod_loader::INPUT_RESOURCE_TYPE)
         .expect("Input Resource Type must be published");
-    config::effective_input_bindings(&settings, Some(&input_registry))
+    config::validate_input_configuration(&settings, &input_registry)
         .unwrap_or_else(|error| panic!("invalid configured input binding: {error}"));
     let resource_fingerprint = roundo_contracts::ResourceCatalogFingerprint(voxels.fingerprint());
     let (mut app, ecs) = ClientEcsRuntime::new(voxels).into_parts();

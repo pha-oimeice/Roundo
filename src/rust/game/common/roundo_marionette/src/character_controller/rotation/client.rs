@@ -5,18 +5,12 @@ use crate::character_controller::client::{
     ClientMarionetteEvent, ClientPipeResource, ClientPlayerController,
     ClientPlayerControllerAccess, LocallyRoutedControllerIntent,
 };
-use crate::character_controller::{ClientInputFrame, LOOK_INPUT_SLOT};
+use crate::character_controller::{ClientFunctionFrame, LOOK_FUNCTION};
 use bevy::prelude::{
     Camera, EulerRot, MessageReader, MessageWriter, Query, Res, ResMut, Resource, Time, Transform,
     With,
 };
 use roundo_contracts::PlayerControllerCommand;
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum RotationUploadMode {
-    RateLimited,
-    Flush,
-}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum RotationUploadOutcome {
@@ -63,7 +57,7 @@ impl ClientRotationSyncState {
 
 /// Applies accumulated mouse motion and marks authoritative rotation dirty.
 pub(crate) fn rotate_camera(
-    mut inputs: MessageReader<ClientInputFrame>,
+    mut inputs: MessageReader<ClientFunctionFrame>,
     settings: Res<crate::character_controller::client::ClientMarionetteInputSettings>,
     controller: Res<ClientPlayerController>,
     access: Option<Res<ClientPlayerControllerAccess>>,
@@ -80,11 +74,7 @@ pub(crate) fn rotate_camera(
     let Ok(mut transform) = cameras.get_mut(camera) else {
         return;
     };
-    let delta = input
-        .motion
-        .get(LOOK_INPUT_SLOT)
-        .copied()
-        .unwrap_or_default();
+    let delta = input.motion.get(LOOK_FUNCTION).copied().unwrap_or_default();
     let yaw_delta = -delta.x * settings.mouse_sensitivity;
     let pitch_delta = -delta.y * settings.mouse_sensitivity;
     if !apply_camera_rotation(&mut transform, yaw_delta, pitch_delta) {
@@ -101,14 +91,35 @@ pub(crate) fn rotate_camera(
     }
 }
 
+/// Routes only gaze. Item selection must come from an explicit gameplay model,
+/// not from a shared test-instance ID in the Controller access snapshot.
+pub(crate) fn route_current_gaze(
+    controller: Res<ClientPlayerController>,
+    access: Res<ClientPlayerControllerAccess>,
+    pipe: Res<ClientPipeResource>,
+    time: Res<Time>,
+    mut rotation_sync: ResMut<ClientRotationSyncState>,
+    mut routed_intents: MessageWriter<LocallyRoutedControllerIntent>,
+    cameras: Query<&Transform, With<Camera>>,
+) {
+    synchronize_current_rotation(
+        &time,
+        &controller,
+        &access,
+        &pipe,
+        &mut rotation_sync,
+        &mut routed_intents,
+        &cameras,
+    );
+}
+
 /// Uploads the current absolute rotation, preserving pending and sequence on failure.
-pub(crate) fn synchronize_current_rotation(
+fn synchronize_current_rotation(
     time: &Time,
     controller: &ClientPlayerController,
     access: &ClientPlayerControllerAccess,
     pipe: &ClientPipeResource,
     rotation_sync: &mut ClientRotationSyncState,
-    mode: RotationUploadMode,
     routed_intents: &mut MessageWriter<LocallyRoutedControllerIntent>,
     cameras: &Query<&Transform, With<Camera>>,
 ) -> RotationUploadOutcome {
@@ -121,13 +132,11 @@ pub(crate) fn synchronize_current_rotation(
         return RotationUploadOutcome::NotEligible;
     };
     rotation_sync.elapsed_secs += time.delta_secs();
-    if mode == RotationUploadMode::RateLimited {
-        if !rotation_sync.pending {
-            return RotationUploadOutcome::Idle;
-        }
-        if rotation_sync.elapsed_secs < ROTATION_SYNC_INTERVAL_SECS {
-            return RotationUploadOutcome::Throttled;
-        }
+    if !rotation_sync.pending {
+        return RotationUploadOutcome::Idle;
+    }
+    if rotation_sync.elapsed_secs < ROTATION_SYNC_INTERVAL_SECS {
+        return RotationUploadOutcome::Throttled;
     }
     let Some(camera) = controller.camera else {
         return RotationUploadOutcome::CameraUnavailable;

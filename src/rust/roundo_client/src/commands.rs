@@ -20,12 +20,14 @@ use bevy::{
 use roundo_cli::{
     CommandDefinition, TerminalInput, UnixCommand, UnixCommandParseError, UnixCommandRegistry,
 };
-use roundo_marionette::{ClientPlayerController, InputRegistry};
+use roundo_marionette::{ClientPlayerController, InputFunctionRegistry};
 use roundo_toolbox::request_response_pipe::{
     CommandTransport, ContextualJsonRequestResponseIo, JsonSubmitError, RequestCall,
     RequestResponsePipe, ResponsePoll,
 };
-use roundo_user_config::{ClientInputBindingConfig, ClientInputKey, ServerEntry};
+use roundo_user_config::{
+    ClientInputBindingConfig, ClientInputKey, ClientInputSlotConfig, ServerEntry,
+};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::{cell::RefCell, collections::VecDeque, process::Command};
@@ -224,6 +226,11 @@ fn configure(app: &mut App) {
     if !app.world().contains_resource::<ClientConfigStore>() {
         app.insert_resource(ClientConfigStore::new(crate::config::load_config()));
     }
+    crate::config::validate_input_configuration(
+        app.world().resource::<ClientConfigStore>().settings(),
+        app.world().resource::<InputFunctionRegistry>(),
+    )
+    .unwrap_or_else(|error| panic!("invalid client shortcut configuration: {error}"));
     app.init_resource::<DevLevel>();
     app.init_resource::<HudCache>();
     app.init_resource::<ClientDataSyncState>();
@@ -256,7 +263,7 @@ fn process_json_commands(
     mut navigation: Option<bevy::ecs::system::NonSendMut<roundo_webui::UiNavigationExecutor>>,
     mut scene: Option<ResMut<crate::scene::ClientSceneManager>>,
     hud: Res<HudCache>,
-    input_registry: Option<Res<InputRegistry>>,
+    input_registry: Res<InputFunctionRegistry>,
 ) {
     for _ in 0..MAX_JSON_COMMANDS_PER_UPDATE {
         let Some((transport, reply)) = pipe.try_receive() else {
@@ -279,7 +286,7 @@ fn process_json_commands(
             navigation: navigation.as_deref_mut(),
             scene: scene.as_deref_mut(),
             hud: &hud,
-            input_registry: input_registry.as_deref(),
+            input_registry: &input_registry,
         }
         .execute(request, ui_source, reply);
         if quit_accepted {

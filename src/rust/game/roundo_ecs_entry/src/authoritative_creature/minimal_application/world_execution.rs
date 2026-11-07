@@ -1,5 +1,5 @@
-//! World readiness and behavior are Execution concerns, not Command admission
-//! or Recorder policy. No request/response mapping is kept back to Intent.
+//! Movement readiness only. This adapter does not select block targets, consume
+//! block-operation commands or submit voxel edits.
 use super::*;
 
 pub(super) fn refresh_readiness(
@@ -92,14 +92,11 @@ fn required_region(
     }
     let inverse = affine.inverse();
     let p = entry.parameters.0;
-    let aabb = p.viewpoint.aabb();
-    // Covers any gaze produced this tick, the whole AABB and the configured
-    // maximum sweep, not just the destination. Transform all eight region corners.
-    let radius = aabb.center_offset().length()
-        + aabb.half_extents().length()
-        + p.maximum_sweep_distance
-        + p.viewpoint.eye_offset().length()
-        + p.viewpoint.maximum_distance();
+    let aabb = p.aabb;
+    // Cover the whole AABB and the configured maximum movement sweep.
+    // No interaction reach or camera ray contributes to physics demand.
+    let radius =
+        aabb.center_offset().length() + aabb.half_extents().length() + p.maximum_sweep_distance;
     let mut minimum = Vec3::splat(f32::INFINITY);
     let mut maximum = Vec3::splat(f32::NEG_INFINITY);
     for x in [-1.0, 1.0] {
@@ -135,146 +132,4 @@ fn required_region(
         .physics_demands()
         .region(chunk(minimum, -1)?, chunk(maximum, 1)?)
         .ok()
-}
-
-pub(super) fn execute_interactions(
-    instances: LifeInstances,
-    routes: FactoryMotionRoutes<CreatureAssemblyRegistry>,
-    motions: FactoryMotionExecutions<CreatureAssemblyRegistry>,
-    apps: Res<Applications>,
-    owners: Query<&ApplicationOwner>,
-    coordinates: Query<&GlobalTransform>,
-    registry: Option<Res<AtomicVoxelRegistry>>,
-    mut commands: LifeEventReader<BlockInteractionCommandEvent>,
-    mut world: ParamSet<(VoxelRaycaster, LocalVoxelEdits)>,
-) {
-    // Order applications deterministically; per-Life Destroy/Place retain their
-    // native FIFO order. No other host's LC head is drained or bypassed.
-    let mut ids = apps.entries.keys().copied().collect::<Vec<_>>();
-    ids.sort_by_key(|id| {
-        instances
-            .resolve_body(apps.entries[id].members.execution)
-            .ok()
-    });
-    for id in ids {
-        let entry = &apps.entries[&id];
-        if entry.status != MinimalLifeStatus::Active
-            || !entry.parameters.0.edit_permission
-            || !routes.is_live(entry.members.motion_route())
-        {
-            continue;
-        }
-        let Ok(entity) = instances.resolve_body(entry.members.execution) else {
-            continue;
-        };
-        if owners.get(entity).map(|owner| owner.0).ok() != Some(id) {
-            continue;
-        }
-        let Some(motion) = motions.executed_motion(entry.members.motion_route()) else {
-            continue;
-        };
-        let Ok(ray) = entry.parameters.0.viewpoint.ray(motion.experience()) else {
-            continue;
-        };
-        let limit = entry.parameters.0.interaction.limits();
-        let mut edits = 0;
-        for _ in 0..limit.consume_per_tick {
-            if edits >= limit.edits_per_tick || !world.p1().can_submit_and_commit() {
-                break;
-            }
-            let value = instances.with_body(entity, |body| {
-                commands.read_next_with(&body, entry.members.life, |value| value.operation())
-            });
-            let Ok(Ok(Some(operation))) = value else {
-                break;
-            };
-            let Some(hit) = world
-                .p0()
-                .cast(ray, entry.parameters.0.viewpoint.maximum_distance())
-            else {
-                continue;
-            };
-            if hit.chunk.local_coordinate_entity() != entry.coordinate.entity() {
-                continue;
-            }
-            let position = if operation.is_destroy() {
-                hit.voxel_position()
-            } else {
-                hit.previous_voxel_position
-            };
-            if !operation.is_destroy() {
-                if !registry
-                    .as_ref()
-                    .is_some_and(|voxels| voxels.permits_placement(operation.replacement()))
-                {
-                    continue;
-                }
-                let Ok(transform) = coordinates.get(entry.coordinate.entity()) else {
-                    continue;
-                };
-                if intersects_aabb(
-                    position,
-                    transform,
-                    motion.experience(),
-                    entry.parameters.0.viewpoint.aabb(),
-                ) {
-                    continue;
-                }
-            }
-            let mut local = world.p1();
-            let Ok(target) = local.observe(entry.coordinate, position) else {
-                continue;
-            };
-            if !operation.is_destroy() && target.expected().voxel != EMPTY_VOXEL_ID {
-                continue;
-            }
-            let Ok(edit) = local.submit(target, operation.replacement()) else {
-                continue;
-            };
-            // Irreversible boundary: revalidate now, not through a retained
-            // admission token or Command lifetime. No callbacks run in between.
-            let eligible = entry.status == MinimalLifeStatus::Active
-                && entry.parameters.0.edit_permission
-                && routes.is_live(entry.members.motion_route())
-                && owners.get(entity).map(|owner| owner.0).ok() == Some(id);
-            let completion = if eligible {
-                local.commit_front(edit)
-            } else {
-                local.reject_front(edit, VoxelEditRejection::NotEligible)
-            };
-            completion.expect("same-system LC work reservation must terminalize its exact head");
-            // Claim the actual world result, including failures, releasing the
-            // LC slot. An empty Recorder neither reads nor keeps this fact.
-            local
-                .take_completion(edit)
-                .expect("exact LC completion is retained until claim");
-            edits += 1;
-        }
-    }
-}
-
-pub(in crate::authoritative_creature) fn intersects_aabb(
-    position: IVec3,
-    coordinate: &GlobalTransform,
-    motion: CreatureMotionExperienceState,
-    aabb: AabbDimensions,
-) -> bool {
-    // Conservative policy for transformed voxel boxes: false negatives are
-    // forbidden; rejecting a near-AABB placement is preferable to overlap.
-    let mut minimum = Vec3::splat(f32::INFINITY);
-    let mut maximum = Vec3::splat(f32::NEG_INFINITY);
-    for x in [0.0, 1.0] {
-        for y in [0.0, 1.0] {
-            for z in [0.0, 1.0] {
-                let point = coordinate
-                    .affine()
-                    .transform_point3(position.as_vec3() + Vec3::new(x, y, z));
-                minimum = minimum.min(point);
-                maximum = maximum.max(point);
-            }
-        }
-    }
-    let center = aabb.center_at(Vec3::from_array(*motion.translation()));
-    let extent = aabb.half_extents();
-    minimum.cmple(center + extent).all() && maximum.cmpge(center - extent).all()
 }

@@ -152,7 +152,7 @@ pub(super) fn sync_subscribed_client_data(
     network: Res<crate::network::ClientNetworkManager>,
     hud: Res<HudCache>,
     access: Res<roundo_marionette::ClientPlayerControllerAccess>,
-    input_registry: Option<Res<InputRegistry>>,
+    input_registry: Res<InputFunctionRegistry>,
     mut sync: ResMut<ClientDataSyncState>,
     mut navigation: Option<bevy::ecs::system::NonSendMut<roundo_webui::UiNavigationExecutor>>,
 ) {
@@ -174,7 +174,7 @@ pub(super) fn sync_subscribed_client_data(
         &config,
         &network,
         &hud,
-        input_registry.as_deref(),
+        &input_registry,
         &mut sync,
         navigation,
     );
@@ -185,7 +185,7 @@ fn sync_client_data_update(
     config: &ClientConfigStore,
     network: &crate::network::ClientNetworkManager,
     hud: &HudCache,
-    input_registry: Option<&InputRegistry>,
+    input_registry: &InputFunctionRegistry,
     sync: &mut ClientDataSyncState,
     sink: &mut impl ClientDataSink,
 ) {

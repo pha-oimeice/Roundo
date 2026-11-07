@@ -2,13 +2,13 @@
 //! bindings and emit Bevy messages; no Mod UI action is implemented here.
 
 use bevy::{input::mouse::AccumulatedMouseMotion, prelude::*};
-use roundo_marionette::{ClientInputFrame, InputRegistry, MarionetteClientSet};
+use roundo_marionette::{ClientFunctionFrame, InputFunctionRegistry, MarionetteClientSet};
 use roundo_user_config::ClientInputKey;
 use roundo_webui::{
     UiHostDocumentScript, UiInstanceId, UiLifecycleManager, UiNavigationExecutor, WebUiSystemSet,
 };
 use serde::Deserialize;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, SystemSet)]
 pub enum ClientInputSet {
@@ -24,6 +24,7 @@ pub struct ClientEscape;
 struct UiInputAction {
     target: UiInstanceId,
     slot: String,
+    functions: BTreeSet<String>,
     value: InputActionValue,
 }
 
@@ -45,13 +46,25 @@ impl InputActionValue {
     }
 }
 
+#[derive(Clone, Default)]
+struct SlotInputFrame {
+    held: BTreeSet<String>,
+    pressed: BTreeSet<String>,
+    released: BTreeSet<String>,
+    motion: BTreeMap<String, Vec2>,
+}
+
 #[derive(Default, Resource)]
 struct CapturedInput {
     held: BTreeSet<String>,
     blocked: BTreeSet<ClientInputKey>,
     host_active: bool,
     escape_blocked: bool,
-    frame: ClientInputFrame,
+    frame: SlotInputFrame,
+    routes: BTreeMap<String, BTreeSet<String>>,
+    document_held: BTreeSet<ClientInputKey>,
+    document_target: Option<UiInstanceId>,
+    bindings: Vec<roundo_user_config::ClientInputBindingConfig>,
 }
 
 pub struct ClientInputPlugin;
@@ -107,18 +120,40 @@ fn collect_input(
     motion: Res<AccumulatedMouseMotion>,
     windows: Query<&Window, With<bevy::window::PrimaryWindow>>,
     config: Res<crate::server_list::ClientConfigStore>,
-    registry: Res<InputRegistry>,
+    registry: Res<InputFunctionRegistry>,
     ui: Res<UiLifecycleManager>,
     mut navigation: NonSendMut<UiNavigationExecutor>,
     mut captured: ResMut<CapturedInput>,
     mut escape: MessageWriter<ClientEscape>,
     mut ui_actions: MessageWriter<UiInputAction>,
 ) {
-    let bindings = crate::config::effective_input_bindings(config.settings(), Some(&registry))
-        .expect("input defaults and user bindings were validated before startup");
+    let bindings = &config.settings().input_bindings;
+    let routes: BTreeMap<_, _> = config
+        .settings()
+        .input_slots
+        .iter()
+        .map(|(id, slot)| (id.clone(), slot.functions.clone()))
+        .collect();
+    let functions = |slot: &str| {
+        crate::config::resolve_slot_functions(config.settings(), &registry, slot)
+            .expect("published shortcut references are valid")
+            .clone()
+    };
+    if captured.routes != routes || captured.bindings != *bindings {
+        // Editing routes cannot reinterpret an already-held hardware input as
+        // a fresh activation of a different function. Release before readmission.
+        let blocked: Vec<_> = bindings
+            .iter()
+            .chain(&captured.bindings)
+            .filter(|binding| physical(binding.key).pressed(&keys, &buttons))
+            .map(|binding| binding.key)
+            .collect();
+        captured.blocked.extend(blocked);
+        captured.bindings = bindings.clone();
+    }
     let host_active =
         windows.iter().any(|window| window.focused) && navigation.host_has_keyboard_focus();
-    let mut frame = ClientInputFrame::default();
+    let mut frame = SlotInputFrame::default();
     if host_active {
         if !captured.host_active {
             // Never reinterpret a held document shortcut as a fresh host press
@@ -137,7 +172,7 @@ fn collect_input(
         if !keys.pressed(KeyCode::Escape) && !keys.just_pressed(KeyCode::Escape) {
             captured.escape_blocked = false;
         }
-        for binding in &bindings {
+        for binding in bindings {
             if captured.blocked.contains(&binding.key) {
                 continue;
             }
@@ -174,6 +209,7 @@ fn collect_input(
             ui_actions.write(UiInputAction {
                 target,
                 slot: slot.clone(),
+                functions: functions(slot),
                 value: InputActionValue::Pressed,
             });
         }
@@ -181,6 +217,11 @@ fn collect_input(
             ui_actions.write(UiInputAction {
                 target,
                 slot: slot.clone(),
+                functions: captured
+                    .routes
+                    .get(slot)
+                    .cloned()
+                    .unwrap_or_else(|| functions(slot)),
                 value: InputActionValue::Released,
             });
         }
@@ -188,6 +229,7 @@ fn collect_input(
             ui_actions.write(UiInputAction {
                 target,
                 slot: slot.clone(),
+                functions: functions(slot),
                 value: InputActionValue::Motion {
                     delta: delta.to_array(),
                 },
@@ -196,6 +238,11 @@ fn collect_input(
     }
     captured.held = frame.held.clone();
     captured.frame = frame;
+    captured.routes = routes;
+    if captured.document_target != target {
+        captured.document_held.clear();
+        captured.document_target = target;
+    }
 
     for (source, payload) in navigation.take_document_messages() {
         // Native transport already checks exact document proof; input additionally
@@ -220,18 +267,20 @@ fn collect_input(
             if !x.is_finite() || !y.is_finite() {
                 continue;
             }
-            for binding in &bindings {
+            for binding in bindings {
                 if matches!(physical(binding.key), PhysicalInput::Motion) {
                     ui_actions.write(UiInputAction {
                         target: source,
                         slot: binding.slot.clone(),
+                        functions: functions(&binding.slot),
                         value: InputActionValue::Motion { delta: [*x, *y] },
                     });
                 }
             }
             continue;
         }
-        for binding in &bindings {
+        let previous = captured.document_held.clone();
+        for binding in bindings {
             let matched = match &input {
                 DocumentInput::Key { code, pressed } => (physical(binding.key).code().as_deref()
                     == Some(code.as_str()))
@@ -244,12 +293,26 @@ fn collect_input(
             if let Some(pressed) = matched {
                 if pressed {
                     captured.blocked.insert(binding.key);
+                    captured.document_held.insert(binding.key);
                 } else {
                     captured.blocked.remove(&binding.key);
+                    captured.document_held.remove(&binding.key);
                 }
+            }
+        }
+        // Releasing one key must not release a slot held by another key.
+        for slot in config.settings().input_slots.keys() {
+            let held = |keys: &BTreeSet<ClientInputKey>| {
+                bindings
+                    .iter()
+                    .any(|binding| binding.slot == *slot && keys.contains(&binding.key))
+            };
+            let pressed = held(&captured.document_held);
+            if held(&previous) != pressed {
                 ui_actions.write(UiInputAction {
                     target: source,
-                    slot: binding.slot.clone(),
+                    slot: slot.clone(),
+                    functions: functions(slot),
                     value: InputActionValue::button(pressed),
                 });
             }
@@ -264,9 +327,13 @@ fn forward_ui_input(
 ) {
     let mut batches = std::collections::BTreeMap::<UiInstanceId, Vec<serde_json::Value>>::new();
     for action in actions.read() {
-        let mut payload = serde_json::to_value(&action.value).expect("semantic input serializes");
-        payload["slot"] = serde_json::Value::String(action.slot.clone());
-        batches.entry(action.target).or_default().push(payload);
+        for function in &action.functions {
+            let mut payload =
+                serde_json::to_value(&action.value).expect("semantic input serializes");
+            payload["slot"] = serde_json::Value::String(action.slot.clone());
+            payload["function"] = serde_json::Value::String(function.clone());
+            batches.entry(action.target).or_default().push(payload);
+        }
     }
     for (target, actions) in batches {
         navigation.publish_event(target, "client.input", &serde_json::Value::Array(actions));
@@ -276,15 +343,52 @@ fn forward_ui_input(
 fn forward_gameplay_input(
     captured: Res<CapturedInput>,
     projection: Res<crate::scene::ClientSceneProjection>,
-    mut frames: MessageWriter<ClientInputFrame>,
+    config: Res<crate::server_list::ClientConfigStore>,
+    registry: Res<InputFunctionRegistry>,
+    mut previous: Local<BTreeSet<String>>,
+    mut frames: MessageWriter<ClientFunctionFrame>,
 ) {
-    // Always publish, including empty frames: suppressed input must clear held
-    // intent instead of being replayed when a UI closes or focus returns.
-    frames.write(if projection.gameplay_input {
-        captured.frame.clone()
-    } else {
-        ClientInputFrame::default()
-    });
+    let mut frame = ClientFunctionFrame::default();
+    if projection.gameplay_input {
+        for slot in &captured.frame.held {
+            frame.held.extend(
+                crate::config::resolve_slot_functions(config.settings(), &registry, slot)
+                    .expect("published shortcut references are valid")
+                    .iter()
+                    .cloned(),
+            );
+        }
+        for slot in &captured.frame.pressed {
+            for function in
+                crate::config::resolve_slot_functions(config.settings(), &registry, slot)
+                    .expect("published shortcut references are valid")
+            {
+                if !previous.contains(function) {
+                    frame.pressed.insert(function.clone());
+                }
+            }
+        }
+        for (slot, delta) in &captured.frame.motion {
+            for function in
+                crate::config::resolve_slot_functions(config.settings(), &registry, slot)
+                    .expect("published shortcut references are valid")
+            {
+                // One mouse sample must not multiply through multiple slots.
+                frame.motion.entry(function.clone()).or_insert(*delta);
+            }
+        }
+    }
+    frame
+        .pressed
+        .extend(frame.held.difference(&previous).cloned());
+    frame
+        .released
+        .extend(previous.difference(&frame.held).cloned());
+    frame
+        .released
+        .extend(frame.pressed.difference(&frame.held).cloned());
+    *previous = frame.held.clone();
+    frames.write(frame);
 }
 
 fn clear_background_focus(

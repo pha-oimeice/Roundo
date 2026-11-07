@@ -4,20 +4,18 @@
 //! without invalidating the probe batch and advancing the snapshot revision.
 //! Persistence errors do not roll back an accepted in-memory edit.
 
-use roundo_user_config::{ClientConfig, ClientSettingsConfig, ServerEntry};
+use roundo_user_config::{ClientConfig, ClientSettingsConfig, ConfigDirectory, ServerEntry};
 use schemars::JsonSchema;
 use serde::Serialize;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
-
-const CLIENT_CONFIG_FILE: &str = "roundo-client-config.toml";
 
 /// One authoritative client configuration and its server-list runtime state.
 /// Settings remain independently editable; no caller receives mutable list access.
 #[derive(bevy::prelude::Resource)]
 pub(crate) struct ClientConfigStore {
     config: ClientConfig,
-    config_file: String,
+    config_directory: ConfigDirectory,
     probes: Arc<Mutex<ProbeBatch>>,
     probe: Box<dyn ServerProbe>,
 }
@@ -120,23 +118,17 @@ pub(crate) enum ServerListError {
 
 impl ClientConfigStore {
     pub(crate) fn new(config: ClientConfig) -> Self {
-        Self::with_config_file(config, CLIENT_CONFIG_FILE)
-    }
-
-    /// Uses the normal executable-root writer; an absolute filename selects an
-    /// explicit file; persistence still uses the normal writer and failure semantics.
-    pub(crate) fn with_config_file(config: ClientConfig, file: impl Into<String>) -> Self {
-        Self::with_probe(config, file, QuicProbe)
+        Self::with_probe(config, ConfigDirectory::executable(), QuicProbe)
     }
 
     pub(crate) fn with_probe(
         config: ClientConfig,
-        file: impl Into<String>,
+        config_directory: ConfigDirectory,
         probe: impl ServerProbe,
     ) -> Self {
         Self {
             config,
-            config_file: file.into(),
+            config_directory,
             probes: Arc::default(),
             probe: Box::new(probe),
         }
@@ -150,21 +142,22 @@ impl ClientConfigStore {
         &mut self.config.settings
     }
 
-    pub(crate) fn save(&self) -> Result<(), String> {
-        roundo_user_config::save_config(&self.config_file, &self.config)
+    /// Writes only the explicitly edited setting, not other normalized values.
+    pub(crate) fn save_setting(&self, key: &str) -> Result<(), String> {
+        self.config_directory
+            .save_client_setting(key, &self.config.settings)
     }
 
-    /// Preserves the existing persist-before-publish policy for binding replacement.
-    /// The candidate includes the current server list; no stale config clone can
-    /// replace a newer list or its probe state.
-    pub(crate) fn replace_settings(
+    /// Persists validated slots and bindings together before publishing them.
+    /// Other settings, the server list and probe state are neither written nor
+    /// replaced by this operation.
+    pub(crate) fn replace_input_settings(
         &mut self,
         settings: ClientSettingsConfig,
     ) -> Result<(), String> {
-        let mut candidate = self.config.clone();
-        candidate.settings = settings;
-        roundo_user_config::save_config(&self.config_file, &candidate)?;
-        self.config.settings = candidate.settings;
+        self.config_directory.save_client_input(&settings)?;
+        self.config.settings.input_slots = settings.input_slots;
+        self.config.settings.input_bindings = settings.input_bindings;
         Ok(())
     }
 
@@ -180,7 +173,7 @@ impl ClientConfigStore {
         validate(&server, "name and address are required")?;
         let index = self.config.servers.len();
         self.config.servers.push(server);
-        self.server_list_changed()?;
+        self.server_list_changed(index, None, self.config.servers.get(index))?;
         Ok(index)
     }
 
@@ -195,19 +188,24 @@ impl ClientConfigStore {
             .servers
             .get_mut(index)
             .ok_or(ServerListError::IndexOutOfRange)?;
-        *existing = server;
-        self.server_list_changed()
+        let previous = std::mem::replace(existing, server);
+        self.server_list_changed(index, Some(&previous), self.config.servers.get(index))
     }
 
     pub(crate) fn delete_server(&mut self, index: usize) -> Result<(), ServerListError> {
         if index >= self.config.servers.len() {
             return Err(ServerListError::IndexOutOfRange);
         }
-        self.config.servers.remove(index);
-        self.server_list_changed()
+        let previous = self.config.servers.remove(index);
+        self.server_list_changed(index, Some(&previous), None)
     }
 
-    fn server_list_changed(&self) -> Result<(), ServerListError> {
+    fn server_list_changed(
+        &self,
+        index: usize,
+        previous: Option<&ServerEntry>,
+        next: Option<&ServerEntry>,
+    ) -> Result<(), ServerListError> {
         {
             let mut batch = self.probe_batch();
             batch.batch += 1;
@@ -215,7 +213,9 @@ impl ClientConfigStore {
             batch.entries.clear();
         }
         // Invalidation is an in-memory fact, not a consequence of disk success.
-        self.save().map_err(ServerListError::Save)
+        self.config_directory
+            .save_client_server(index, previous, next)
+            .map_err(ServerListError::Save)
     }
 
     /// Schedules one probe per current server and returns before DNS/TLS/QUIC I/O.

@@ -18,7 +18,7 @@ pub enum DebugOperation {
     CreateBody {
         values: DebugBodyValues,
     },
-    /// Creates the explicit diagnostic recipe: three State policies and three
+    /// Creates the explicit diagnostic recipe: three State policies and two
     /// Event interfaces, without roles, controllers, or registered participants.
     CreateLife,
     SetAttribute {
@@ -33,6 +33,13 @@ pub enum DebugOperation {
         action: DebugRelationAction,
     },
     Inventory(DebugInventoryOperation),
+    /// Issues one new identity, composes the explicitly selected sources, and
+    /// assigns direct custody to an existing inventory (including Public).
+    CreateItem {
+        inventory: String,
+        placement_reach: Option<f32>,
+        destruction_reach: Option<f32>,
+    },
 }
 
 /// Native custody operations; item IDs are existing identities, never issued here.
@@ -155,6 +162,14 @@ pub enum DebugData {
     },
     InventoryCreated {
         inventory: String,
+    },
+    ItemCreated {
+        /// Full u128 decimal identity; never a JavaScript number.
+        item: String,
+        inventory: DebugInventorySummary,
+        /// Read back from the stored sources, not echoed from the request.
+        placement_reach: Option<f32>,
+        destruction_reach: Option<f32>,
     },
 }
 

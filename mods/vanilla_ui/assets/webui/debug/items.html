@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Roundo · 物品管理</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main>
+  <header><div><small>ROUNDO / DEBUG WORKSPACE</small><h1>物品管理</h1></div><div class="toolbar"><span id="connection" role="status">读取连接状态…</span><button id="bindings">修改快捷键</button><button id="close">返回目录 · Esc</button></div></header>
+  <div id="message" role="status" aria-live="polite">选择归属物品栏，组装功能，再由服务端创建一个独立物品实例。</div>
+  <section id="item-workspace" class="workspace" aria-label="物品管理">
+    <aside class="card">
+      <h2>归属分配</h2>
+      <p class="muted">创建时直接放入所选物品栏，也可选择 Public。这里的归属是直接保管关系，不另建所有权系统。</p>
+      <label>目标物品栏<select id="item-inventory" form="create-item" required><option value="">请选择物品栏</option></select></label>
+      <div class="toolbar"><button id="refresh-inventories" type="button">刷新列表</button><button id="more-inventories" type="button" hidden>加载更多</button></div>
+      <p id="inventory-counts" class="muted">连接服务端后读取物品栏。</p>
+      <section class="identity-card" aria-label="当前归属"><h3>所选物品栏</h3><p id="inventory-owner">尚未选择。</p><p id="inventory-custody" class="muted"></p></section>
+      <button type="button" data-import="inventory">打开物品栏管理</button>
+      <p class="muted">没有合适的物品栏时，可先在物品栏管理页为概念体创建空栏；此页不会隐式创建概念体或物品栏。</p>
+    </aside>
+    <article class="card">
+      <form id="create-item">
+        <h2>功能数据组装</h2>
+        <p class="muted">只保存勾选的数据来源，距离须显式填写为有限正数。这些数据当前没有操作执行器，不会触发放置或移除方块。也可以不勾选任何数据，创建只有身份和归属的物品。</p>
+        <section class="identity-card">
+          <label class="confirmation"><input id="enable-placement" type="checkbox">放置方块</label>
+          <label>放置距离<input id="placement-reach" type="number" step="any" inputmode="decimal" placeholder="请输入正数" disabled></label>
+        </section>
+        <section class="identity-card">
+          <label class="confirmation"><input id="enable-destruction" type="checkbox">破坏方块</label>
+          <label>破坏距离<input id="destruction-reach" type="number" step="any" inputmode="decimal" placeholder="请输入正数" disabled></label>
+        </section>
+        <h3>本次创建</h3>
+        <p id="composition-preview" class="relation-preview">尚未选择归属物品栏。</p>
+        <button id="create" type="submit" class="primary" disabled>创建一个物品</button>
+      </form>
+      <section id="created-item" class="identity-card" aria-live="polite" hidden>
+        <h3>上次成功创建 · 服务端回读</h3>
+        <p>物品 ID：<strong id="created-id"></strong></p>
+        <p id="created-owner"></p>
+        <p id="created-functions"></p>
+      </section>
+      <details class="scope-note"><summary>操作范围与失败处理</summary>
+        <p class="muted">启动时不创建任何物品；仅在显式提交时创建新实例。ID 来自宿主预留区间，持久记录后才签发，不允许自填或复用。创建不会自动装备、授予使用权限或生成空间掉落物。Public 与普通物品栏均只记录保管关系；当前没有按保管位置执行或禁止方块操作的特殊规则。</p>
+        <p class="muted">沿用现有诊断准入：当前已认证玩家可选择其他概念体的物品栏。物品数据访问权限与保管关系分离。组装仅保存现有原生数据，不添加名称、重量等未定义字段；方块数据修改接口不由此页自动调用。</p>
+        <p class="muted">目标与参数由服务端重新校验。回执超时或连接改变后，操作结果不确定，请检查目标物品栏，不要自动重试创建。已签发的 ID 不回收；初始化中途失败时，错误会包含 ID 和已完成的归属状态。</p>
+      </details>
+    </article>
+  </section>
+  <footer><span id="shortcut">正在读取快捷键绑定…</span><span id="activity">就绪</span></footer>
+</main><script src="navigation.js"></script><script src="transport.js"></script><script src="items.js"></script>
+</body></html>

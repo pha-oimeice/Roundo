@@ -110,13 +110,13 @@ async function closeInventory() {
 }
 closeButton.addEventListener('click', closeInventory);
 roundo.subscribe('client.input', events => {
-  if (events.some(event => event.slot === 'roundo.inventory' && event.state === 'pressed')) closeInventory();
-  else if (events.some(event => event.slot === 'roundo.debug' && event.state === 'pressed')) {
+  if (events.some(event => event.function === 'roundo.inventory' && event.state === 'pressed')) closeInventory();
+  else if (events.some(event => event.function === 'roundo.debug' && event.state === 'pressed')) {
     roundo.execute({version: 1, command: 'ui.open', arguments: {import: 'debug'}}).catch(console.error);
   }
 });
 roundo.subscribe('client.bindings', snapshot => {
-  const keys = snapshot.bindings.filter(binding => binding.slot === 'roundo.inventory')
+  const keys = snapshot.bindings.filter(binding => snapshot.supported_slots.some(slot => slot.slot === binding.slot && slot.functions.includes('roundo.inventory')))
     .map(binding => snapshot.supported_keys.find(key => key.key === binding.key)?.display_name || binding.key);
   closeButton.textContent = `关闭 · ${keys.join(' / ') || '未绑定'} / Esc`;
 });

@@ -1,59 +1,40 @@
 [[resource]]
 name = "move-up"
 display_name = "Move Up"
-default_bindings = ["space"]
 
 [[resource]]
 name = "move-down"
 display_name = "Move Down"
-default_bindings = ["shift_left"]
 
 [[resource]]
 name = "move-left"
 display_name = "Move Left"
-default_bindings = ["key_a"]
 
 [[resource]]
 name = "move-right"
 display_name = "Move Right"
-default_bindings = ["key_d"]
 
 [[resource]]
 name = "move-forward"
 display_name = "Move Forward"
-default_bindings = ["key_w"]
 
 [[resource]]
 name = "move-backward"
 display_name = "Move Backward"
-default_bindings = ["key_s"]
 
 [[resource]]
 name = "spirit-camera"
 display_name = "Spirit Camera"
-default_bindings = ["f1"]
-
-[[resource]]
-name = "destroy-block"
-display_name = "Destroy Block"
-default_bindings = ["mouse_left"]
-
-[[resource]]
-name = "place-block"
-display_name = "Place Block"
-default_bindings = ["mouse_right"]
 
 [[resource]]
 name = "spawn-test-creature"
 display_name = "Spawn Test Creature"
-default_bindings = ["digit1"]
 
 [[resource]]
 name = "look"
 display_name = "视角"
-default_bindings = ["mouse_motion"]
 
-[slots]
+[functions]
 "roundo.move-up" = "move-up"
 "roundo.move-down" = "move-down"
 "roundo.move-left" = "move-left"
@@ -62,6 +43,4 @@ default_bindings = ["mouse_motion"]
 "roundo.move-backward" = "move-backward"
 "roundo.spirit-camera" = "spirit-camera"
 "roundo.look" = "look"
-"roundo.destroy-block" = "destroy-block"
-"roundo.place-block" = "place-block"
 "roundo.spawn-test-creature" = "spawn-test-creature"

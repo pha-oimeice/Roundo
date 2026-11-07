@@ -1,13 +1,11 @@
 [[resource]]
 name = "inventory"
 display_name = "物品栏界面"
-default_bindings = ["key_i"]
 
 [[resource]]
 name = "debug"
 display_name = "调试界面"
-default_bindings = ["backquote"]
 
-[slots]
+[functions]
 "roundo.inventory" = "inventory"
 "roundo.debug" = "debug"

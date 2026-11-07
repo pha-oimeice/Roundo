@@ -48,18 +48,6 @@ fn main() {
         .expect("Atomic Voxel Resource Type must be published");
     let resource_fingerprint = roundo_contracts::ResourceCatalogFingerprint(voxels.fingerprint());
     std::sync::LazyLock::force(&config::SERVER_CONFIG);
-    let item_config = &config::SERVER_CONFIG.block_item;
-    for reach in [item_config.placement_reach, item_config.destruction_reach]
-        .into_iter()
-        .flatten()
-    {
-        assert!(
-            reach.is_finite() && reach > 0.0,
-            "block item reach must be finite and positive"
-        );
-    }
-    let mut item_issuer = config::reserve_block_item_identity()
-        .expect("reserve the block item's instance identity before startup");
     let (mut app, ecs) = ServerEcsRuntime::new(
         voxels,
         ServerEcsConfig {
@@ -68,21 +56,13 @@ fn main() {
         },
     )
     .into_parts();
-    if let Some(issuer) = item_issuer.as_mut() {
-        roundo_ecs_entry::create_block_item(
-            app.world_mut(),
-            issuer,
-            item_config
-                .placement_reach
-                .map(|reach| roundo_block_interaction::BlockPlacementPermit { reach }),
-            item_config
-                .destruction_reach
-                .map(|reach| roundo_block_interaction::BlockDestructionPermit { reach }),
-        )
-        .expect("initialize the composed block item");
-    } else {
-        log::warn!("block item is not configured: supply a host-reserved item_ids interval");
-    }
+    // Install explicit diagnostic issuance only. Startup creates no item and
+    // does not reserve or advance the persistent identity cursor.
+    app.insert_resource(roundo_ecs_entry::DebugItemIssuer::new(|| {
+        config::reserve_item_identity()
+            .map_err(|error| format!("{error:#}"))?
+            .ok_or_else(|| "未配置宿主预留的 item_ids 区间，不能创建物品".into())
+    }));
     let _network_runtime = ServerNetworkRuntime::start(
         network_config(),
         std::sync::Arc::new(DatabaseSessionProvider),

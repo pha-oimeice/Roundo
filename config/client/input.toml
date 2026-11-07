@@ -1,0 +1,89 @@
+# Shortcut identities and function assignments are local editable resources.
+[input_slots."roundo.move-up"]
+display_name = "Move Up"
+functions = ["roundo.move-up"]
+
+[input_slots."roundo.move-down"]
+display_name = "Move Down"
+functions = ["roundo.move-down"]
+
+[input_slots."roundo.move-left"]
+display_name = "Move Left"
+functions = ["roundo.move-left"]
+
+[input_slots."roundo.move-right"]
+display_name = "Move Right"
+functions = ["roundo.move-right"]
+
+[input_slots."roundo.move-forward"]
+display_name = "Move Forward"
+functions = ["roundo.move-forward"]
+
+[input_slots."roundo.move-backward"]
+display_name = "Move Backward"
+functions = ["roundo.move-backward"]
+
+[input_slots."roundo.spirit-camera"]
+display_name = "Spirit Camera"
+functions = ["roundo.spirit-camera"]
+
+# Client-owned shortcut resources.
+[input_slots.look]
+display_name = "视角"
+functions = ["roundo.look"]
+
+[input_slots.spawn-test-creature]
+display_name = "Spawn Test Creature"
+functions = ["roundo.spawn-test-creature"]
+
+[input_slots.inventory]
+display_name = "物品栏界面"
+functions = ["roundo.inventory"]
+
+[input_slots.debug]
+display_name = "调试界面"
+functions = ["roundo.debug"]
+
+[[input_bindings]]
+slot = "look"
+key = "mouse_motion"
+
+[[input_bindings]]
+slot = "spawn-test-creature"
+key = "digit1"
+
+[[input_bindings]]
+slot = "inventory"
+key = "key_i"
+
+[[input_bindings]]
+slot = "debug"
+key = "backquote"
+
+[[input_bindings]]
+slot = "roundo.move-up"
+key = "space"
+
+[[input_bindings]]
+slot = "roundo.move-down"
+key = "shift_left"
+
+[[input_bindings]]
+slot = "roundo.move-left"
+key = "key_a"
+
+[[input_bindings]]
+slot = "roundo.move-right"
+key = "key_d"
+
+[[input_bindings]]
+slot = "roundo.move-forward"
+key = "key_w"
+
+[[input_bindings]]
+slot = "roundo.move-backward"
+key = "key_s"
+
+[[input_bindings]]
+slot = "roundo.spirit-camera"
+key = "f1"

@@ -46,7 +46,6 @@ const SERVER_COMMANDS: &[CatalogEntry] = &[
     CatalogEntry::of::<PlayerTeleportDefinition>(),
     CatalogEntry::of::<DevDefinition>(),
     CatalogEntry::of::<CommandSchemaDefinition>(),
-    CatalogEntry::of::<BlockItemPermissionCommand>(),
 ];
 
 /// Console-local command discovery level, restricted by the `dev` handler to 0..=3.
@@ -68,7 +67,6 @@ impl Default for ServerUnixAdapter {
         registry.register::<UnixCommandHelp>();
         registry.register::<UnixCommandSchema>();
         registry.register::<UnixDev>();
-        registry.register::<BlockItemPermissionCommand>();
 
         // These spellings are adapter-only aliases for the canonical JSON
         // commands above; they do not create additional definitions or schema.
@@ -329,30 +327,6 @@ impl CommandDefinition for UnixDev {
     const DEV_LEVEL: u8 = <DevDefinition as CommandDefinition>::DEV_LEVEL;
 }
 
-/// Omit reach to remove that permission source; supply reach to compose it again.
-#[derive(Deserialize, Serialize, JsonSchema, roundo_cli::UnixCommand)]
-#[serde(deny_unknown_fields)]
-#[unix(path = "block-item permission")]
-struct BlockItemPermissionCommand {
-    method: String,
-    reach: Option<f32>,
-}
-
-#[derive(Serialize, JsonSchema)]
-struct BlockItemPermissionOutput {
-    instance_id: String,
-    method: String,
-    placement_reach: Option<f32>,
-    destruction_reach: Option<f32>,
-}
-
-impl CommandDefinition for BlockItemPermissionCommand {
-    type Input = Self;
-    type Output = BlockItemPermissionOutput;
-    const NAME: &'static str = "block_item.permission";
-    const DEV_LEVEL: u8 = 1;
-}
-
 /// Installs the server-owned command catalog over the generic CLI adapter.
 pub(crate) struct ServerCommandsPlugin;
 
@@ -373,14 +347,12 @@ fn process_commands(
     mut players: PresenceAdmin,
     mut dev_level: ResMut<ServerDevLevel>,
     mut app_exit: MessageWriter<AppExit>,
-    mut block_item: roundo_ecs_entry::BlockItemEdits,
 ) {
     for line in input.drain() {
         let Some(request) = project_terminal_line(&adapter.registry, &line) else {
             continue;
         };
-        let response =
-            dispatch_typed_server_command(request, &mut players, &mut dev_level, &mut block_item);
+        let response = dispatch_typed_server_command(request, &mut players, &mut dev_level);
         let quit_accepted = response["command"] == "app.quit" && response["ok"] == true;
         print_response(response);
         if quit_accepted {
@@ -442,13 +414,11 @@ fn dispatch_typed_server_command(
     request: serde_json::Value,
     players: &mut PresenceAdmin,
     dev_level: &mut ServerDevLevel,
-    block_item: &mut roundo_ecs_entry::BlockItemEdits,
 ) -> serde_json::Value {
     // This short-lived main-world context is the server's Bevy seam. The
     // registry remains source-neutral; only registered handlers borrow ECS.
     let players = RefCell::new(players);
     let dev_level = RefCell::new(dev_level);
-    let block_item = RefCell::new(block_item);
     let mut registry = CommandRegistry::default();
     registry.register_typed::<PlayersListDefinition>(|_, _| {
         Ok(PlayersListOutput {
@@ -526,28 +496,6 @@ fn dispatch_typed_server_command(
         }
         Ok(DevOutput {
             level: dev_level.borrow().0,
-        })
-    });
-    registry.register_typed::<BlockItemPermissionCommand>(|input, _| {
-        let method = match input.method.as_str() {
-            "place" => roundo_contracts::ItemUseMethod::PlaceBlock,
-            "destroy" => roundo_contracts::ItemUseMethod::DestroyBlock,
-            _ => {
-                return Err(CommandError::new(
-                    "invalid_arguments",
-                    "method must be place or destroy",
-                ));
-            }
-        };
-        let item = block_item
-            .borrow_mut()
-            .set_permission(method, input.reach)
-            .map_err(|error| CommandError::new("item_data_rejected", error))?;
-        Ok(BlockItemPermissionOutput {
-            instance_id: item.item.as_u128().to_string(),
-            method: input.method,
-            placement_reach: item.placement_reach,
-            destruction_reach: item.destruction_reach,
         })
     });
     registry.dispatch_value(request, &mut ())

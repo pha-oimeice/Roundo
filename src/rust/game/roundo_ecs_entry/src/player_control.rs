@@ -815,9 +815,6 @@ impl Plugin for PlayerControlServerPlugin {
         if !app.is_plugin_added::<CreatureLifeDataPlugin>() {
             app.add_plugins(CreatureLifeDataPlugin);
         }
-        if !app.is_plugin_added::<roundo_block_interaction::BlockInteractionLifeDataPlugin>() {
-            app.add_plugins(roundo_block_interaction::BlockInteractionLifeDataPlugin);
-        }
         if !app.is_plugin_added::<LifeRuntimePlugin>() {
             app.add_plugins(LifeRuntimePlugin::default());
         }

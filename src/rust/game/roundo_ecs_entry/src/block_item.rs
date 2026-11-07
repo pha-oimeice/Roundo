@@ -1,13 +1,12 @@
-//! Composition for the one block-use item. Custody, data access and method
-//! permission remain distinct: an instance ID or a default reference is no grant.
+//! Stores independent block-related item data. This module does not select an
+//! item, dispatch a behavior, grant use authority or modify world voxels.
 
 use bevy::{
     ecs::system::{RunSystemOnce, SystemParam},
     prelude::*,
 };
 use roundo_block_interaction::{BlockDestructionPermit, BlockItemSchemas, BlockPlacementPermit};
-use roundo_contracts::{ItemInstanceId, ItemUseMethod};
-use roundo_inventory::{Inventories, ItemId};
+use roundo_inventory::{Inventories, InventoryHandle, ItemId};
 use roundo_items::{
     ItemAdministration, ItemData, ItemDataBuilder, ItemDefinitions, ItemIssuer, ItemPublisher,
     ItemReadAccess, ItemReads, ItemRuntimeSetup, ItemWrites,
@@ -19,10 +18,6 @@ struct BlockItemSources {
     schemas: BlockItemSchemas,
     reads: HashMap<ItemId, ItemReadAccess>,
 }
-
-/// Default input reference for this slice, not an equipment state or a permit.
-#[derive(Resource)]
-pub(crate) struct BlockItemReference(pub(crate) ItemId);
 
 pub(crate) fn install(app: &mut App) {
     let mut builder = ItemDataBuilder::try_new().expect("item data catalogue allocation");
@@ -36,48 +31,93 @@ pub(crate) fn install(app: &mut App) {
     });
 }
 
-/// Creates the slice's single composed instance from host-issued identity and
-/// caller-supplied data. No prototype, callback or per-ID behavior is installed.
-/// Identity issuance is irreversible. The reference is published only after data
-/// and Public custody succeed; initialization errors must abort host startup.
-pub fn create_block_item(
+/// Explicit host composition without automatic input selection or gameplay
+/// use authority. The target must already exist. Invalid data
+/// and targets reject before issuance. Once issued, an ID is never reclaimed;
+/// later failures report it explicitly and must not be automatically retried.
+pub(crate) fn create_item(
     world: &mut World,
     issuer: &mut ItemIssuer,
+    inventory: InventoryHandle,
     placement: Option<BlockPlacementPermit>,
     destruction: Option<BlockDestructionPermit>,
-) -> Result<ItemId, String> {
-    if world.contains_resource::<BlockItemReference>() {
-        return Err("the block item instance is already initialized".into());
-    }
+) -> Result<BlockItemPermissions, String> {
     if placement.as_ref().is_some_and(|data| !data.validate())
         || destruction.as_ref().is_some_and(|data| !data.validate())
     {
         return Err("block item reach must be finite and positive".into());
     }
-    let item = issuer.issue().map_err(|error| error.to_string())?;
     world
         .run_system_once_with(
-            |In(item): In<ItemId>, mut publisher: ItemPublisher| publisher.publish_instance(item),
-            item,
-        )
-        .map_err(|error| error.to_string())?
-        .map_err(|error| error.to_string())?;
-    let (read, modify) = world
-        .run_system_once_with(
-            |In(item): In<ItemId>, mut admin: ItemAdministration| {
-                Ok::<_, roundo_items::ItemAccessError>((
-                    admin.grant_read(item)?,
-                    admin.grant_modify(item)?,
-                ))
+            |In(inventory): In<InventoryHandle>, inventories: Inventories| {
+                inventories.owner(inventory)
             },
-            item,
+            inventory,
         )
         .map_err(|error| error.to_string())?
         .map_err(|error| error.to_string())?;
-    let schemas = world.resource::<BlockItemSources>().schemas;
-    let initialize = modify.clone();
-    let initialized = world
-        .run_system_once_with(
+    let item = issuer.issue().map_err(|error| error.to_string())?;
+    let mut assigned = false;
+    let result = (|| {
+        world
+            .run_system_once_with(
+                |In((inventory, item)): In<(InventoryHandle, ItemId)>, inventories: Inventories| {
+                    inventories
+                        .owner(inventory)
+                        .map_err(|error| error.to_string())?;
+                    if inventories
+                        .holder(item)
+                        .map_err(|error| error.to_string())?
+                        .is_some()
+                    {
+                        return Err("the issued item identity already has custody".to_string());
+                    }
+                    Ok(())
+                },
+                (inventory, item),
+            )
+            .map_err(|error| error.to_string())??;
+        world
+            .run_system_once_with(
+                |In(item): In<ItemId>, mut publisher: ItemPublisher| {
+                    publisher.publish_instance(item)
+                },
+                item,
+            )
+            .map_err(|error| error.to_string())?
+            .map_err(|error| error.to_string())?;
+        // Establish the requested custody before initializing data. If a later
+        // native operation fails, the issued item stays discoverable here.
+        world
+            .run_system_once_with(
+                |In((inventory, item)): In<(InventoryHandle, ItemId)>,
+                 mut inventories: Inventories| {
+                    inventories.insert(inventory, item)
+                },
+                (inventory, item),
+            )
+            .map_err(|error| error.to_string())?
+            .map_err(|error| error.to_string())?;
+        assigned = true;
+        let (read, modify) = world
+            .run_system_once_with(
+                |In(item): In<ItemId>, mut admin: ItemAdministration| {
+                    let read = admin.grant_read(item)?;
+                    match admin.grant_modify(item) {
+                        Ok(modify) => Ok((read, modify)),
+                        Err(error) => {
+                            admin.revoke_read(item, &read)?;
+                            Err(error)
+                        }
+                    }
+                },
+                item,
+            )
+            .map_err(|error| error.to_string())?
+            .map_err(|error| error.to_string())?;
+        let schemas = world.resource::<BlockItemSources>().schemas;
+        let initialize = modify.clone();
+        let initialized = world.run_system_once_with(
             move |mut writes: ItemWrites| {
                 if let Some(value) = placement {
                     writes.set_specialized(schemas.placement, item, &initialize, value)?;
@@ -88,42 +128,71 @@ pub fn create_block_item(
                 Ok::<_, roundo_items::ItemAccessError>(())
             },
             (),
-        )
-        .map_err(|error| error.to_string())?;
-    world
-        .run_system_once_with(
-            move |mut admin: ItemAdministration| admin.revoke_modify(item, &modify),
-            (),
-        )
-        .map_err(|error| error.to_string())?
-        .map_err(|error| error.to_string())?;
-    initialized.map_err(|error| error.to_string())?;
-    world
-        .run_system_once_with(
-            |In(item): In<ItemId>, mut inventories: Inventories| {
-                let public = inventories.public_inventory()?;
-                inventories.insert(public, item)
-            },
-            item,
-        )
-        .map_err(|error| error.to_string())?
-        .map_err(|error| error.to_string())?;
-    world
-        .resource_mut::<BlockItemSources>()
-        .reads
-        .insert(item, read);
-    world.insert_resource(BlockItemReference(item));
-    bevy::log::info!(
-        "block item initialized: instance={}, placement={}, destruction={}",
-        item.as_u128(),
-        placement.is_some(),
-        destruction.is_some()
-    );
-    Ok(item)
+        );
+        // Attempt revocation even if the initialization system itself failed.
+        let revoked = world
+            .run_system_once_with(
+                move |mut admin: ItemAdministration| admin.revoke_modify(item, &modify),
+                (),
+            )
+            .map_err(|error| error.to_string())?
+            .map_err(|error| error.to_string())?;
+        if !revoked {
+            return Err("item initialization Modify grant was not revoked".into());
+        }
+        let initialized = initialized
+            .map_err(|error| error.to_string())
+            .and_then(|result| result.map_err(|error| error.to_string()));
+        if let Err(error) = initialized {
+            world
+                .run_system_once_with(
+                    move |mut admin: ItemAdministration| admin.revoke_read(item, &read),
+                    (),
+                )
+                .map_err(|error| error.to_string())?
+                .map_err(|error| error.to_string())?;
+            return Err(error);
+        }
+        world
+            .resource_mut::<BlockItemSources>()
+            .reads
+            .insert(item, read);
+        world
+            .run_system_once_with(
+                |In(item): In<ItemId>, data: BlockItemData| data.permissions(item),
+                item,
+            )
+            .map_err(|error| error.to_string())?
+    })();
+    match result {
+        Ok(permissions) => {
+            bevy::log::info!(
+                "item initialized: instance={}, inventory={:?}, placement={:?}, destruction={:?}",
+                item.as_u128(),
+                inventory,
+                permissions.placement_reach,
+                permissions.destruction_reach
+            );
+            Ok(permissions)
+        }
+        Err(error) => {
+            let message = format!(
+                "物品 {} 初始化失败；ID 不会回收。{}：{error}",
+                item.as_u128(),
+                if assigned {
+                    "物品已分配到所选物品栏，但初始化未全部确认，请检查物品栏，不要自动重试"
+                } else {
+                    "尚未完成物品栏分配，请检查服务端，不要自动重试"
+                }
+            );
+            bevy::log::error!("{message}");
+            Err(message)
+        }
+    }
 }
 
-/// Execution-side current data access, independent of the custodian's Body.
-/// These borrows keep custody and permission stable through the synchronous edit.
+/// Readback of the stored composition after explicit creation. Custody and data
+/// access are validated without interpreting the payload as a gameplay method.
 #[derive(SystemParam)]
 pub(crate) struct BlockItemData<'w, 's> {
     sources: Res<'w, BlockItemSources>,
@@ -132,110 +201,25 @@ pub(crate) struct BlockItemData<'w, 's> {
 }
 
 impl BlockItemData<'_, '_> {
-    pub(crate) fn reach(&self, item: ItemId, method: ItemUseMethod) -> Option<f32> {
-        // Any live inventory is sufficient; owner identity is not use authority.
-        self.inventories.holder(item).ok().flatten()?;
-        let access = self.sources.reads.get(&item)?;
-        match method {
-            ItemUseMethod::PlaceBlock => {
-                self.items
-                    .with_specialized(self.sources.schemas.placement, item, access, |value| {
-                        value.reach
-                    })
-            }
-            ItemUseMethod::DestroyBlock => self.items.with_specialized(
-                self.sources.schemas.destruction,
-                item,
-                access,
-                |value| value.reach,
-            ),
-        }
-        .ok()
-        .flatten()
-    }
-}
-
-/// Owned readback of the actual stored sources, not an echo of an edit request.
-#[derive(Clone, Copy, Debug)]
-pub struct BlockItemPermissions {
-    pub item: ItemId,
-    pub placement_reach: Option<f32>,
-    pub destruction_reach: Option<f32>,
-}
-
-/// Trusted host editing of the slice's data sources. No method is executed and
-/// no use authority is granted; a missing reach removes only that source.
-#[derive(SystemParam)]
-pub struct BlockItemEdits<'w, 's> {
-    reference: Option<Res<'w, BlockItemReference>>,
-    sources: Res<'w, BlockItemSources>,
-    params: ParamSet<'w, 's, (ItemAdministration<'w>, ItemWrites<'w>)>,
-}
-
-impl BlockItemEdits<'_, '_> {
-    pub fn set_permission(
-        &mut self,
-        method: ItemUseMethod,
-        reach: Option<f32>,
-    ) -> Result<BlockItemPermissions, String> {
-        if reach.is_some_and(|value| !value.is_finite() || value <= 0.0) {
-            return Err("reach must be finite and positive".into());
-        }
-        let item = self
-            .reference
-            .as_ref()
-            .ok_or("block item is not initialized")?
-            .0;
-        let modify = self
-            .params
-            .p0()
-            .grant_modify(item)
-            .map_err(|error| error.to_string())?;
-        let result = {
-            let mut writes = self.params.p1();
-            match (method, reach) {
-                (ItemUseMethod::PlaceBlock, Some(reach)) => writes.set_specialized(
-                    self.sources.schemas.placement,
-                    item,
-                    &modify,
-                    BlockPlacementPermit { reach },
-                ),
-                (ItemUseMethod::DestroyBlock, Some(reach)) => writes.set_specialized(
-                    self.sources.schemas.destruction,
-                    item,
-                    &modify,
-                    BlockDestructionPermit { reach },
-                ),
-                (ItemUseMethod::PlaceBlock, None) => writes
-                    .remove_specialized(self.sources.schemas.placement, item, &modify)
-                    .map(|_| ()),
-                (ItemUseMethod::DestroyBlock, None) => writes
-                    .remove_specialized(self.sources.schemas.destruction, item, &modify)
-                    .map(|_| ()),
-            }
-        };
-        let revocation = self.params.p0().revoke_modify(item, &modify);
-        result.map_err(|error| error.to_string())?;
-        revocation.map_err(|error| error.to_string())?;
-        bevy::log::info!(
-            "block item data changed: instance={}, method={:?}, reach={:?}",
-            item.as_u128(),
-            method,
-            reach
-        );
-        let access = self
+    fn permissions(&self, item: ItemId) -> Result<BlockItemPermissions, String> {
+        self.inventories
+            .holder(item)
+            .map_err(|error| error.to_string())?
+            .ok_or("item has no live custody")?;
+        let read = self
             .sources
             .reads
             .get(&item)
             .ok_or("item read grant is unavailable")?;
-        let writes = self.params.p1();
-        let placement_reach = writes
-            .with_specialized(self.sources.schemas.placement, item, access, |value| {
+        let placement_reach = self
+            .items
+            .with_specialized(self.sources.schemas.placement, item, read, |value| {
                 value.reach
             })
             .map_err(|error| error.to_string())?;
-        let destruction_reach = writes
-            .with_specialized(self.sources.schemas.destruction, item, access, |value| {
+        let destruction_reach = self
+            .items
+            .with_specialized(self.sources.schemas.destruction, item, read, |value| {
                 value.reach
             })
             .map_err(|error| error.to_string())?;
@@ -247,6 +231,10 @@ impl BlockItemEdits<'_, '_> {
     }
 }
 
-pub(crate) fn reference(reference: Option<&BlockItemReference>) -> Option<ItemInstanceId> {
-    reference.map(|value| ItemInstanceId(value.0.as_u128()))
+/// Owned readback of the actual stored sources, not an echo of an edit request.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct BlockItemPermissions {
+    pub item: ItemId,
+    pub placement_reach: Option<f32>,
+    pub destruction_reach: Option<f32>,
 }

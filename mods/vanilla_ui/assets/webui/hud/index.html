@@ -88,17 +88,17 @@ async function retryControl(control, key, status) {
 
 let opening = false;
 roundo.subscribe('client.input', async events => {
-  const action = events.find(event => event.state === 'pressed' && ['roundo.inventory', 'roundo.debug'].includes(event.slot));
+  const action = events.find(event => event.state === 'pressed' && ['roundo.inventory', 'roundo.debug'].includes(event.function));
   if (!action || opening) return;
   opening = true;
   try {
-    const result = await roundo.execute({version: 1, command: 'ui.open', arguments: {import: action.slot === 'roundo.inventory' ? 'inventory' : 'debug'}});
+    const result = await roundo.execute({version: 1, command: 'ui.open', arguments: {import: action.function === 'roundo.inventory' ? 'inventory' : 'debug'}});
     if (!result.ok) console.error('UI navigation failed', result.error);
   } catch (error) { console.error('UI navigation failed', error); }
   finally { opening = false; }
 });
 roundo.subscribe('client.bindings', snapshot => {
-  const keys = snapshot.bindings.filter(binding => binding.slot === 'roundo.inventory')
+  const keys = snapshot.bindings.filter(binding => snapshot.supported_slots.some(slot => slot.slot === binding.slot && slot.functions.includes('roundo.inventory')))
     .map(binding => snapshot.supported_keys.find(key => key.key === binding.key)?.display_name || binding.key);
   document.querySelector('#inventory-hint').textContent = `${keys.join(' / ') || '未绑定'} · 物品栏`;
 });

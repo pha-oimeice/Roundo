@@ -1,0 +1,11 @@
+certificate_path = 'V:\.0\roundo\target\debug'
+server_alternative_names = [
+    "localhost",
+    "127.0.0.1",
+    "0.0.0.0",
+]
+generate_self_signed_certificate = true
+
+[endpoint]
+host = "127.0.0.1"
+quic_port = 12358

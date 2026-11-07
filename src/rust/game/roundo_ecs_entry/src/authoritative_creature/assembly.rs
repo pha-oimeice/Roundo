@@ -21,7 +21,6 @@ struct CreatureAssembly {
     record: Option<ConceptBodyHandle>,
     movement: Option<ControllerId>,
     gaze: Option<ControllerId>,
-    interaction: Option<ControllerId>,
 }
 
 impl CreatureAssembly {
@@ -43,7 +42,6 @@ impl CreatureAssembly {
             record: None,
             movement: None,
             gaze: None,
-            interaction: None,
         })
     }
 
@@ -98,9 +96,6 @@ impl CreatureAssembly {
         let controller_scope = self
             .controller_scope
             .expect("Player assembly reserves both scopes before construction");
-        world
-            .run_system_once_with(attach_block_interaction, assembly)
-            .expect("bootstrap attachment resources are installed")?;
         let movement = lifecycle::create_controller(
             world,
             controller_scope,
@@ -111,16 +106,6 @@ impl CreatureAssembly {
         let gaze =
             lifecycle::create_controller(world, controller_scope, intent, IntentDomain::gaze())?;
         self.gaze = Some(gaze);
-        let interaction = lifecycle::create_controller(
-            world,
-            controller_scope,
-            intent,
-            IntentDomain::block_interaction(),
-        )?;
-        self.interaction = Some(interaction);
-        world
-            .run_system_once_with(attach_interaction_controller, (assembly, interaction))
-            .expect("interaction attachment has declared resources")?;
         let controllers = TestLifeControllers { movement, gaze };
         world
             .run_system_once_with(attach_test_life_controllers, (assembly, controllers))
@@ -146,9 +131,7 @@ impl CreatureAssembly {
             lifecycle::remove_controllers(
                 world,
                 scope,
-                [self.interaction, self.gaze, self.movement]
-                    .into_iter()
-                    .flatten(),
+                [self.gaze, self.movement].into_iter().flatten(),
             );
         }
         lifecycle::remove_instances(

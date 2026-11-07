@@ -310,26 +310,6 @@ impl Admission {
         }
         self.gates.get(&controller)?.active_binding()
     }
-    /// Typed composition may provide current facts without obtaining World access.
-    pub(crate) fn submit_player_with_facts(
-        &self,
-        controller: ControllerId,
-        entity: bevy::prelude::Entity,
-        player: PlayerId,
-        connection: AdmittedConnection,
-        facts: &impl AuthorityFacts,
-    ) -> Result<BindingId, GateError> {
-        if self.active_binding_for_entity(controller, entity).is_none()
-            || self.admitted.get(&connection.id) != Some(&(player, connection))
-        {
-            return Err(GateError::Unauthorized);
-        }
-        self.gates
-            .get(&controller)
-            .ok_or(GateError::Unauthorized)?
-            .submit_if_active(Source::Player { player, connection }, facts)
-    }
-
     pub fn active_player(&self, controller: ControllerId) -> Option<(ConnectionId, PlayerId)> {
         let gate = self.gates.get(&controller)?;
         if gate.active_binding().is_none() {

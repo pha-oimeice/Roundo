@@ -4,8 +4,6 @@ mod assembly;
 use assembly::assemble_test_life_for_player;
 mod bootstrap;
 use bootstrap::*;
-pub(crate) mod player_interaction;
-use player_interaction::{TestInteractionController, attach_interaction_controller};
 mod lifecycle;
 mod projection;
 use projection::*;
@@ -20,7 +18,6 @@ use bevy::prelude::{
     App, Commands, Component, Entity, FixedUpdate, IntoScheduleConfigs, On, Plugin, Query, Remove,
     Res, Resource, Transform, With, World,
 };
-use roundo_block_interaction::{BlockInteractionOriginOffset, BlockInteractionPose};
 use roundo_contracts::{ConnectionId, ControllerAccessLevel, ControllerBindingId, ControllerId};
 use roundo_controller::{
     Controller, ControllerCommitScope, ControllerLifecycleError, ControllerLifecyclePlugin,
@@ -301,9 +298,6 @@ impl Plugin for AuthoritativeCreaturePlugin {
         if !app.is_plugin_added::<CreatureLifeDataPlugin>() {
             app.add_plugins(CreatureLifeDataPlugin);
         }
-        if !app.is_plugin_added::<roundo_block_interaction::BlockInteractionLifeDataPlugin>() {
-            app.add_plugins(roundo_block_interaction::BlockInteractionLifeDataPlugin);
-        }
         if !app.is_plugin_added::<LifeRuntimePlugin>() {
             app.add_plugins(LifeRuntimePlugin::default());
         }
@@ -349,9 +343,6 @@ impl Plugin for AuthoritativeCreaturePlugin {
                         .after(roundo_creature::CreatureLifeSet::RecordUpdate)
                         .after(roundo_presence::PresenceServerSet::Commands)
                         .before(roundo_presence::PresenceServerSet::PlayerStates),
-                    player_interaction::execute
-                        .in_set(roundo_local_coordinate::VoxelEditSet::Commit)
-                        .after(roundo_creature::CreatureLifeSet::MotionCommit),
                 ),
             );
     }
@@ -419,11 +410,9 @@ impl AssemblyCleanup<'_, '_> {
         }
         for (entity, ids) in &self.execution_controllers {
             if controller_ids.contains(&ids.movement) || controller_ids.contains(&ids.gaze) {
-                self.commands.entity(entity).try_remove::<(
-                    TestLifeControllers,
-                    TestInteractionController,
-                    player_interaction::PlayerBlockBehaviors,
-                )>();
+                self.commands
+                    .entity(entity)
+                    .try_remove::<TestLifeControllers>();
             }
         }
     }

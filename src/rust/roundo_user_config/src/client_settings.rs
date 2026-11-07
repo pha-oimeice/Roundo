@@ -1,12 +1,11 @@
 //! Serializable client controls, camera, world, and input-binding settings.
 
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 pub const MIN_MOUSE_SENSITIVITY: f32 = 0.0005;
 pub const MAX_MOUSE_SENSITIVITY: f32 = 0.01;
 pub const DEFAULT_MOUSE_SENSITIVITY: f32 = 0.002;
-pub const DEFAULT_PLAYER_MOVEMENT_PREDICTION: bool = false;
 pub const MIN_CAMERA_MOVE_SPEED: f32 = 1.0;
 pub const MAX_CAMERA_MOVE_SPEED: f32 = 50.0;
 pub const DEFAULT_CAMERA_MOVE_SPEED: f32 = 5.0;
@@ -21,17 +20,16 @@ pub const MAX_CHUNK_VIEW_DISTANCE: f32 = 512.0;
 pub const DEFAULT_CHUNK_VIEW_DISTANCE: f32 = 64.0;
 pub const DEFAULT_GEOMETRY_LOD_PIXEL_ERROR: f32 = 1.0;
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
+/// In-memory aggregate of client categories, not a persisted document format.
+#[derive(Clone, Debug, PartialEq)]
 pub struct ClientSettingsConfig {
     pub controls: ClientControlSettingsConfig,
     pub camera: ClientCameraSettingsConfig,
     pub world: ClientWorldSettingsConfig,
-    /// Many-to-many edges between Mod-provided semantic slots and physical inputs.
+    /// Client-owned resource identities, independent of editable display names.
+    pub input_slots: BTreeMap<String, ClientInputSlotConfig>,
+    /// Physical inputs reference existing slots; a slot may have many bindings.
     pub input_bindings: Vec<ClientInputBindingConfig>,
-    /// Slots explicitly customized by the user, including slots with no edges.
-    /// Absent slots inherit their Mod declaration's optional default bindings.
-    pub input_binding_overrides: BTreeSet<String>,
 }
 
 impl ClientSettingsConfig {
@@ -72,76 +70,36 @@ impl ClientSettingsConfig {
         {
             self.world.geometry_lod_pixel_error = DEFAULT_GEOMETRY_LOD_PIXEL_ERROR;
         }
-        let mut seen = BTreeSet::new();
-        self.input_bindings
-            .retain(|binding| seen.insert((binding.slot.clone(), binding.key)));
-        self.input_binding_overrides.extend(
-            self.input_bindings
-                .iter()
-                .map(|binding| binding.slot.clone()),
-        );
-    }
-}
-
-impl Default for ClientSettingsConfig {
-    fn default() -> Self {
-        Self {
-            controls: ClientControlSettingsConfig::default(),
-            camera: ClientCameraSettingsConfig::default(),
-            world: ClientWorldSettingsConfig::default(),
-            input_bindings: Vec::new(),
-            input_binding_overrides: BTreeSet::new(),
-        }
     }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
 pub struct ClientWorldSettingsConfig {
     pub joinable_world_radius: f32,
     pub chunk_view_distance: f32,
     /// Maximum conservative geometric displacement in physical viewport pixels.
     pub geometry_lod_pixel_error: f32,
 }
-impl Default for ClientWorldSettingsConfig {
-    fn default() -> Self {
-        Self {
-            joinable_world_radius: DEFAULT_JOINABLE_WORLD_RADIUS,
-            chunk_view_distance: DEFAULT_CHUNK_VIEW_DISTANCE,
-            geometry_lod_pixel_error: DEFAULT_GEOMETRY_LOD_PIXEL_ERROR,
-        }
-    }
-}
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
 pub struct ClientControlSettingsConfig {
     pub mouse_sensitivity: f32,
     pub player_movement_prediction: bool,
 }
-impl Default for ClientControlSettingsConfig {
-    fn default() -> Self {
-        Self {
-            mouse_sensitivity: DEFAULT_MOUSE_SENSITIVITY,
-            player_movement_prediction: DEFAULT_PLAYER_MOVEMENT_PREDICTION,
-        }
-    }
-}
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
 pub struct ClientCameraSettingsConfig {
     /// Movement speed of the detached client camera only.
     pub move_speed: f32,
     pub voxel_raycast_distance: f32,
 }
-impl Default for ClientCameraSettingsConfig {
-    fn default() -> Self {
-        Self {
-            move_speed: DEFAULT_CAMERA_MOVE_SPEED,
-            voxel_raycast_distance: DEFAULT_VOXEL_RAYCAST_DISTANCE,
-        }
-    }
+
+/// A local shortcut resource. Function references form an unordered many-to-many
+/// relation, not an execution sequence or an item-use permission.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ClientInputSlotConfig {
+    pub display_name: String,
+    pub functions: BTreeSet<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]

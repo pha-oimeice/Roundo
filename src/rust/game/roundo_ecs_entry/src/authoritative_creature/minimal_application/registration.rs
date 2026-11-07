@@ -8,8 +8,6 @@ pub(super) struct Evidence<'w, 's> {
     motion: LifeStateRegistrations<'w, 's, CreatureMotionExperienceState>,
     gaze: LifeEventRegistrations<'w, 's, GazeCommandEvent>,
     jump: LifeEventRegistrations<'w, 's, JumpCommandEvent>,
-    command: LifeEventRegistrations<'w, 's, BlockInteractionCommandEvent>,
-    experience: LifeEventRegistrations<'w, 's, BlockInteractionExperienceEvent>,
 }
 fn pristine_event<E: EventData>(
     r: &LifeEventRegistrations<E>,
@@ -39,7 +37,7 @@ impl Evidence<'_, '_> {
         &self,
         m: MinimalLifeMembers,
         p: MinimalLifeParameters,
-    ) -> Result<[u64; 4], MinimalLifeCompositionError> {
+    ) -> Result<[u64; 2], MinimalLifeCompositionError> {
         self.movement.validate_writer_declaration(m.intent)?;
         self.movement.validate_reader_declaration(m.execution)?;
         self.motion.validate_writer_declaration(m.execution)?;
@@ -66,20 +64,6 @@ impl Evidence<'_, '_> {
                 Some(m.execution),
                 p.0.jump.event_policy(),
             )?,
-            pristine_event(
-                &self.command,
-                m.life,
-                m.intent,
-                Some(m.execution),
-                p.0.interaction.command_policy(),
-            )?,
-            pristine_event(
-                &self.experience,
-                m.life,
-                m.execution,
-                None,
-                p.0.interaction.experience_policy(),
-            )?,
         ])
     }
     pub(super) fn current(&self, entry: &Application) -> Result<(), MinimalLifeCompositionError> {
@@ -92,9 +76,6 @@ impl Evidence<'_, '_> {
         self.gaze.validate_reader(m.life, m.execution)?;
         self.jump.validate_writer(m.life, m.intent)?;
         self.jump.validate_reader(m.life, m.execution)?;
-        self.command.validate_writer(m.life, m.intent)?;
-        self.command.validate_reader(m.life, m.execution)?;
-        self.experience.validate_writer(m.life, m.execution)?;
         let states = [
             self.movement.slot_evidence(m.life)?,
             self.motion.slot_evidence(m.life)?,
@@ -105,17 +86,10 @@ impl Evidence<'_, '_> {
         let events = [
             self.gaze.interface_evidence(m.life)?,
             self.jump.interface_evidence(m.life)?,
-            self.command.interface_evidence(m.life)?,
-            self.experience.interface_evidence(m.life)?,
         ];
         if events.map(EventInterfaceEvidence::generation) != entry.interfaces
             || events.map(EventInterfaceEvidence::policy)
-                != [
-                    p.0.gaze.event_policy(),
-                    p.0.jump.event_policy(),
-                    p.0.interaction.command_policy(),
-                    p.0.interaction.experience_policy(),
-                ]
+                != [p.0.gaze.event_policy(), p.0.jump.event_policy()]
         {
             return Err(MinimalLifeCompositionError::PolicyMismatch);
         }
@@ -128,7 +102,7 @@ pub(super) struct Prepared {
     coordinate: CoordinateIncarnation,
     region: PhysicsDemandRegion,
     baseline: CreatureMotionExperienceState,
-    interfaces: [u64; 4],
+    interfaces: [u64; 2],
 }
 #[allow(clippy::type_complexity)]
 pub(super) fn preflight(
@@ -151,7 +125,6 @@ pub(super) fn preflight(
         Option<&FactoryMotionRoute>,
         Option<&ApplicationOwner>,
         Option<&CreatureMotionRecord>,
-        Option<&BlockInteractionRecord>,
     )>,
     executions: Query<(
         &Transform,
@@ -188,7 +161,7 @@ pub(super) fn preflight(
         let values = facts
             .get(entity)
             .map_err(|_| MinimalLifeCompositionError::InvalidMembers)?;
-        if values.0.is_some() || values.1.is_some() || values.2.is_some() || values.3.is_some() {
+        if values.0.is_some() || values.1.is_some() || values.2.is_some() {
             return Err(MinimalLifeCompositionError::ExistingFacts);
         }
     }
@@ -218,7 +191,7 @@ pub(super) fn preflight(
     if *mode != JumpInputMode::Discrete
         || *policy != FactoryMotionPolicy::RequireReadiness
         || !gate.is_blocked()
-        || *aabb != parameters.0.viewpoint.aabb()
+        || *aabb != parameters.0.aabb
         || transform.scale != Vec3::ONE
         || transform.rotation != Quat::IDENTITY
     {
@@ -291,8 +264,6 @@ type Managers<'w, 's> = ParamSet<
         LifeStateManagement<'static, 'static, CreatureMotionExperienceState>,
         LifeEventManagement<'static, 'static, GazeCommandEvent>,
         LifeEventManagement<'static, 'static, JumpCommandEvent>,
-        LifeEventManagement<'static, 'static, BlockInteractionCommandEvent>,
-        LifeEventManagement<'static, 'static, BlockInteractionExperienceEvent>,
         Evidence<'static, 'static>,
     ),
 >;
@@ -340,16 +311,6 @@ pub(super) fn approve(
         ApproveJumpWriter,
         ApproveJumpReader
     );
-    event!(
-        p4,
-        m.intent,
-        m.execution,
-        ApproveCommandWriter,
-        ApproveCommandReader
-    );
-    managers.p5().approve_writer(m.life, m.execution)?;
-    observe!(ApproveExperienceWriter);
-    observe!(ApproveExperienceReader);
     Ok(())
 }
 pub(super) fn note_slot(
@@ -409,9 +370,6 @@ pub(super) fn register(
     managers.p2().register_reader(m.life, m.execution)?;
     entry.registrations |= 1 << 5;
     event!(p3, m.intent, m.execution, 6, JumpWriter, JumpReader);
-    event!(p4, m.intent, m.execution, 8, CommandWriter, CommandReader);
-    managers.p5().register_writer(m.life, m.execution)?;
-    entry.registrations |= 1 << 10;
     Ok(())
 }
 pub(super) fn install_demand(
@@ -474,22 +432,6 @@ pub(super) fn check_motion_recorder(
     }
     Ok(())
 }
-pub(super) fn check_interaction_recorder(
-    In(id): In<InteractionActivationId>,
-    instances: LifeInstances,
-    apps: Res<Applications>,
-    records: Query<&BlockInteractionRecord>,
-) -> Result<(), MinimalLifeCompositionError> {
-    let entry = apps
-        .entries
-        .get(&id)
-        .ok_or(MinimalLifeCompositionError::Inactive)?;
-    let record = instances.resolve_body(entry.members.record)?;
-    if records.contains(record) {
-        return Err(MinimalLifeCompositionError::ExistingFacts);
-    }
-    Ok(())
-}
 pub(super) fn publish(
     In(id): In<InteractionActivationId>,
     instances: LifeInstances,
@@ -499,10 +441,7 @@ pub(super) fn publish(
     demands: LocalPhysicsDemandFacts,
     owners: Query<&ApplicationOwner>,
     routes: Query<&FactoryMotionRoute>,
-    records: Query<(
-        Option<&CreatureMotionRecord>,
-        Option<&BlockInteractionRecord>,
-    )>,
+    records: Query<(), With<CreatureMotionRecord>>,
 ) -> Result<(), MinimalLifeCompositionError> {
     let entry = apps
         .entries
@@ -525,10 +464,7 @@ pub(super) fn publish(
     if routes.get(intent).ok() != Some(&entry.members.motion_route()) {
         return Err(MinimalLifeCompositionError::InvalidMembers);
     }
-    let (motion, interaction) = records
-        .get(record)
-        .map_err(|_| MinimalLifeCompositionError::ExistingFacts)?;
-    if motion.is_some() || interaction.is_some() {
+    if records.contains(record) {
         return Err(MinimalLifeCompositionError::ExistingFacts);
     }
     assemblies
@@ -615,7 +551,7 @@ impl Cleanup<'_, '_> {
             }
         }
         let (states, events) = {
-            let e = self.managers.p6();
+            let e = self.managers.p4();
             (
                 [
                     e.movement
@@ -635,14 +571,6 @@ impl Cleanup<'_, '_> {
                         .ok()
                         .map(EventInterfaceEvidence::generation),
                     e.jump
-                        .interface_evidence(m.life)
-                        .ok()
-                        .map(EventInterfaceEvidence::generation),
-                    e.command
-                        .interface_evidence(m.life)
-                        .ok()
-                        .map(EventInterfaceEvidence::generation),
-                    e.experience
                         .interface_evidence(m.life)
                         .ok()
                         .map(EventInterfaceEvidence::generation),
@@ -680,8 +608,6 @@ impl Cleanup<'_, '_> {
                 }
             }};
         }
-        event!(p5, m.execution, m.record, 10, 3);
-        event!(p4, m.intent, m.execution, 8, 2);
         event!(p3, m.intent, m.execution, 6, 1);
         event!(p2, m.intent, m.execution, 4, 0);
         entry.registrations = 0;

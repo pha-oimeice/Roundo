@@ -1,0 +1,4 @@
+# Instance IDs reserved to this local development installation. Do not share
+# this interval with another authority or reset the persisted next cursor.
+next = "1"
+last = "18446744073709551615"

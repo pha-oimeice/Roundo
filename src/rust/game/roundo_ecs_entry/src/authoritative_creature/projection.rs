@@ -19,7 +19,6 @@ pub struct CreatureObservations<'w, 's> {
     controllers: Query<'w, 's, (Entity, &'static Controller)>,
     intent_routes: Query<'w, 's, &'static FactoryMotionRoute>,
     controller_ids: Query<'w, 's, &'static TestLifeControllers>,
-    interaction_ids: Query<'w, 's, &'static TestInteractionController>,
     records: Query<'w, 's, &'static CreatureMotionRecord>,
 }
 
@@ -74,12 +73,6 @@ impl CreatureObservations<'_, '_> {
                 if domain == IntentDomain::movement()
                     && controller_ids.movement == controller_id => {}
             domain if domain == IntentDomain::gaze() && controller_ids.gaze == controller_id => {}
-            domain
-                if domain == IntentDomain::block_interaction()
-                    && self
-                        .interaction_ids
-                        .get(execution)
-                        .is_ok_and(|id| id.0 == controller_id) => {}
             _ => return None,
         }
         Some(LiveCreatureController {
@@ -106,8 +99,7 @@ impl CreatureObservations<'_, '_> {
                 return None;
             }
             let live = self.live_creature_controller(id)?;
-            (live.life == life && live.domain != IntentDomain::block_interaction())
-                .then_some(live.route)
+            (live.life == life).then_some(live.route)
         })?;
         let record_entity = self.instances.resolve_body(route.record()).ok()?;
         Some(CreatureObservation::from_record(
@@ -277,7 +269,6 @@ impl SnapshotAuthorization<'_, '_> {
                     gaze_seen = true;
                     gaze_binding = active_controller.binding;
                 }
-                domain if domain == IntentDomain::block_interaction() => {}
                 _ => return None,
             }
             if active_controller.entity

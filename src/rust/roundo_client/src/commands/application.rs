@@ -19,7 +19,7 @@ pub(super) struct ClientCommandApplication<'a> {
     pub(super) navigation: Option<&'a mut roundo_webui::UiNavigationExecutor>,
     pub(super) scene: Option<&'a mut crate::scene::ClientSceneManager>,
     pub(super) hud: &'a HudCache,
-    pub(super) input_registry: Option<&'a roundo_marionette::InputRegistry>,
+    pub(super) input_registry: &'a roundo_marionette::InputFunctionRegistry,
 }
 
 /// Request-local host effects, never reconstructed from command names or JSON.
@@ -224,88 +224,125 @@ impl ClientCommandApplication<'_> {
                 }
             }
             settings.normalize();
-            config.save().map_err(|error| {
+            config.save_setting(&input.key).map_err(|error| {
                 roundo_cli::json_command::CommandError::new("config_save_failed", error)
             })?;
             Ok(EmptyOutput {})
         });
-        // Incremental bind/unbind handlers mutate memory before persistence.
-        // Replacement instead stages a cloned document and publishes it in memory
-        // only after the file write succeeds.
+        // Shortcut edits validate the whole graph and persist before publication.
+        registry.register_typed::<FunctionsListDefinition>(|_, _| {
+            Ok(functions_list_output(input_registry))
+        });
+        registry
+            .register_typed::<SlotsListDefinition>(|_, _| Ok(slots_list_output(&config.borrow())));
+        registry.register_typed::<SlotsCreateDefinition>(|input, _| {
+            edit_input_configuration(&mut config.borrow_mut(), input_registry, |settings| {
+                if settings.input_slots.contains_key(&input.slot) {
+                    return Err(shortcut_error(
+                        "slot_exists",
+                        "shortcut slot already exists",
+                    ));
+                }
+                settings.input_slots.insert(
+                    input.slot,
+                    ClientInputSlotConfig {
+                        display_name: input.display_name,
+                        functions: Default::default(),
+                    },
+                );
+                Ok(())
+            })
+        });
+        registry.register_typed::<SlotsRenameDefinition>(|input, _| {
+            edit_input_configuration(&mut config.borrow_mut(), input_registry, |settings| {
+                let slot = settings.input_slots.get_mut(&input.slot).ok_or_else(|| {
+                    shortcut_error("unknown_input_slot", "shortcut slot does not exist")
+                })?;
+                slot.display_name = input.display_name;
+                Ok(())
+            })
+        });
+        registry.register_typed::<SlotsDeleteDefinition>(|input, _| {
+            edit_input_configuration(&mut config.borrow_mut(), input_registry, |settings| {
+                let slot = settings.input_slots.get(&input.slot).ok_or_else(|| {
+                    shortcut_error("unknown_input_slot", "shortcut slot does not exist")
+                })?;
+                if !slot.functions.is_empty()
+                    || settings
+                        .input_bindings
+                        .iter()
+                        .any(|binding| binding.slot == input.slot)
+                {
+                    return Err(shortcut_error(
+                        "slot_in_use",
+                        "remove key bindings and function assignments before deleting the slot",
+                    ));
+                }
+                settings.input_slots.remove(&input.slot);
+                Ok(())
+            })
+        });
+        registry.register_typed::<SlotsAssignDefinition>(|input, _| {
+            edit_input_configuration(&mut config.borrow_mut(), input_registry, |settings| {
+                let slot = settings.input_slots.get_mut(&input.slot).ok_or_else(|| {
+                    shortcut_error("unknown_input_slot", "shortcut slot does not exist")
+                })?;
+                if !slot.functions.insert(input.function) {
+                    return Err(shortcut_error(
+                        "assignment_exists",
+                        "function is already assigned to this slot",
+                    ));
+                }
+                Ok(())
+            })
+        });
+        registry.register_typed::<SlotsUnassignDefinition>(|input, _| {
+            edit_input_configuration(&mut config.borrow_mut(), input_registry, |settings| {
+                let slot = settings.input_slots.get_mut(&input.slot).ok_or_else(|| {
+                    shortcut_error("unknown_input_slot", "shortcut slot does not exist")
+                })?;
+                if !slot.functions.remove(&input.function) {
+                    return Err(shortcut_error(
+                        "assignment_not_found",
+                        "function is not assigned to this slot",
+                    ));
+                }
+                Ok(())
+            })
+        });
         registry.register_typed::<BindingsListDefinition>(|_, _| {
             Ok(bindings_list_output(&config.borrow(), input_registry))
         });
         registry.register_typed::<BindingsBindDefinition>(|input, _| {
             let binding = ClientInputBindingConfig::try_from(input)?;
-            validate_binding_slot(&binding, input_registry)?;
-            let mut config = config.borrow_mut();
-            if crate::config::effective_input_bindings(config.settings(), input_registry)
-                .map_err(binding_configuration_error)?
-                .contains(&binding)
-            {
-                return Err(roundo_cli::json_command::CommandError::new(
-                    "binding_exists",
-                    "binding already exists",
-                ));
-            }
-            crate::config::customize_input_slot(
-                config.settings_mut(),
-                input_registry,
-                &binding.slot,
-            )
-            .map_err(binding_configuration_error)?;
-            config.settings_mut().input_bindings.push(binding);
-            config.save().map_err(|error| {
-                roundo_cli::json_command::CommandError::new("config_save_failed", error)
-            })?;
-            Ok(EmptyOutput {})
+            edit_input_configuration(&mut config.borrow_mut(), input_registry, |settings| {
+                if settings.input_bindings.contains(&binding) {
+                    return Err(shortcut_error("binding_exists", "binding already exists"));
+                }
+                settings.input_bindings.push(binding);
+                Ok(())
+            })
         });
         registry.register_typed::<BindingsUnbindDefinition>(|input, _| {
             let binding = ClientInputBindingConfig::try_from(input)?;
-            let mut config = config.borrow_mut();
-            let effective =
-                crate::config::effective_input_bindings(config.settings(), input_registry)
-                    .map_err(binding_configuration_error)?;
-            if !effective.contains(&binding) {
-                return Err(roundo_cli::json_command::CommandError::new(
-                    "binding_not_found",
-                    "binding does not exist",
-                ));
-            }
-            crate::config::customize_input_slot(
-                config.settings_mut(),
-                input_registry,
-                &binding.slot,
-            )
-            .map_err(binding_configuration_error)?;
-            config
-                .settings_mut()
-                .input_bindings
-                .retain(|existing| *existing != binding);
-            config.save().map_err(|error| {
-                roundo_cli::json_command::CommandError::new("config_save_failed", error)
-            })?;
-            Ok(EmptyOutput {})
+            edit_input_configuration(&mut config.borrow_mut(), input_registry, |settings| {
+                if !settings.input_bindings.contains(&binding) {
+                    return Err(shortcut_error(
+                        "binding_not_found",
+                        "binding does not exist",
+                    ));
+                }
+                settings
+                    .input_bindings
+                    .retain(|existing| *existing != binding);
+                Ok(())
+            })
         });
         registry.register_typed::<BindingsReplaceDefinition>(|input, _| {
             let old_binding = ClientInputBindingConfig::try_from(input.old_binding)?;
             let replacement = ClientInputBindingConfig::try_from(input.binding)?;
-            validate_binding_slot(&replacement, input_registry)?;
-            let mut config = config.borrow_mut();
-            let mut settings = config.settings().clone();
-            crate::config::customize_input_slot(&mut settings, input_registry, &old_binding.slot)
-                .map_err(binding_configuration_error)?;
-            if old_binding.slot != replacement.slot {
-                crate::config::customize_input_slot(
-                    &mut settings,
-                    input_registry,
-                    &replacement.slot,
-                )
-                .map_err(binding_configuration_error)?;
-            }
-            replace_binding(&mut settings.input_bindings, old_binding, replacement)?;
-            config.replace_settings(settings).map_err(|error| {
-                roundo_cli::json_command::CommandError::new("config_save_failed", error)
+            edit_input_configuration(&mut config.borrow_mut(), input_registry, |settings| {
+                replace_binding(&mut settings.input_bindings, old_binding, replacement)
             })?;
             Ok(BindingMutationOutput {})
         });
@@ -510,8 +547,8 @@ impl ClientCommandApplication<'_> {
     }
 }
 
-fn binding_configuration_error(error: String) -> roundo_cli::json_command::CommandError {
-    roundo_cli::json_command::CommandError::new("invalid_input_binding", error)
+fn shortcut_error(code: &str, message: &str) -> roundo_cli::json_command::CommandError {
+    roundo_cli::json_command::CommandError::new(code, message)
 }
 
 fn scene_unavailable() -> roundo_cli::json_command::CommandError {

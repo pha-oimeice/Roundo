@@ -140,12 +140,6 @@ pub(super) fn request_test_creature(
     let (intent_id, execution_id, record_id) = (ids.intent(), ids.execution(), ids.record());
     let life = LifePrototype::empty()
         .with_state_policy::<GazeCommandState>(StatePolicy::initialized_only())
-        .with_event_interface::<roundo_block_interaction::ItemUseCommandEvent>(EventPolicy::new(
-            16,
-            16 * std::mem::size_of::<roundo_block_interaction::ItemUseCommandEvent>(),
-            1,
-            1,
-        )?)
         .with_state_policy::<MovementCommandState>(StatePolicy::initialized_only())
         .with_event_interface::<GazeCommandEvent>(EventPolicy::new(
             1,
@@ -158,7 +152,6 @@ pub(super) fn request_test_creature(
         intent: ConceptBodyPrototype::new(prototype.intent.materialize(intent_id))
             .with_state_writer::<GazeCommandState>()
             .with_state_reader::<GazeCommandState>()
-            .with_event_writer::<roundo_block_interaction::ItemUseCommandEvent>()
             .with_state_writer::<MovementCommandState>()
             .with_event_writer::<GazeCommandEvent>(),
         execution: ConceptBodyPrototype::new(prototype.execution.materialize(
@@ -167,7 +160,6 @@ pub(super) fn request_test_creature(
             environment,
         ))
         .with_state_reader::<GazeCommandState>()
-        .with_event_reader::<roundo_block_interaction::ItemUseCommandEvent>()
         .with_state_reader::<MovementCommandState>()
         .with_event_reader::<GazeCommandEvent>()
         .with_state_writer::<CreatureMotionExperienceState>(),

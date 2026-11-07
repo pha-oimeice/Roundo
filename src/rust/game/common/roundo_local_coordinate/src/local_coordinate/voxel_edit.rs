@@ -248,6 +248,9 @@ impl LocalVoxelEdits<'_, '_> {
         target.expected = facts(runtime.world, target, lc, identity)?;
         Ok(target)
     }
+    /// Queues an explicit data replacement at the caller-observed target.
+    /// A registered nonempty voxel writes block data; `EMPTY_VOXEL_ID` removes
+    /// it. This selects no target, ray, default material, actor or item method.
     pub fn submit(
         &mut self,
         target: VoxelEditTarget,

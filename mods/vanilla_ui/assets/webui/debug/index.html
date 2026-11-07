@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Roundo · 调试目录</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main>
+  <header><div><small>ROUNDO / DEBUG WORKSPACE</small><h1>调试目录</h1></div><div class="toolbar"><span id="connection" role="status">读取连接状态…</span><button id="bindings">修改快捷键</button><button id="close">关闭 · Esc</button></div></header>
+  <div id="message" role="status" aria-live="polite">请选择要打开的调试界面。</div>
+  <nav class="debug-directory" aria-label="调试界面目录">
+    <button class="card directory-entry" data-import="life"><strong>生命体与概念体</strong><span class="muted">查看与创建生命体、概念体，编辑属性与数据协作关系。</span></button>
+    <button class="card directory-entry" data-import="inventory"><strong>物品栏管理</strong><span class="muted">按概念体或全局查看物品栏，创建空栏、转移物品及管理 Public 兜底保管。</span></button>
+    <button class="card directory-entry" data-import="items"><strong>物品管理</strong><span class="muted">物品实例、归属分配与功能组装；按需创建，归属物品栏可选择 Public。</span></button>
+    <button class="card directory-entry" data-import="runtime"><strong>运行诊断</strong><span class="muted">查看连接、帧率、相机、指向及玩家控制器获取状态。</span></button>
+  </nav>
+  <footer><span id="shortcut">正在读取快捷键绑定…</span></footer>
+</main><script src="navigation.js"></script>
+</body></html>

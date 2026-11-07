@@ -1330,9 +1330,14 @@ impl UiViewLifetime {
             && !activity.recovery.close_requested
             && self.controller_quiet(activity);
         if may_create {
-            if let Some(id) = self.records.iter().find_map(|(id, record)| {
-                (record.phase == Phase::Queued && record.terminal.is_none()).then_some(*id)
-            }) {
+            // Actual opens precede speculative candidates; each class retains ID order.
+            if let Some(id) = self
+                .records
+                .iter()
+                .filter(|(_, record)| record.phase == Phase::Queued && record.terminal.is_none())
+                .min_by_key(|(id, record)| (record.descriptor.prefetched, **id))
+                .map(|(id, _)| *id)
+            {
                 let action_id = self.action_id();
                 let opening = self.opening(id);
                 let record = self.records.get_mut(&id).expect("selected queued record");

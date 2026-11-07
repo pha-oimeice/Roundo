@@ -2,8 +2,8 @@
 
 use super::Movement3DAction;
 use crate::character_controller::{
-    ClientInputFrame, MOVE_BACKWARD_INPUT_SLOT, MOVE_DOWN_INPUT_SLOT, MOVE_FORWARD_INPUT_SLOT,
-    MOVE_LEFT_INPUT_SLOT, MOVE_RIGHT_INPUT_SLOT, MOVE_UP_INPUT_SLOT,
+    ClientFunctionFrame, MOVE_BACKWARD_FUNCTION, MOVE_DOWN_FUNCTION, MOVE_FORWARD_FUNCTION,
+    MOVE_LEFT_FUNCTION, MOVE_RIGHT_FUNCTION, MOVE_UP_FUNCTION,
     client::{
         ClientControllerCommandState, ClientMarionetteEvent, ClientMarionetteInputSettings,
         ClientPipeResource, ClientPlayerController, ClientPlayerControllerAccess,
@@ -18,7 +18,7 @@ use roundo_contracts::PlayerControllerCommand;
 
 /// Sends a sequenced direction change; authoritative speed remains server-owned.
 pub(crate) fn route_player_movement(
-    mut inputs: MessageReader<ClientInputFrame>,
+    mut inputs: MessageReader<ClientFunctionFrame>,
     controller: Res<ClientPlayerController>,
     access: Res<ClientPlayerControllerAccess>,
     pipe: Res<ClientPipeResource>,
@@ -61,7 +61,7 @@ pub(crate) fn route_player_movement(
 
 /// Moves the detached spirit camera locally at the configured camera speed.
 pub(crate) fn move_spirit_camera(
-    mut inputs: MessageReader<ClientInputFrame>,
+    mut inputs: MessageReader<ClientFunctionFrame>,
     settings: Res<ClientMarionetteInputSettings>,
     time: Res<Time>,
     controller: Res<ClientPlayerController>,
@@ -81,8 +81,8 @@ pub(crate) fn move_spirit_camera(
     transform.translation += direction * settings.camera_move_speed * time.delta_secs();
 }
 
-/// Maps registered movement slots through the camera's horizontal heading.
-pub(crate) fn movement_world_direction(input: &ClientInputFrame, transform: &Transform) -> Vec3 {
+/// Maps named movement functions through the camera's horizontal heading.
+pub(crate) fn movement_world_direction(input: &ClientFunctionFrame, transform: &Transform) -> Vec3 {
     let local_direction = movement_local_axis(input);
     let (yaw, _, _) = transform.rotation.to_euler(EulerRot::YXZ);
     let horizontal_rotation = Quat::from_rotation_y(yaw);
@@ -93,14 +93,14 @@ pub(crate) fn movement_world_direction(input: &ClientInputFrame, transform: &Tra
 }
 
 /// Controller-local axis; consumers never query a physical device.
-pub(crate) fn movement_local_axis(input: &ClientInputFrame) -> Vec3 {
+pub(crate) fn movement_local_axis(input: &ClientFunctionFrame) -> Vec3 {
     let axis = |positive, negative| {
         f32::from(input.pressed(positive)) - f32::from(input.pressed(negative))
     };
     Vec3::new(
-        axis(MOVE_RIGHT_INPUT_SLOT, MOVE_LEFT_INPUT_SLOT),
-        axis(MOVE_UP_INPUT_SLOT, MOVE_DOWN_INPUT_SLOT),
-        axis(MOVE_FORWARD_INPUT_SLOT, MOVE_BACKWARD_INPUT_SLOT),
+        axis(MOVE_RIGHT_FUNCTION, MOVE_LEFT_FUNCTION),
+        axis(MOVE_UP_FUNCTION, MOVE_DOWN_FUNCTION),
+        axis(MOVE_FORWARD_FUNCTION, MOVE_BACKWARD_FUNCTION),
     )
     .normalize_or_zero()
 }

@@ -82,7 +82,7 @@ sqlx = { version = "0.9", features = ["derive", "json", "macros", "migrate", "po
 tokio = { version = "1", features = ["full"] }
 tokio-rustls = "0.26"
 toml = "1.1"
-toml_edit = "0.25"
+toml_edit = { version = "0.25", features = ["serde"] }
 ttf-parser = "0.25"
 proc-macro2 = "1"
 quote = "1"

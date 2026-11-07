@@ -137,7 +137,6 @@ pub(super) fn project_access(
     players: Query<&Player>,
     routes: ControllerCommandRoutes,
     admission: Res<Admission>,
-    block_item: Option<Res<crate::block_item::BlockItemReference>>,
 ) -> AccessProjection {
     let Some(player_id) = registry.player_for_connection(connection) else {
         return AccessProjection::UnknownConnection;
@@ -161,8 +160,6 @@ pub(super) fn project_access(
                 ControllerIntentDomain::Movement
             } else if route.domain == roundo_controller::IntentDomain::gaze() {
                 ControllerIntentDomain::Gaze
-            } else if route.domain == roundo_controller::IntentDomain::block_interaction() {
-                ControllerIntentDomain::BlockInteraction
             } else {
                 return None;
             };
@@ -182,14 +179,6 @@ pub(super) fn project_access(
     controllers.sort_unstable_by_key(|entry| entry.controller_id);
     AccessProjection::Snapshot(PlayerControllerAccessSnapshot {
         player_id,
-        block_item: controllers
-            .iter()
-            .any(|entry| {
-                entry.intent_domain == ControllerIntentDomain::BlockInteraction
-                    && entry.access_level == roundo_contracts::ControllerAccessLevel::ReadWrite
-            })
-            .then(|| crate::block_item::reference(block_item.as_deref()))
-            .flatten(),
         controllers,
     })
 }

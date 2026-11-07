@@ -1,17 +1,14 @@
-//! Passive, independently composable block-use permissions and the use intent.
-//! No item identity, schema or data value executes a behavior.
-
-use roundo_contracts::ItemUseMethod;
-use roundo_inventory::ItemId;
+//! Passive, independently composable block-related item data.
+//! These payloads do not grant use authority, dispatch a method or edit voxels.
 use roundo_items::{ItemDataBuilder, ItemDataError, ItemSchema};
 
-/// Presence permits the code-implemented placement method at this world-space reach.
+/// Stored placement-related reach; not an executable method or use grant.
 #[derive(Clone, Copy, Debug)]
 pub struct BlockPlacementPermit {
     pub reach: f32,
 }
 
-/// Presence permits the code-implemented destruction method at this world-space reach.
+/// Stored removal-related reach; not an executable method or use grant.
 #[derive(Clone, Copy, Debug)]
 pub struct BlockDestructionPermit {
     pub reach: f32,
@@ -43,14 +40,3 @@ impl BlockItemSchemas {
         })
     }
 }
-
-/// An intent for Execution to interpret against current item data, not an edit.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct ItemUseCommandEvent {
-    pub item: ItemId,
-    pub method: ItemUseMethod,
-}
-
-roundo_life::declare_event_data!(ItemUseCommandEvent, "roundo.item-use.command.v1", |_| {
-    std::mem::size_of::<ItemUseCommandEvent>()
-});

@@ -47,9 +47,7 @@ impl MinimalLifeMembers {
 pub struct MinimalLifeParameterValues {
     pub gaze: OneTickCommandBudget<GazeCommandEvent>,
     pub jump: OneTickCommandBudget<JumpCommandEvent>,
-    pub interaction: BlockInteractionBudgets,
-    pub viewpoint: CreatureViewpoint,
-    pub edit_permission: bool,
+    pub aabb: AabbDimensions,
     pub maximum_sweep_distance: f32,
     pub neighbor_chunks: usize,
 }
@@ -76,19 +74,12 @@ impl MinimalLifeParameters {
             .with_state_policy::<CreatureMotionExperienceState>(StatePolicy::initialized_only())
             .with_event_interface::<GazeCommandEvent>(self.0.gaze.event_policy())
             .with_event_interface::<JumpCommandEvent>(self.0.jump.event_policy())
-            .with_event_interface::<BlockInteractionCommandEvent>(
-                self.0.interaction.command_policy(),
-            )
-            .with_event_interface::<BlockInteractionExperienceEvent>(
-                self.0.interaction.experience_policy(),
-            )
     }
     pub fn intent_prototype<B: Bundle>(self, bundle: B) -> ConceptBodyPrototype<B> {
         ConceptBodyPrototype::new(bundle)
             .with_state_writer::<MovementCommandState>()
             .with_event_writer::<GazeCommandEvent>()
             .with_event_writer::<JumpCommandEvent>()
-            .with_event_writer::<BlockInteractionCommandEvent>()
     }
     /// The caller supplies the permanent Discrete/RequireReadiness policies and
     /// a blocked readiness gate in `bundle`; missing/other modes are rejected.
@@ -97,9 +88,7 @@ impl MinimalLifeParameters {
             .with_state_reader::<MovementCommandState>()
             .with_event_reader::<GazeCommandEvent>()
             .with_event_reader::<JumpCommandEvent>()
-            .with_event_reader::<BlockInteractionCommandEvent>()
             .with_state_writer::<CreatureMotionExperienceState>()
-            .with_event_writer::<BlockInteractionExperienceEvent>()
     }
     pub fn record_prototype<B: Bundle>(self, bundle: B) -> ConceptBodyPrototype<B> {
         ConceptBodyPrototype::new(bundle)
@@ -185,8 +174,8 @@ impl Plugin for MinimalLifeApplicationPlugin {
         if !app.is_plugin_added::<CreatureLifeDataPlugin>() {
             app.add_plugins(CreatureLifeDataPlugin);
         }
-        if !app.is_plugin_added::<BlockInteractionLifeDataPlugin>() {
-            app.add_plugins(BlockInteractionLifeDataPlugin);
+        if !app.is_plugin_added::<InteractionIdsPlugin>() {
+            app.add_plugins(InteractionIdsPlugin);
         }
         if !app.is_plugin_added::<LifeRuntimePlugin>() {
             app.add_plugins(LifeRuntimePlugin::default());
@@ -231,9 +220,6 @@ impl Plugin for MinimalLifeApplicationPlugin {
                     world_execution::refresh_readiness
                         .after(CreatureLifeSet::CommandProjection)
                         .before(CreatureLifeSet::MotionCommit),
-                    world_execution::execute_interactions
-                        .in_set(VoxelEditSet::Commit)
-                        .after(CreatureLifeSet::MotionCommit),
                 ),
             )
             .add_observer(close_invalidated_application);
@@ -250,7 +236,7 @@ struct Application {
     registrations: u16,
     slots: [Option<u64>; 2],
     pending: [Option<LifeStructureRequestId>; 2],
-    interfaces: [u64; 4],
+    interfaces: [u64; 2],
     demand: Option<PhysicsDemandId>,
     baseline: CreatureMotionExperienceState,
     gaze_total: [f32; 2],
@@ -445,10 +431,6 @@ pub fn compose_minimal_life(
             .run_system_once_with(registration::check_motion_recorder, id)
             .expect("empty motion Recorder")?;
         observe!(MotionRecorderChecked);
-        world
-            .run_system_once_with(registration::check_interaction_recorder, id)
-            .expect("empty interaction Recorder")?;
-        observe!(InteractionRecorderChecked);
         world
             .run_system_once_with(registration::publish, id)
             .expect("complete recipe revalidation")?;

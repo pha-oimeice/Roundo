@@ -4,10 +4,7 @@ mod client;
 use bevy::prelude::{Component, Entity, Message};
 pub use roundo_contracts::GazeIntent;
 
-pub(super) use self::client::{
-    ClientRotationSyncState, RotationUploadMode, RotationUploadOutcome, rotate_camera,
-    synchronize_current_rotation,
-};
+pub(super) use self::client::{ClientRotationSyncState, rotate_camera, route_current_gaze};
 
 /// Minimum interval between client gaze intent uploads.
 pub const ROTATION_SYNC_INTERVAL_SECS: f32 = 0.1;

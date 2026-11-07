@@ -20,7 +20,7 @@ pub struct ResourceTypeId(pub &'static str);
 pub const ATOMIC_VOXEL_RESOURCE_TYPE: ResourceTypeId = ResourceTypeId("atomic-voxel");
 /// Resource type that publishes the Web UI registry.
 pub const WEB_UI_RESOURCE_TYPE: ResourceTypeId = ResourceTypeId("web-ui");
-/// Resource type that publishes the semantic input-slot registry.
+/// Resource type that publishes named input functions, not client shortcut slots.
 pub const INPUT_RESOURCE_TYPE: ResourceTypeId = ResourceTypeId("input");
 /// Resource type that publishes the immutable item definition registry.
 pub const ITEM_RESOURCE_TYPE: ResourceTypeId = ResourceTypeId("item");
