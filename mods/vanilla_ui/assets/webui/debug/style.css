@@ -24,14 +24,15 @@ button, input, select { font: inherit; border: 1px solid var(--line); border-rad
 button { cursor: pointer; }
 button:hover:not(:disabled), .selected { border-color: var(--accent); color: var(--accent); }
 button.primary { background: #203e3a; border-color: var(--accent); }
+button.danger { border-color: #ee9d84; color: #ee9d84; }
 button:disabled { opacity: .45; cursor: not-allowed; }
 button:focus-visible, input:focus-visible, select:focus-visible, summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 label { display: grid; gap: 5px; color: var(--muted); }
 input, select { min-width: 0; width: 100%; color: #edf4fa; }
 input:invalid { border-color: #dd977b; }
 .muted, footer { color: var(--muted); font-size: 13px; }
-#message { border-left: 3px solid var(--accent); background: #152b2a; padding: 10px 14px; white-space: pre-wrap; overflow-wrap: anywhere; margin-bottom: 18px; }
-#message.error { border-color: #ee9d84; background: #33241f; }
+#message, #directory-message, #navigation-message { border-left: 3px solid var(--accent); background: #152b2a; padding: 10px 14px; white-space: pre-wrap; overflow-wrap: anywhere; margin-bottom: 18px; }
+#message.error, #navigation-message { border-color: #ee9d84; background: #33241f; }
 .workspace { display: grid; grid-template-columns: minmax(245px,300px) minmax(0,1fr); gap: 18px; }
 .card { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 20px; min-width: 0; }
 aside .toolbar { margin-bottom: 14px; }
@@ -49,7 +50,7 @@ aside > button { width: 100%; margin: 4px 0 10px; }
 .body-choice strong, .body-choice span { display: block; }
 .body-choice strong { font-size: 14px; }
 .object-id, .object-duty { font-size: 12px; color: var(--muted); }
-.object-id { font-family: ui-monospace, monospace; margin-top: 3px; }
+.object-id { font-family: ui-monospace, monospace; margin-top: 3px; overflow-wrap: anywhere; }
 .member-list { display: flex; flex-wrap: wrap; gap: 8px; }
 .member-list .body-choice { text-align: left; }
 .identity-card { border-left: 3px solid var(--accent); padding: 1px 16px; margin: 18px 0; }
@@ -78,7 +79,7 @@ details p, details li { overflow-wrap: anywhere; }
 pre { font: 13px/1.6 ui-monospace, monospace; background: #111c28; padding: 14px; border-radius: 7px; white-space: pre-wrap; overflow-wrap: anywhere; }
 footer { margin-top: 18px; }
 [hidden] { display: none !important; }
-body.busy #bodies { opacity: .65; }
+.debug-page.busy #bodies { opacity: .65; }
 @media (max-width: 1050px) { .steps { grid-template-columns: 1fr; } }
 @media (max-width: 800px) {
   main { padding: 12px; }

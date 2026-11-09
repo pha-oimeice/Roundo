@@ -26,6 +26,10 @@ mod debug;
 #[cfg(feature = "server")]
 pub use debug::DebugItemIssuer;
 #[cfg(feature = "server")]
+mod item_lifecycle;
+#[cfg(feature = "server")]
+pub use item_lifecycle::{ItemDeletionError, destroy_item};
+#[cfg(feature = "server")]
 pub mod physics;
 #[cfg(feature = "server")]
 mod player_control;

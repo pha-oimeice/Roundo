@@ -126,6 +126,46 @@ struct Representations {
     items: HashMap<ItemId, Entity>,
 }
 
+/// Validates the optional representation before a serialized destruction commit.
+/// Missing capability means no representation can have been registered through
+/// this module. A stale/mismatched registered entity rejects without cleanup.
+pub(crate) fn prepare_destruction(
+    world: &World,
+    item: ItemId,
+) -> Result<Option<Entity>, WorldItemError> {
+    let Some(representations) = world.get_resource::<Representations>() else {
+        return Ok(None);
+    };
+    if world.id() != representations.world {
+        return Err(WorldItemError::WrongWorld);
+    }
+    let Some(&entity) = representations.items.get(&item) else {
+        return Ok(None);
+    };
+    if !world
+        .get::<DroppedItem>(entity)
+        .is_some_and(|drop| drop.item == item)
+    {
+        return Err(WorldItemError::NotRepresented);
+    }
+    Ok(Some(entity))
+}
+
+/// Completes an exclusively prepared commit without deferring entity removal.
+/// The caller must not allow World mutation between preparation and destruction
+/// other than the exact item's data/custody commit and cached-grant cleanup.
+pub(crate) fn finish_destruction(world: &mut World, item: ItemId, entity: Option<Entity>) {
+    if let Some(entity) = entity {
+        let removed = world.resource_mut::<Representations>().items.remove(&item);
+        assert_eq!(
+            removed,
+            Some(entity),
+            "prepared item representation changed"
+        );
+        assert!(world.despawn(entity), "prepared item entity disappeared");
+    }
+}
+
 /// Empty architectural capability. Only structural reconciliation is scheduled;
 /// pickup remains an explicit action of the collector, not an automatic game rule.
 pub struct WorldItemsPlugin {

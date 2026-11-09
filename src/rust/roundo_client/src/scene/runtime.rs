@@ -65,7 +65,6 @@ fn apply_recovery_action(
                 }
             }
             RecoveryAction::Disconnect => {
-                ui.dismiss_recovery_surface();
                 network.disconnect();
             }
             RecoveryAction::Quit => {
@@ -82,18 +81,25 @@ fn coordinate_scene(
     mut navigation: NonSendMut<UiNavigationExecutor>,
 ) {
     scene.synchronize(&network.status().status, &ui);
-    // Recovery retains the previous document transaction, not gameplay authority.
-    if ui.recovery_surface().is_some() {
+    let target = scene.root_scene();
+    // Retain failure presentation while it still belongs to the desired Scene.
+    // A connection change can select another root, but cannot dismiss Recovery
+    // until that projection is accepted (or an existing complete root is reused).
+    if ui
+        .recovery_surface()
+        .is_some_and(|recovery| recovery.scene == target)
+    {
         return;
     }
-    let target = scene.root_scene();
     match navigation.replace_root(&mut ui, target) {
-        Ok(UiRootReplacement::Unchanged | UiRootReplacement::Pending(_)) => {}
-        Ok(UiRootReplacement::Completed(destroyed)) => {
-            log::info!(
-                "Scene root projection committed without a page: {target:?}; destroyed={}",
-                destroyed.len()
-            );
+        Ok(replacement) => {
+            ui.dismiss_recovery_surface();
+            if let UiRootReplacement::Completed(destroyed) = replacement {
+                log::info!(
+                    "Scene root projection committed without a page: {target:?}; destroyed={}",
+                    destroyed.len()
+                );
+            }
         }
         Err(error) => log::error!("cannot stage Scene root {target:?}: {error}"),
     }

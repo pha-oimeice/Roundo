@@ -1,8 +1,68 @@
-//! Diagnostic item composition uses the host's durable identity reservation,
-//! existing custody selectors and the same native sources as the startup item.
+//! Diagnostic item creation, listing and exact-instance destruction. Routing
+//! names retain existing resource identities, never a second native allocator.
 use super::*;
+use bevy::ecs::system::RunSystemOnce;
 use roundo_block_interaction::{BlockDestructionPermit, BlockPlacementPermit};
-use roundo_items::ItemIssuer;
+use roundo_inventory::{Inventories, InventoryHandle, ItemId};
+use roundo_items::{ItemAccessError, ItemAdministration, ItemInstanceId, ItemIssuer};
+use std::collections::HashMap;
+
+#[derive(Resource, Default)]
+pub(super) struct ItemSelectors {
+    next: u64,
+    targets: HashMap<ItemInstanceId, ItemTarget>,
+}
+
+struct ItemTarget {
+    item: ItemId,
+    selector: String,
+}
+
+impl ItemSelectors {
+    fn sync(&mut self, administration: &ItemAdministration) -> Result<(), DebugFailure> {
+        let mut ended = Vec::new();
+        for (expected, target) in &self.targets {
+            match administration.instance_id(target.item) {
+                Ok(current) if current == *expected => {}
+                Ok(_) | Err(ItemAccessError::UnknownItem) => ended.push(expected.clone()),
+                Err(error) => return Err(failure(error)),
+            }
+        }
+        for instance in ended {
+            self.targets.remove(&instance);
+        }
+        Ok(())
+    }
+
+    fn bind(
+        &mut self,
+        item: ItemId,
+        instance: ItemInstanceId,
+    ) -> Result<DebugItemSummary, DebugFailure> {
+        if !self.targets.contains_key(&instance) && self.targets.len() >= MAX_TARGETS {
+            return Err(DebugFailure::new("capacity", "物品实例诊断索引上限已到达"));
+        }
+        let target = self.targets.entry(instance).or_insert_with(|| ItemTarget {
+            item,
+            selector: DebugState::allocate(&mut self.next, "item"),
+        });
+        Ok(DebugItemSummary {
+            item: target.item.as_u128().to_string(),
+            selector: target.selector.clone(),
+        })
+    }
+
+    fn resolve(&self, selector: &str) -> Result<(ItemId, ItemInstanceId), DebugFailure> {
+        self.targets
+            .iter()
+            .find_map(|(instance, target)| {
+                (target.selector == selector).then(|| (target.item, instance.clone()))
+            })
+            .ok_or_else(|| {
+                DebugFailure::new("stale_item", "物品实例不存在或选择已失效，请刷新物品列表")
+            })
+    }
+}
 
 /// Host-provided reservation for each diagnostic creation, with no fallback IDs.
 ///
@@ -32,26 +92,96 @@ pub(super) fn manage(world: &mut World) {
             if work.result.is_some() || work.deferred {
                 return None;
             }
-            let DebugOperation::CreateItem {
+            matches!(
+                work.request.operation,
+                DebugOperation::CreateItem { .. } | DebugOperation::Item(_)
+            )
+            .then(|| (index, work.request.operation.clone()))
+        })
+        .collect();
+    for (index, operation) in requests {
+        let result = match operation {
+            DebugOperation::CreateItem {
                 inventory,
                 placement_reach,
                 destruction_reach,
-            } = &work.request.operation
-            else {
-                return None;
-            };
-            Some((
-                index,
-                inventory.clone(),
-                *placement_reach,
-                *destruction_reach,
-            ))
-        })
-        .collect();
-    for (index, inventory, placement, destruction) in requests {
-        let result = create(world, &inventory, placement, destruction);
+            } => create(world, &inventory, placement_reach, destruction_reach),
+            DebugOperation::Item(DebugItemOperation::List { inventory, offset }) => {
+                list(world, &inventory, offset)
+            }
+            DebugOperation::Item(DebugItemOperation::Remove {
+                inventory,
+                selector,
+            }) => remove(world, &inventory, &selector),
+            _ => unreachable!("only item operations were selected"),
+        };
         world.resource_mut::<DebugState>().work[index].result = Some(result);
     }
+}
+
+fn list(world: &mut World, inventory: &str, offset: u32) -> Result<DebugData, DebugFailure> {
+    let (handle, summary) = inventory::selected(world, inventory)?;
+    world
+        .run_system_once_with(
+            |In((handle, summary, offset)): In<(InventoryHandle, DebugInventorySummary, u32)>,
+             inventories: Inventories,
+             administration: ItemAdministration,
+             mut selectors: ResMut<ItemSelectors>| {
+                selectors.sync(&administration)?;
+                let mut items = inventories.items(handle).map_err(failure)?;
+                items.sort_unstable();
+                let total = items.len();
+                let offset = offset as usize;
+                let items = items
+                    .into_iter()
+                    .skip(offset)
+                    .take(PAGE)
+                    .map(|item| {
+                        let instance = administration.instance_id(item).map_err(failure)?;
+                        selectors.bind(item, instance)
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(DebugData::Items {
+                    inventory: summary,
+                    items,
+                    total_items: total.try_into().unwrap_or(u32::MAX),
+                    next_offset: (offset.saturating_add(PAGE) < total)
+                        .then_some((offset + PAGE) as u32),
+                })
+            },
+            (handle, summary, offset),
+        )
+        .map_err(failure)?
+}
+
+fn remove(world: &mut World, inventory: &str, selector: &str) -> Result<DebugData, DebugFailure> {
+    let (item, expected) = world.resource::<ItemSelectors>().resolve(selector)?;
+    let (source, _) = inventory::selected(world, inventory)?;
+    world
+        .run_system_once_with(
+            |In((source, item)): In<(InventoryHandle, ItemId)>, inventories: Inventories| {
+                if inventories.holder(item).map_err(failure)? != Some(source) {
+                    return Err(DebugFailure::new(
+                        "stale_item_custody",
+                        "物品已不在所选物品栏，请刷新物品列表",
+                    ));
+                }
+                Ok(())
+            },
+            (source, item),
+        )
+        .map_err(failure)??;
+    // Use the identity captured by listing, never rebind a stale business number.
+    crate::destroy_item(world, item, &expected)
+        .map_err(|error| DebugFailure::new("item_removal_failed", error.to_string()))?;
+    world
+        .resource_mut::<ItemSelectors>()
+        .targets
+        .remove(&expected);
+    Ok(DebugData::ItemRemoved {
+        item: item.as_u128().to_string(),
+        selector: selector.to_owned(),
+    })
 }
 
 fn create(

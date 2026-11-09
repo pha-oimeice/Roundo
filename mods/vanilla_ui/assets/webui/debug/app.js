@@ -1,5 +1,7 @@
 'use strict';
 
+import {createDebugTransport} from './transport.js';
+
 // Pure attribute validation; request correlation lives in the shared adapter.
 function numericValue(text, kind) {
   if (String(text).trim() === '') throw new Error('属性值不能为空');
@@ -9,11 +11,10 @@ function numericValue(text, kind) {
   if (kind === 'unorm' && (value < 0 || value > 1)) throw new Error('比率须在 [0, 1] 内');
   return value;
 }
-if (typeof module !== 'undefined') module.exports = {numericValue};
-
-if (typeof document !== 'undefined') {
-  const $ = id => document.getElementById(id);
+export function mount(root) {
+  const $ = id => root.querySelector('#' + CSS.escape(id));
   let selected = null, bodySnapshot = null, epoch = null, busy = false, nextOffset = null;
+  let active = false, destroyed = false;
   let bodies = [], lives = [], dataTypes = [];
   let bodySummaries = new Map();
   let selectionGeneration = 0;
@@ -59,14 +60,14 @@ if (typeof document !== 'undefined') {
     message('会话状态已更新。请刷新列表；旧会话选择器与未提交草稿已清除。');
   }
   const transport = createDebugTransport(c => roundo.execute(c), (name, listener) => roundo.subscribe(name, listener), value => { epoch = value; reset();
-    if (value) queueMicrotask(() => { if (!busy && epoch === value) run(() => list()); });
+    if (value) queueMicrotask(() => { if (active && !destroyed && !busy && epoch === value) run(() => list()); });
   });
   async function run(task, success) {
-    if (busy) return;
-    busy = true; $('bodies').inert = true; document.body.classList.add('busy'); $('activity').textContent = '等待服务端结果…';
-    try { await task(); if (success) message(success); }
-    catch (error) { message(error.message, true); }
-    finally { busy = false; $('bodies').inert = false; document.body.classList.remove('busy'); $('activity').textContent = '就绪'; }
+    if (busy || destroyed) return;
+    busy = true; $('bodies').inert = true; root.classList.add('busy'); $('activity').textContent = '等待服务端结果…';
+    try { await task(); if (!destroyed && success) message(success); }
+    catch (error) { if (!destroyed) message(error.message, true); }
+    finally { busy = false; $('bodies').inert = false; root.classList.remove('busy'); $('activity').textContent = '就绪'; }
   }
   function summaryFor(id) {
     return bodySummaries.get(id) || (bodySnapshot?.body === id ? bodySnapshot.summary : null);
@@ -341,6 +342,10 @@ if (typeof document !== 'undefined') {
   $('life').addEventListener('change', relationState); $('data-type').addEventListener('change', relationState);
   $('relation-direction').addEventListener('change', relationState); $('relation-action').addEventListener('change', actionDescription);
   $('attributes-form').addEventListener('submit', event => event.preventDefault());
-  window.addEventListener('roundo:destroying', () => transport.destroy(), {once:true});
   renderList(); relationState();
+  return {
+    activate() { active = true; if (epoch && !busy) run(() => list()); },
+    deactivate() { active = false; },
+    destroy() { destroyed = true; active = false; transport.destroy(); }
+  };
 }

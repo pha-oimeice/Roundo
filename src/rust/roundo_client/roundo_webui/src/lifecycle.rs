@@ -358,6 +358,29 @@ impl UiLifecycleManager {
             .is_some_and(|instance| instance.root_ui)
     }
 
+    /// A rootless configuration is complete without a document; a configured
+    /// root must still have a live instance, not merely the matching Scene kind.
+    pub(crate) fn root_projection_is_complete(&self) -> bool {
+        let slot = match self.root_scene {
+            SceneKind::Menu => MENU_ROOT_SLOT,
+            SceneKind::InGame => IN_GAME_ROOT_SLOT,
+        };
+        self.registry.slot(slot).is_none()
+            || self
+                .instances
+                .values()
+                .any(|instance| instance.root_ui && instance.loaded)
+    }
+
+    pub(crate) fn pending_configured_root(&self) -> Option<UiInstanceId> {
+        self.pending.iter().find_map(|(id, pending)| {
+            (pending.root_ui
+                && pending.replacement_scene.is_none()
+                && pending.root_generation == self.root_generation)
+                .then_some(UiInstanceId(*id))
+        })
+    }
+
     /// Selects the focused UI, or the top visible document when the host owns
     /// focus (for example an InGame HUD). Navigation/Recovery suspends transient
     /// delivery so an input stream cannot keep native document creation busy.
@@ -638,6 +661,31 @@ impl UiLifecycleManager {
         }
         Ok(())
     }
+    /// Revokes a failed document through the same ownership rules as navigation.
+    /// Root failure invalidates the whole root projection and exposes Recovery;
+    /// ordinary failure preserves independent descendants just like Back.
+    pub(crate) fn fail_instance(
+        &mut self,
+        source: UiInstanceId,
+        message: String,
+    ) -> Result<Vec<UiInstanceId>, UiLifecycleError> {
+        let instance = self
+            .instances
+            .get(&source)
+            .ok_or(UiLifecycleError::StaleUiInstance)?;
+        if !instance.root_ui {
+            return self.back(source);
+        }
+        let failed_resource = instance.definition.clone();
+        let destroyed = self.replace_root(self.root_scene)?;
+        self.recovery = Some(RecoverySurface {
+            scene: self.root_scene,
+            failed_resource,
+            message,
+        });
+        Ok(destroyed)
+    }
+
     pub(crate) fn commit_open(
         &mut self,
         pending_id: u64,

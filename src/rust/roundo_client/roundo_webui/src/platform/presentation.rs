@@ -200,45 +200,83 @@ fn apply_windows_webview_mode(
     use windows::Win32::{
         Foundation::{GetLastError, SetLastError, WIN32_ERROR},
         UI::WindowsAndMessaging::{
-            GWL_EXSTYLE, GWL_STYLE, GetWindowLongW, SetWindowLongW, WS_DISABLED, WS_EX_NOACTIVATE,
+            GWL_EXSTYLE, GWL_STYLE, SetWindowLongW, WS_DISABLED, WS_EX_NOACTIVATE,
             WS_EX_TRANSPARENT,
         },
     };
     let hwnd = webview.hwnd();
-    // SAFETY: valid owned child on its UI thread. These functions return the
-    // previous value, so inspect LastError only for an ambiguous zero return.
-    // Do not send reentrant style notifications when the bits already match.
-    unsafe {
-        for (index, bits) in [
-            (
-                GWL_EXSTYLE,
-                (WS_EX_TRANSPARENT.0 | WS_EX_NOACTIVATE.0) as i32,
-            ),
-            (GWL_STYLE, WS_DISABLED.0 as i32),
-        ] {
+    for (index, bits) in [
+        (
+            GWL_EXSTYLE,
+            (WS_EX_TRANSPARENT.0 | WS_EX_NOACTIVATE.0) as i32,
+        ),
+        (GWL_STYLE, WS_DISABLED.0 as i32),
+    ] {
+        let previous = read_window_style(hwnd, index)?;
+        let next = if mode == ClientInteractionMode::InGame {
+            previous | bits
+        } else {
+            previous & !bits
+        };
+        if next == previous {
+            continue;
+        }
+        // SAFETY: Wry retains this child on the current UI thread. Capture the
+        // return value and LastError before any further API call. Zero is an
+        // ambiguous OLD style; a nonzero LastError in that case remains failure.
+        let (returned, error) = unsafe {
             SetLastError(WIN32_ERROR(0));
-            let previous = GetWindowLongW(hwnd, index);
-            if previous == 0 {
-                GetLastError().ok().map_err(|e| e.to_string())?;
-            }
-            let next = if mode == ClientInteractionMode::InGame {
-                previous | bits
-            } else {
-                previous & !bits
-            };
-            if next == previous {
-                continue;
-            }
-            SetLastError(WIN32_ERROR(0));
-            if SetWindowLongW(hwnd, index, next) == 0 {
-                GetLastError().ok().map_err(|e| e.to_string())?;
-            }
+            let returned = SetWindowLongW(hwnd, index, next);
+            (returned, GetLastError())
+        };
+        if returned == 0 {
+            error.ok().map_err(|error| {
+                format!("SetWindowLongW({hwnd:?}, {index:?}, {next:#010x}) failed: {error}")
+            })?;
+        }
+        let actual = read_window_style(hwnd, index).map_err(|read_error| {
+            format!(
+                "SetWindowLongW({hwnd:?}, {index:?}, {next:#010x}) could not be verified: \
+                 returned={returned:#010x}, last_error={error:?}; {read_error}"
+            )
+        })?;
+        // Verify the postcondition only after the native success contract has
+        // passed. Matching style bits never override a reported API failure.
+        if actual & bits != next & bits {
+            return Err(format!(
+                "SetWindowLongW({hwnd:?}, {index:?}) did not apply input mode {mode:?}: \
+                 before={previous:#010x}, requested={next:#010x}, actual={actual:#010x}, \
+                 returned={returned:#010x}, last_error={error:?}"
+            ));
         }
     }
     // Styles do not select the keyboard focus owner. Presentation applies that
     // separate effect after visibility work; hidden/background HUDs cannot steal
     // focus from an interactive UI. No SWP_FRAMECHANGED or child activation.
     Ok(())
+}
+
+fn read_window_style(
+    hwnd: windows::Win32::Foundation::HWND,
+    index: windows::Win32::UI::WindowsAndMessaging::WINDOW_LONG_PTR_INDEX,
+) -> Result<i32, String> {
+    use windows::Win32::{
+        Foundation::{GetLastError, SetLastError, WIN32_ERROR},
+        UI::WindowsAndMessaging::GetWindowLongW,
+    };
+    // SAFETY: callers retain the Wry child on its UI thread. A zero style is
+    // valid only when the immediately captured LastError also reports success.
+    let (value, error) = unsafe {
+        SetLastError(WIN32_ERROR(0));
+        let value = GetWindowLongW(hwnd, index);
+        (value, GetLastError())
+    };
+    if value == 0 {
+        error
+            .ok()
+            .map_err(|error| format!("GetWindowLongW({hwnd:?}, {index:?}) failed: {error}"))?;
+    }
+    Ok(value)
 }
 
 fn host_hwnd(context: &NativeContext) -> Result<windows::Win32::Foundation::HWND, String> {
@@ -297,6 +335,9 @@ pub(super) fn present_world(context: &NativeContext) -> Result<(), String> {
 
 const RECOVERY_HTML: &str = r#"<!doctype html><html data-roundo-recovery="ready"><meta charset="utf-8"><title>Roundo UI recovery</title><style>html,body{margin:0;width:100%;height:100%;background:#111;color:#eee;font:16px sans-serif}main{height:100%;display:grid;place-content:center;text-align:center;gap:16px}button{padding:10px 20px;margin:4px}</style><main><h1>UI failed to load</h1><p>The game state is unchanged.</p><div><button onclick="send('retry')">Retry</button><button onclick="send('disconnect')">Disconnect</button><button onclick="send('quit')">Quit</button></div></main><script>function send(recovery_action){window.ipc.postMessage(JSON.stringify({recovery_action}))}</script></html>"#;
 
+const RECOVERY_DEFINITION: &str = "__roundo_host_recovery__";
+const RECOVERY_DOCUMENT: &str = "index.html";
+
 fn host_bounds(context: &NativeContext) -> Option<UiBounds> {
     bevy_winit::WINIT_WINDOWS.with(|all| {
         let all = all.borrow();
@@ -325,7 +366,10 @@ pub(super) struct RecoveryView {
 }
 impl WryDriver {
     pub(super) fn build_recovery(&mut self, _id: RecoveryId) -> Result<(), String> {
-        let observation = NativeObservation::new("__roundo_host_recovery__", "");
+        let observation = NativeObservation::new(RECOVERY_DEFINITION, RECOVERY_DOCUMENT);
+        let document_url = webview2_resource_url(RECOVERY_DEFINITION, RECOVERY_DOCUMENT);
+        let allowed_document_url = document_url.clone();
+        let document_path = format!("/{RECOVERY_DEFINITION}/{RECOVERY_DOCUMENT}");
         let token = observation.token();
         let scripts = ScriptTracker::new(self.callbacks.clone(), token);
         let actions = Arc::new(Mutex::new(Vec::new()));
@@ -350,7 +394,25 @@ impl WryDriver {
                 .with_visible(false)
                 .with_url("about:blank")
                 .with_bounds(webview_rect(bounds))
-                .with_navigation_handler(|url| url == "about:blank")
+                .with_navigation_handler(move |url| {
+                    url == "about:blank" || url == allowed_document_url
+                })
+                .with_custom_protocol("roundo-ui".into(), move |_, request| {
+                    let uri = request.uri();
+                    let allowed = uri.authority().map(|authority| authority.as_str())
+                        == Some("resource")
+                        && uri.path() == document_path
+                        && uri.query().is_none();
+                    wry::http::Response::builder()
+                        .status(if allowed { 200 } else { 404 })
+                        .header("Content-Type", "text/html; charset=utf-8")
+                        .body(std::borrow::Cow::Borrowed(if allowed {
+                            RECOVERY_HTML.as_bytes()
+                        } else {
+                            b"Not Found"
+                        }))
+                        .expect("host recovery response is valid")
+                })
                 .with_ipc_handler(move |message| {
                     let _guard = ipc_callbacks.enter_for(token);
                     let action = serde_json::from_str::<Value>(message.body())
@@ -379,7 +441,7 @@ impl WryDriver {
                 observation: observation.clone(),
                 callbacks: self.callbacks.clone(),
                 view_token: token,
-                frame_definition: "__roundo_host_recovery__".into(),
+                frame_definition: RECOVERY_DEFINITION.into(),
                 wake: self.context.wake.clone(),
                 subscriptions: Arc::new(Mutex::new(BTreeSet::new())),
                 subscription_generation: Arc::new(AtomicU64::new(0)),
@@ -403,7 +465,10 @@ impl WryDriver {
             .as_ref()
             .expect("stored physical owner")
             .webview
-            .load_html(RECOVERY_HTML)
+            // Use the same explicitly admitted custom-protocol URL as native
+            // observation. NavigateToString can surface as a data: navigation,
+            // which the former about:blank-only filter rejected itself.
+            .load_url(&document_url)
             .map_err(|e| e.to_string())
     }
     pub(super) fn poll_recovery(&mut self, lifetime: &UiViewLifetime, facts: &mut Vec<NativeFact>) {

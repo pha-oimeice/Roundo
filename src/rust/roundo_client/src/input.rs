@@ -295,7 +295,8 @@ fn collect_input(
                     captured.blocked.insert(binding.key);
                     captured.document_held.insert(binding.key);
                 } else {
-                    captured.blocked.remove(&binding.key);
+                    // A document also releases on blur while the hardware key
+                    // can remain held. Only host sampling may readmit that key.
                     captured.document_held.remove(&binding.key);
                 }
             }

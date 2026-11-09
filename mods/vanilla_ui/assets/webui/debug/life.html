@@ -1,13 +1,4 @@
-<!doctype html>
-<html lang="zh-CN">
-<head>
-<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Roundo · 生命体与概念体调试</title>
-<link rel="stylesheet" href="style.css">
-</head>
-<body>
-<main>
-  <header><div><small>ROUNDO / DEBUG WORKSPACE</small><h1>生命体与概念体</h1></div><div class="toolbar"><span id="connection" role="status">读取连接状态…</span><button id="bindings">修改快捷键</button><button id="close">返回目录 · Esc</button></div></header>
+<section class="debug-page" aria-label="生命体与概念体">
   <div id="message" role="status" aria-live="polite">先选择或创建生命体，再选择概念体，配置它读取或写入的数据。</div>
   <section id="bodies" class="workspace" aria-label="生命体与概念体">
     <aside class="card">
@@ -87,6 +78,5 @@
       <details class="scope-note"><summary>操作权限与范围</summary><p class="muted">调试操作对当前已认证连接的玩家开放，可影响其他概念体。所有修改仍由服务端验证；打开界面不授予玩家控制权。当前关系编辑只适配六种数据，不编辑数据内容、物理字段或控制路由。列表和快照需手动刷新，不以本地草稿代替服务端当前值。</p></details>
     </article>
   </section>
-  <footer><span id="shortcut">正在读取快捷键绑定…</span><span id="activity">就绪</span></footer>
-</main><script src="navigation.js"></script><script src="transport.js"></script><script src="app.js"></script>
-</body></html>
+  <footer><span id="activity">就绪</span></footer>
+</section>

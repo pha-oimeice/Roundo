@@ -1,10 +1,12 @@
 'use strict';
 
-(() => {
-  const $ = id => document.getElementById(id);
+import {createDebugTransport} from './transport.js';
+
+export function mount(root) {
+  const $ = id => root.querySelector('#' + CSS.escape(id));
   const owners = new Map(), inventories = new Map(), targets = new Map();
   const roles = {intent:'意图体', execution:'执行体', record:'记录体'};
-  let epoch = null, revision = 0, busy = false, destroyed = false;
+  let epoch = null, revision = 0, busy = false, destroyed = false, active = false;
   let ownerOffset = null, inventoryOffset = null, targetOffset = 0;
   let selected = null, snapshot = null, selectedItem = null;
   let itemOffset = 0, nextItemOffset = null, previousItemOffsets = [];
@@ -82,7 +84,7 @@
   }
   const transport = createDebugTransport(c => roundo.execute(c), (name, listener) => roundo.subscribe(name, listener), value => {
     epoch = value; revision++; reset();
-    queueMicrotask(() => { if (!busy && !destroyed && epoch) run(loadInitial); });
+    queueMicrotask(() => { if (active && !busy && !destroyed && epoch) run(loadInitial); });
   });
   async function request(operation, inventory = true) {
     const current = revision;
@@ -101,7 +103,7 @@
       if (!destroyed) {
         $('inventory-workspace').inert = false; $('activity').textContent = '就绪';
         // Only a new session triggers a fresh read, never a mutation retry.
-        if (current !== revision && epoch) queueMicrotask(() => run(loadInitial));
+        if (current !== revision && epoch && active) queueMicrotask(() => { if (active && !destroyed) run(loadInitial); });
       }
     }
   }
@@ -230,6 +232,10 @@
       inventories.delete(inventory); targets.delete(inventory); clearSelection(); await loadInventories();
     }));
   });
-  window.addEventListener('roundo:destroying', () => { destroyed = true; transport.destroy(); }, {once:true});
   renderOwners(); clearSelection();
-})();
+  return {
+    activate() { active = true; if (epoch && !busy) run(loadInitial); },
+    deactivate() { active = false; },
+    destroy() { destroyed = true; active = false; transport.destroy(); }
+  };
+}

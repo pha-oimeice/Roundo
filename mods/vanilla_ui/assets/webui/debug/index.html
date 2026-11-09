@@ -7,14 +7,24 @@
 </head>
 <body>
 <main>
-  <header><div><small>ROUNDO / DEBUG WORKSPACE</small><h1>调试目录</h1></div><div class="toolbar"><span id="connection" role="status">读取连接状态…</span><button id="bindings">修改快捷键</button><button id="close">关闭 · Esc</button></div></header>
-  <div id="message" role="status" aria-live="polite">请选择要打开的调试界面。</div>
-  <nav class="debug-directory" aria-label="调试界面目录">
-    <button class="card directory-entry" data-import="life"><strong>生命体与概念体</strong><span class="muted">查看与创建生命体、概念体，编辑属性与数据协作关系。</span></button>
-    <button class="card directory-entry" data-import="inventory"><strong>物品栏管理</strong><span class="muted">按概念体或全局查看物品栏，创建空栏、转移物品及管理 Public 兜底保管。</span></button>
-    <button class="card directory-entry" data-import="items"><strong>物品管理</strong><span class="muted">物品实例、归属分配与功能组装；按需创建，归属物品栏可选择 Public。</span></button>
-    <button class="card directory-entry" data-import="runtime"><strong>运行诊断</strong><span class="muted">查看连接、帧率、相机、指向及玩家控制器获取状态。</span></button>
-  </nav>
+  <header><div><small>ROUNDO / DEBUG WORKSPACE</small><h1 id="page-title" tabindex="-1">调试目录</h1></div><div class="toolbar"><span id="connection" role="status">读取连接状态…</span><button id="back" hidden>返回上级</button><button id="bindings">修改快捷键</button><button id="close">关闭调试 · Esc</button></div></header>
+  <div id="navigation-message" role="status" aria-live="polite" hidden></div>
+  <div id="page-content">
+    <section class="debug-page" data-page="directory" data-title="调试目录">
+      <div id="directory-message" role="status" aria-live="polite">请选择要打开的调试界面。</div>
+      <nav class="debug-directory" aria-label="调试界面目录">
+        <button class="card directory-entry" data-view="life"><strong>生命体与概念体</strong><span class="muted">查看与创建生命体、概念体，编辑属性与数据协作关系。</span></button>
+        <button class="card directory-entry" data-view="inventory"><strong>物品栏管理</strong><span class="muted">按概念体或全局查看物品栏，创建空栏、转移物品及管理 Public 兜底保管。</span></button>
+        <button class="card directory-entry" data-view="items"><strong>物品管理</strong><span class="muted">按物品栏查看、创建和删除物品。</span></button>
+        <button class="card directory-entry" data-view="runtime"><strong>运行诊断</strong><span class="muted">查看连接、帧率、相机、指向及玩家控制器获取状态。</span></button>
+      </nav>
+    </section>
+  </div>
+  <template data-page="life" data-source="life.html" data-controller="./app.js" data-title="生命体与概念体"></template>
+  <template data-page="inventory" data-source="inventory.html" data-controller="./inventory.js" data-title="物品栏管理"></template>
+  <template data-page="items" data-source="items.html" data-controller="./items.js" data-title="物品管理"></template>
+  <template data-page="runtime" data-source="runtime.html" data-title="运行诊断"></template>
   <footer><span id="shortcut">正在读取快捷键绑定…</span></footer>
-</main><script src="navigation.js"></script>
+</main>
+<script type="module" src="navigation.js"></script>
 </body></html>

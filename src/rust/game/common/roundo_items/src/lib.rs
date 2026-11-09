@@ -19,9 +19,12 @@
 //! this framework does not implement database transactions or global allocation,
 //! networking, persistence, random IDs or a particular namespace encoding.
 //!
-//! External `roundo_inventory::ItemId::from_u128` imports must refer to existing
-//! real identities, not create other new items inside reserved ranges. Copying
-//! or importing the same ID does not issue a new item.
+//! External `roundo_inventory::ItemId::from_u128` imports a business number; copying
+//! it does not issue a new item or prove an exact runtime instance. The issuer's
+//! non-reuse policy is not a lifecycle requirement: after complete destruction,
+//! runtime publication can reuse a number with a fresh [`ItemInstanceId`]. The
+//! host must prevent collisions among live items and reject stale number-only
+//! operations. This issuer does not automatically recycle destroyed numbers.
 //!
 //! Under these prerequisites, issuance from different globally reserved ranges
 //! cannot produce equal IDs; each issuer emits its range in order exactly once.
@@ -66,9 +69,11 @@
 //! to [`ItemReads`] or [`ItemWrites`]. Clones share revocation, not independent
 //! authority. Owned copies carry no runtime permission.
 //!
-//! Publisher, administration and writes have conflicting resource access; use
-//! separate ordinary systems in an explicit order. These steps are not a single
-//! transaction.
+//! Publisher, administration, lifecycle and writes have conflicting resource
+//! access; use separate ordinary systems in an explicit order. Publication and
+//! initialization are not a single transaction. [`ItemLifecycle::destroy`] checks
+//! exact instance identity and commits terminal custody/data cleanup together;
+//! the host still coordinates its spatial representations and cached grants.
 //!
 //!
 //! # Typed item data catalogue
@@ -96,9 +101,15 @@ mod issuer;
 mod runtime_setup;
 mod store;
 
-pub use access::{ItemAccessError, ItemInstallError, ItemModifyAccess, ItemReadAccess};
-pub use ecs_adapter::{ItemAdministration, ItemPublisher, ItemReads, ItemWrites, install_items};
+pub use access::{
+    ItemAccessError, ItemDestructionError, ItemInstallError, ItemModifyAccess, ItemReadAccess,
+};
+pub use ecs_adapter::{
+    ItemAdministration, ItemLifecycle, ItemPublisher, ItemReads, ItemWrites, install_items,
+};
 pub use issuer::{ItemIdRange, ItemIssueError, ItemIssuer};
+/// The existing resource-access identity, not a new allocator or serialized ItemId.
+pub use roundo_dsa::data_structure::resource_access::ResourceId as ItemInstanceId;
 
 pub use catalogue::{ItemDataBuilder, ItemDataError, ItemSchema};
 pub use data::{

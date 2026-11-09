@@ -1,9 +1,9 @@
 'use strict';
 
 // Shared diagnostic adapter: command admission is not native operation completion.
-function createDebugTransport(execute, subscribe, sessionChanged = () => {}) {
+export function createDebugTransport(execute, subscribe, sessionChanged = () => {}) {
   let snapshot = {epoch:null, requests:[]};
-  let generation = 0;
+  let generation = 0, destroyed = false;
   const pending = new Map();
   function rejectAll(message) {
     for (const waiter of pending.values()) { clearTimeout(waiter.timer); waiter.reject(new Error(message)); }
@@ -27,6 +27,7 @@ function createDebugTransport(execute, subscribe, sessionChanged = () => {}) {
   });
   return {
     async request(operation) {
+      if (destroyed) throw new Error('调试界面已关闭');
       const original = generation;
       const result = await execute({version:1, command:'debug.request', arguments:{operation}});
       if (!result.ok) throw new Error(`${result.error.code}: ${result.error.message}`);
@@ -42,7 +43,10 @@ function createDebugTransport(execute, subscribe, sessionChanged = () => {}) {
         settle(id, waiter); // A receipt may precede the command-acceptance response.
       });
     },
-    destroy() { generation++; rejectAll('调试界面已关闭'); unsubscribe(); }
+    destroy() {
+      if (destroyed) return;
+      destroyed = true; generation++;
+      rejectAll('调试界面已关闭'); unsubscribe();
+    }
   };
 }
-if (typeof module !== 'undefined') module.exports = {createDebugTransport};

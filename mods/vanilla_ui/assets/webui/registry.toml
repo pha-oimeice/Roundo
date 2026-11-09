@@ -9,10 +9,6 @@
 "roundo.pause-menu" = "pause-menu"
 "roundo.inventory" = "inventory"
 "roundo.debug" = "debug"
-"roundo.debug-life" = "debug-life"
-"roundo.debug-runtime" = "debug-runtime"
-"roundo.debug-inventory" = "debug-inventory"
-"roundo.debug-items" = "debug-items"
 
 [[resource]]
 name = "main-menu"
@@ -100,64 +96,6 @@ world_visibility = "visible"
 max_instances = 1
 presentation = "exclusive"
 layout = "fullscreen"
-[resource.imports.life]
-slot = "roundo.debug-life"
-[resource.imports.runtime]
-slot = "roundo.debug-runtime"
-[resource.imports.inventory]
-slot = "roundo.debug-inventory"
-[resource.imports.items]
-slot = "roundo.debug-items"
-[resource.imports.settings]
-slot = "roundo.settings"
-
-[[resource]]
-name = "debug-life"
-project = "debug"
-entry = "life.html"
-interaction_mode = "web-ui"
-world_visibility = "visible"
-max_instances = 1
-presentation = "exclusive"
-layout = "fullscreen"
-[resource.imports.settings]
-slot = "roundo.settings"
-
-[[resource]]
-name = "debug-runtime"
-project = "debug"
-entry = "runtime.html"
-interaction_mode = "web-ui"
-world_visibility = "visible"
-max_instances = 1
-presentation = "exclusive"
-layout = "fullscreen"
-[resource.imports.settings]
-slot = "roundo.settings"
-
-[[resource]]
-name = "debug-inventory"
-project = "debug"
-entry = "inventory.html"
-interaction_mode = "web-ui"
-world_visibility = "visible"
-max_instances = 1
-presentation = "exclusive"
-layout = "fullscreen"
-[resource.imports.settings]
-slot = "roundo.settings"
-
-[[resource]]
-name = "debug-items"
-project = "debug"
-entry = "items.html"
-interaction_mode = "web-ui"
-world_visibility = "visible"
-max_instances = 1
-presentation = "exclusive"
-layout = "fullscreen"
-[resource.imports.inventory]
-slot = "roundo.debug-inventory"
 [resource.imports.settings]
 slot = "roundo.settings"
 

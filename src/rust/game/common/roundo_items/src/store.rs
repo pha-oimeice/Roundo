@@ -20,6 +20,14 @@ impl ItemDataStore {
         }
     }
 
+    /// Detaches every payload before running any caller-owned payload destructor.
+    /// Publication/lifecycle validation belongs to the runtime adapter.
+    pub(crate) fn remove_item(&mut self, item: ItemId) {
+        let type_data = self.types.remove(&item);
+        let specialized = self.specialized.remove(&item);
+        drop((type_data, specialized));
+    }
+
     /// Stores or replaces the single type payload for an item ID.
     pub fn set_type<T: ItemTypeData>(
         &mut self,

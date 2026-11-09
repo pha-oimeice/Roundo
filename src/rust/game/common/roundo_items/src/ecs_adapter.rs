@@ -1,9 +1,9 @@
 //! Scheduler-visible item storage and trusted host publication.
 
 use crate::{
-    DeclaredItemData, ItemAccessError, ItemDataStore, ItemDefinitions, ItemInstallError,
-    ItemModifyAccess, ItemReadAccess, ItemRuntimeSetup, ItemSchema, SpecializedData,
-    access::ItemAccessTarget,
+    DeclaredItemData, ItemAccessError, ItemDataStore, ItemDefinitions, ItemDestructionError,
+    ItemInstallError, ItemInstanceId, ItemModifyAccess, ItemReadAccess, ItemRuntimeSetup,
+    ItemSchema, SpecializedData, access::ItemAccessTarget,
 };
 use bevy::{
     ecs::{system::SystemParam, world::WorldId},
@@ -12,7 +12,7 @@ use bevy::{
 use roundo_dsa::data_structure::resource_access::{
     AccessError, Owner, ResourceAccessManager, Shared,
 };
-use roundo_inventory::ItemId;
+use roundo_inventory::{Inventories, InventoryError, ItemId};
 use roundo_mod_loader::ResourceName;
 use std::collections::HashMap;
 
@@ -411,6 +411,64 @@ impl ItemWrites<'_> {
     }
 }
 
+/// Trusted synchronous destruction of an exact instance's data and custody.
+///
+/// This reuses the existing resource-access identity and Owner, not a second
+/// allocator. The caller must separately coordinate host representations and
+/// caches in the same serialized operation. It grants no Player authority.
+#[derive(SystemParam)]
+pub struct ItemLifecycle<'w, 's> {
+    world: WorldId,
+    data: ResMut<'w, ItemRuntimeData>,
+    authority: ResMut<'w, ItemRuntimeAuthority>,
+    inventories: Inventories<'w, 's>,
+}
+
+impl ItemLifecycle<'_, '_> {
+    /// Ends the exact expected instance, including one owned by Public.
+    ///
+    /// World, publication, exact resource identity and live custody are checked
+    /// before mutation. A wrong-domain/stale identity rejects even if its ItemId
+    /// has been published again. Repeated destruction is an error, not success.
+    /// Recoverable errors change nothing; panic/abort/OOM and payload destructor
+    /// side effects are outside this guarantee.
+    ///
+    /// Success removes custody, drops the Owner (invalidating all grants/clones),
+    /// and removes type and specialized payloads. No ID tombstone is retained;
+    /// a later publication of the same business number gets a fresh resource
+    /// identity. This does not reclaim a host issuer's reserved range or cursor.
+    pub fn destroy(
+        &mut self,
+        item: ItemId,
+        expected: &ItemInstanceId,
+    ) -> Result<(), ItemDestructionError> {
+        check_world(self.world, &self.data, &self.authority)?;
+        let owner = self
+            .authority
+            .owners
+            .get(&item)
+            .ok_or(ItemAccessError::UnknownItem)?;
+        if owner.id() != expected {
+            return Err(ItemAccessError::Access(AccessError::ResourceMismatch).into());
+        }
+        let holder = self
+            .inventories
+            .holder(item)?
+            .ok_or(InventoryError::ItemNotHeld)?;
+        // No other system can interleave these commits. Removal validates all
+        // custody conditions before writing; no recoverable failure follows it.
+        self.inventories.remove_destroyed_item(holder, item)?;
+        drop(
+            self.authority
+                .owners
+                .remove(&item)
+                .expect("validated item Owner is still present"),
+        );
+        self.data.store.remove_item(item);
+        Ok(())
+    }
+}
+
 /// Trusted host grant issuer/revoker, not a recipient self-service capability.
 #[derive(SystemParam)]
 pub struct ItemAdministration<'w> {
@@ -420,6 +478,18 @@ pub struct ItemAdministration<'w> {
 }
 
 impl ItemAdministration<'_> {
+    /// Copies the existing exact resource identity without issuing a grant.
+    /// Capture this when selecting an instance, not by resolving an old business
+    /// number again just before destruction. This identity is not Player authority.
+    pub fn instance_id(&self, item: ItemId) -> Result<ItemInstanceId, ItemAccessError> {
+        check_world(self.world, &self.data, &self.authority)?;
+        self.authority
+            .owners
+            .get(&item)
+            .map(|owner| owner.id().clone())
+            .ok_or(ItemAccessError::UnknownItem)
+    }
+
     /// Issues an independent Read grant for a published item.
     pub fn grant_read(&mut self, item: ItemId) -> Result<ItemReadAccess, ItemAccessError> {
         check_world(self.world, &self.data, &self.authority)?;

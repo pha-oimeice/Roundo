@@ -200,6 +200,26 @@ impl InventoryStore {
         Ok(())
     }
 
+    /// Removes terminal custody only; the caller coordinates item destruction.
+    pub(crate) fn remove_destroyed_item(
+        &mut self,
+        handle: InventoryHandle,
+        item: ItemId,
+    ) -> Result<()> {
+        self.entry(handle)?;
+        if self.holders.get(&item) != Some(&handle) {
+            return Err(InventoryError::ItemNotHeld);
+        }
+        self.slots[handle.slot() as usize]
+            .entry
+            .as_mut()
+            .expect("validated inventory is occupied")
+            .items
+            .remove(&item);
+        self.holders.remove(&item);
+        Ok(())
+    }
+
     /// Validates source, target, then custody even when source equals target.
     /// Atomicity covers only this core's sets/index, not gameplay side effects.
     pub(crate) fn transfer(

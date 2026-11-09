@@ -57,7 +57,7 @@ strip = "debuginfo"
 anyhow = "1.0"
 argh = "0.1"
 avian3d = "0.7"
-bevy = { version = "0.19.1", default-features = false, features = ["bevy_winit", "bevy_render", "bevy_pbr", "bevy_text", "bevy_audio"] }
+bevy = { version = "0.19.1", default-features = false, features = ["bevy_winit", "bevy_render", "bevy_pbr", "bevy_text", "bevy_audio", "tonemapping_luts", "zstd_rust"] }
 bevy_winit = "0.19.1"
 bevy_asset_loader = "0.27"
 # bevy_egui = "0.41"

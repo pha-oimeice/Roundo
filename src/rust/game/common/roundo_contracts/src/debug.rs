@@ -33,6 +33,7 @@ pub enum DebugOperation {
         action: DebugRelationAction,
     },
     Inventory(DebugInventoryOperation),
+    Item(DebugItemOperation),
     /// Issues one new identity, composes the explicitly selected sources, and
     /// assigns direct custody to an existing inventory (including Public).
     CreateItem {
@@ -68,6 +69,22 @@ pub enum DebugInventoryOperation {
     Spill {
         inventory: String,
         item: String,
+    },
+}
+
+/// Diagnostic routing names bind to existing exact native item instances.
+/// They are not business IDs, serialized grants or Player authorization.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum DebugItemOperation {
+    List {
+        inventory: String,
+        offset: u32,
+    },
+    /// Rejects an item that has left this inventory or whose instance has ended.
+    Remove {
+        inventory: String,
+        selector: String,
     },
 }
 
@@ -171,6 +188,26 @@ pub enum DebugData {
         placement_reach: Option<f32>,
         destruction_reach: Option<f32>,
     },
+    Items {
+        inventory: DebugInventorySummary,
+        /// Direct members, ordered by numeric business ID.
+        items: Vec<DebugItemSummary>,
+        total_items: u32,
+        next_offset: Option<u32>,
+    },
+    /// Emitted only after the native destruction and host cleanup have completed.
+    ItemRemoved {
+        item: String,
+        selector: String,
+    },
+}
+
+/// A displayed business ID paired with a diagnostic name for its exact instance.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize, JsonSchema)]
+pub struct DebugItemSummary {
+    /// Full u128 decimal text; never convert to a JavaScript number.
+    pub item: String,
+    pub selector: String,
 }
 
 /// Inventory routing selector and freshly checked native ownership facts.

@@ -64,6 +64,13 @@ impl DebugIngress {
                         .into_iter()
                         .all(|reach| reach.is_none_or(|value| value.is_finite() && value > 0.0))
             }
+            DebugOperation::Item(operation) => match operation {
+                DebugItemOperation::List { inventory, .. } => short(inventory),
+                DebugItemOperation::Remove {
+                    inventory,
+                    selector,
+                } => short(inventory) && short(selector),
+            },
             DebugOperation::Inventory(operation) => match operation {
                 DebugInventoryOperation::List { body, .. } => body.as_deref().is_none_or(short),
                 DebugInventoryOperation::Create { body } => short(body),
@@ -135,6 +142,7 @@ impl Plugin for DebugPlugin {
             );
         if app.is_plugin_added::<roundo_inventory::InventoryPlugin>() {
             app.init_resource::<inventory::InventorySelectors>()
+                .init_resource::<items::ItemSelectors>()
                 .add_systems(
                     FixedUpdate,
                     (describe_public, inventory::manage, items::manage)
@@ -569,7 +577,9 @@ fn begin(
                     work.deferred = true;
                     Ok(None)
                 }
-                DebugOperation::Inventory(_) | DebugOperation::CreateItem { .. } => Ok(None),
+                DebugOperation::Inventory(_)
+                | DebugOperation::Item(_)
+                | DebugOperation::CreateItem { .. } => Ok(None),
                 DebugOperation::Relation {
                     body,
                     life,

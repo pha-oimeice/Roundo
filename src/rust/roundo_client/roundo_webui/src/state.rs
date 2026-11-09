@@ -72,7 +72,7 @@ pub(crate) struct UiPresentation {
 struct PresentationRequest {
     desired: UiPresentation,
     action_id: UiActionId,
-    confirmed: Option<bool>,
+    result: Option<Result<bool, String>>,
     expected_document: Option<UiDocumentProof>,
 }
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -279,6 +279,7 @@ struct Record {
     load_accepted: bool,
     // The admitted native Start, not the immutable logical Open target.
     navigation: Option<(u64, u64, Option<UiOpenTarget>)>,
+    navigation_started_at: Option<Instant>,
     installed: Option<InstalledDocument>,
     document_high_water: u64,
     source_high_water: u64,
@@ -303,6 +304,7 @@ impl Record {
             blank_finished: false,
             load_accepted: false,
             navigation: None,
+            navigation_started_at: None,
             installed: None,
             document_high_water: 0,
             source_high_water: 0,
@@ -485,7 +487,12 @@ impl UiViewLifetime {
             self.cancel_root_replacement(manager);
         }
         if manager.root_scene() == scene {
-            return Ok(UiRootReplacement::Unchanged);
+            if let Some(pending) = manager.pending_configured_root() {
+                return Ok(UiRootReplacement::Pending(pending));
+            }
+            if manager.root_projection_is_complete() {
+                return Ok(UiRootReplacement::Unchanged);
+            }
         }
         let result = manager.begin_root_replacement(scene)?;
         if let UiRootReplacement::Completed(destroyed) = &result {
@@ -689,6 +696,12 @@ impl UiViewLifetime {
             self.groups.insert(id, group);
         }
         for opening in self.presentation_order(manager) {
+            let Some(expected_document) = self.records[&opening.pending].qualified_document()
+            else {
+                // A new native document has not earned presentation authority.
+                // Its navigation result/timeout is handled by advance, not retried here.
+                continue;
+            };
             let Some(desired) = self.desired_presentation(manager, opening) else {
                 continue;
             };
@@ -698,7 +711,8 @@ impl UiViewLifetime {
                 .and_then(|record| record.presentation.as_ref());
             if force.contains(&opening)
                 || request.is_none_or(|request| {
-                    request.desired != desired || request.confirmed == Some(false)
+                    request.desired != desired
+                        || request.expected_document != Some(expected_document)
                 })
             {
                 let action_id = self.action_id();
@@ -708,14 +722,14 @@ impl UiViewLifetime {
                     .presentation = Some(PresentationRequest {
                     desired,
                     action_id,
-                    confirmed: None,
-                    expected_document: self.records[&opening.pending].installed_proof(),
+                    result: None,
+                    expected_document: Some(expected_document),
                 });
                 actions.push(UiAction::ApplyPresentation {
                     opening,
                     action_id,
                     presentation: desired,
-                    expected_document: self.records[&opening.pending].installed_proof(),
+                    expected_document: Some(expected_document),
                 });
             }
         }
@@ -729,7 +743,7 @@ impl UiViewLifetime {
                         .and_then(|record| record.presentation.as_ref());
                     request.is_some_and(|request| {
                         request.desired.visible
-                            && request.confirmed == Some(true)
+                            && request.result == Some(Ok(true))
                             && request.expected_document.is_some()
                             && self.records.get(&opening.pending).is_some_and(|record| {
                                 record.qualified_document() == request.expected_document
@@ -859,17 +873,18 @@ impl UiViewLifetime {
                         | Phase::Loading
                         | Phase::Destroying
                         | Phase::Disposing
-                ) && (record.created_at.is_none()
-                    || (activity.scripts.get(&self.opening(*id)) == Some(&Some(0))
-                        && activity.navigation_pending.get(&self.opening(*id))
-                            == Some(&Some(false))))
+                ) && (record.phase != Phase::Committed || record.qualified_document().is_some())
+                    && (record.created_at.is_none()
+                        || (activity.scripts.get(&self.opening(*id)) == Some(&Some(0))
+                            && activity.navigation_pending.get(&self.opening(*id))
+                                == Some(&Some(false))))
             })
             && !self.records.values().any(|record| {
                 record.phase == Phase::Committed
                     && record
                         .presentation
                         .as_ref()
-                        .is_some_and(|request| request.confirmed != Some(true))
+                        .is_some_and(|request| request.result != Some(Ok(request.desired.visible)))
             })
     }
     /// Called only after an empty action batch, using a fresh physical snapshot.
@@ -969,8 +984,10 @@ impl UiViewLifetime {
                     action_id, result, ..
                 } if record.phase == Phase::Committed => {
                     if let Some(request) = &mut record.presentation {
-                        if request.action_id == action_id && request.confirmed.is_none() {
-                            request.confirmed = Some(result == Ok(request.desired.visible));
+                        if request.action_id == action_id && request.result.is_none() {
+                            // Keep the error until all facts have been consumed: a
+                            // reentrant navigation can make this request obsolete.
+                            request.result = Some(result);
                         }
                     }
                 }
@@ -1050,6 +1067,7 @@ impl UiViewLifetime {
                         .is_none_or(|(_, current, _)| start_revision > *current)
                     {
                         record.navigation = Some((navigation_id, start_revision, target));
+                        record.navigation_started_at = Some(now);
                         record.navigation_result = None;
                         record.installed = None;
                         record.confirmation = None;
@@ -1124,6 +1142,82 @@ impl UiViewLifetime {
                 _ => {}
             }
         }
+        let failures = self
+            .records
+            .iter()
+            .filter(|(_, record)| record.phase == Phase::Committed)
+            .filter_map(|(id, record)| {
+                let error = if let Some(Err(message)) = &record.navigation_result {
+                    Some(UiLifecycleError::NavigationFailed(message.clone()))
+                } else if record.qualified_document().is_none()
+                    && record
+                        .navigation_started_at
+                        .is_some_and(|start| now.saturating_duration_since(start) >= self.timeout)
+                {
+                    Some(UiLifecycleError::LoadTimeout)
+                } else {
+                    record.presentation.as_ref().and_then(|request| {
+                        if request.expected_document != record.qualified_document() {
+                            return None;
+                        }
+                        match &request.result {
+                            Some(Err(message)) => {
+                                Some(UiLifecycleError::NavigationFailed(message.clone()))
+                            }
+                            Some(Ok(visible)) if *visible != request.desired.visible => {
+                                Some(UiLifecycleError::NavigationFailed(
+                                    "native presentation did not apply requested visibility".into(),
+                                ))
+                            }
+                            _ => None,
+                        }
+                    })
+                };
+                error.map(|error| (UiInstanceId::from_host_id(*id), error))
+            })
+            .collect::<Vec<_>>();
+        for (instance, error) in failures {
+            // An earlier root/ancestor failure can already have revoked this one.
+            if manager.instance(instance).is_none() {
+                continue;
+            }
+            let root_failure = manager.is_root_document(instance);
+            let destroyed = match manager.fail_instance(instance, error.to_string()) {
+                Ok(destroyed) => destroyed,
+                Err(failure) => {
+                    self.creation_frozen = true;
+                    if !self.native_fault_reported {
+                        self.native_fault_reported = true;
+                        actions.push(UiAction::ReportFatalNativeFailure {
+                            message: format!("cannot revoke failed UI {instance:?}: {failure}"),
+                        });
+                    }
+                    continue;
+                }
+            };
+            log::error!("UI document {instance:?} failed: {error}");
+            let mut retire = destroyed
+                .into_iter()
+                .map(|id| id.value())
+                .collect::<BTreeSet<_>>();
+            if root_failure {
+                retire.extend(self.records.iter().filter_map(|(id, record)| {
+                    matches!(record.phase, Phase::Retained(_)).then_some(*id)
+                }));
+            }
+            // Failed documents cannot complete a display handoff. Retire them
+            // through the existing Destroying/Close path before creating Recovery.
+            for id in &retire {
+                if let Some(record) = self.records.get_mut(id) {
+                    record.terminal = Some(error.clone());
+                    record.presentation = None;
+                }
+            }
+            self.groups.retain(|_, group| {
+                group.members.retain(|id| !retire.contains(id));
+                !group.members.is_empty()
+            });
+        }
         let ids = self.records.keys().copied().collect::<Vec<_>>();
         let mut remove = Vec::new();
         for id in ids {
@@ -1133,8 +1227,9 @@ impl UiViewLifetime {
                 remove.push(id);
                 continue;
             }
-            if record.phase == Phase::Committed {
+            if record.phase == Phase::Committed && record.terminal.is_none() {
                 if let Some(proof) = record.qualified_document() {
+                    record.navigation_started_at = None;
                     // A confirmed native document may navigate within its own
                     // Definition; the original Open target is not a reload policy.
                     record.project_document_path(manager, UiInstanceId::from_host_id(id));
@@ -1152,14 +1247,14 @@ impl UiViewLifetime {
                 }
                 continue;
             }
-            if matches!(record.phase, Phase::Retained(_)) {
+            if matches!(record.phase, Phase::Retained(_)) && record.terminal.is_none() {
                 continue;
             }
             if record.resume_pending {
                 record.resume_pending = false;
                 actions.push(UiAction::ResumePrepared { opening });
             }
-            if manager.pending_descriptor(id).is_none() {
+            if record.terminal.is_none() && manager.pending_descriptor(id).is_none() {
                 record.terminal = Some(UiLifecycleError::StaleUiInstance);
             }
             let document_ready = record.load_accepted && record.qualified_document().is_some();
@@ -1198,7 +1293,11 @@ impl UiViewLifetime {
                 }
             }
             if let Some(error) = &record.terminal {
-                let _ = manager.fail_open(id, error.to_string());
+                if manager.pending_descriptor(id).is_some() {
+                    manager
+                        .fail_open(id, error.to_string())
+                        .expect("the pending failure belongs to this manager");
+                }
                 if let Some(response) = record.response.take() {
                     actions.push(UiAction::SettleOpenResponse {
                         opening,
@@ -1307,7 +1406,7 @@ impl UiViewLifetime {
                 && record
                     .presentation
                     .as_ref()
-                    .is_some_and(|request| request.confirmed != Some(true))
+                    .is_some_and(|request| request.result != Some(Ok(request.desired.visible)))
         });
         if actions.is_empty() && !presentation_pending && activity.callback_depth == Some(0) {
             if let Some(id) = self.records.iter().find_map(|(id, record)| {

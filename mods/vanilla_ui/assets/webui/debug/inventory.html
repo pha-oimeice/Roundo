@@ -1,13 +1,4 @@
-<!doctype html>
-<html lang="zh-CN">
-<head>
-<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Roundo · 物品栏管理</title>
-<link rel="stylesheet" href="style.css">
-</head>
-<body>
-<main>
-  <header><div><small>ROUNDO / DEBUG WORKSPACE</small><h1>物品栏管理</h1></div><div class="toolbar"><span id="connection" role="status">读取连接状态…</span><button id="bindings">修改快捷键</button><button id="close">返回目录 · Esc</button></div></header>
+<section class="debug-page" aria-label="物品栏管理">
   <div id="message" role="status" aria-live="polite">选择物品栏查看所属概念体及直接保管的物品；也可为概念体创建空物品栏。</div>
   <section id="inventory-workspace" class="workspace" aria-label="物品栏管理">
     <aside class="card">
@@ -55,6 +46,5 @@
       <details class="scope-note"><summary>操作权限与范围</summary><p class="muted">沿用服务端现有诊断准入：当前已认证玩家可操作其他概念体的物品栏，不要求 Controller 绑定。库存保管不授予物品数据访问权。Public 是世界唯一的兜底库存，不能删除或为其概念体另建库存。容量与占用量不是物品数量，也不在此界面自动计算或限制操作。</p><p class="muted">列表和成员分页是独立时刻的快照，不是持续锁定视图；外部变动后请刷新。结果由服务端重新校验。读取失败或回执未知时不自动重试修改。</p></details>
     </article>
   </section>
-  <footer><span id="shortcut">正在读取快捷键绑定…</span><span id="activity">就绪</span></footer>
-</main><script src="navigation.js"></script><script src="transport.js"></script><script src="inventory.js"></script>
-</body></html>
+  <footer><span id="activity">就绪</span></footer>
+</section>

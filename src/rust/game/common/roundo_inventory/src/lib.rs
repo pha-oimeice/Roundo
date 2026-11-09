@@ -7,8 +7,9 @@
 //! until the World is dropped. Ordinary Bodies still receive no automatic inventory.
 //!
 //! [`ItemId::from_u128`] imports an existing identity; copying it does not issue
-//! an item. Callers ensure global uniqueness/non-reuse and do not simultaneously
-//! custody one actual item in independent authorities. Item data remains external.
+//! an item. Callers ensure uniqueness among live items and do not simultaneously
+//! custody one actual item in independent authorities. Reused numbers require
+//! separate exact-instance validation by the caller. Item data remains external.
 //!
 //! [`InventoryHandle`] and [`InventoryOwner`] are opaque copied identities, not
 //! authorization. Access validates current World + store epoch, exact inventory
@@ -23,9 +24,12 @@
 //! `take`, ordinary inventory removal and exact dead-Body cleanup move direct
 //! members to Public, never into an ownerless gap. If A holds B and B holds C,
 //! A does not hold C: spilling B does not mutate B, its data or its own inventories.
-//! No nested traversal, item destruction, physics spawn, Item event, automatic
-//! pickup, data grant or network output occurs. Public custody need not have any
-//! spatial representation. A Public `take` validates custody and is a no-op.
+//! Those operations perform no nested traversal, item destruction, physics spawn,
+//! Item event, automatic pickup, data grant or network output. Public custody need
+//! not have any spatial representation. A Public `take` validates custody and is
+//! a no-op. `remove_destroyed_item` is a separate terminal-cleanup interface: it
+//! removes custody without spilling, only as part of caller-coordinated item
+//! destruction, never as a way to leave a live item without an owner.
 //!
 //! Queries return owned unordered snapshots, not live views/disclosure rights.
 //! `len` includes Public and any not-yet-cleaned dead-owner inventories. `holder`

@@ -5,9 +5,11 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
 };
 
-/// An externally supplied identity, independent of item type or associated data.
-/// Importing or copying an ID does not issue a new item. The caller is responsible
-/// for globally unique, never-reused identities across authoritative domains.
+/// An externally supplied business number, independent of item type or data.
+/// Importing or copying it does not issue an item. Callers ensure uniqueness among
+/// live items across authoritative domains. Reusing a destroyed item's number
+/// does not restore that instance; retained operations need a separate exact
+/// instance identity rather than this number alone.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct ItemId(u128);
 

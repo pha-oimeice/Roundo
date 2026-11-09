@@ -92,7 +92,9 @@ fn clear_invalidated_owner(
 /// handles/owners; Factory invalidation rejects normal access immediately, even if
 /// cleanup is delayed. No membership in a Life or typed data permission is required.
 ///
-/// IDs are caller-supplied globally unique, never-reused identities, not issued here.
+/// IDs are caller-supplied identities unique among live items, not issued here.
+/// A reused number alone cannot distinguish instances; callers must separately
+/// validate exact item identity before acting on a retained request.
 /// All returned `Err`s leave inventory structure unchanged. Checks and synchronous
 /// commits run without external rules, callbacks, async work or clock advancement;
 /// this is not a transaction for external data, side effects, panic/abort or OOM.
@@ -208,6 +210,20 @@ impl Inventories<'_, '_> {
         self.store.check_world(self.world)?;
         self.check_inventory(handle)?;
         self.store.take(handle, item)
+    }
+
+    /// Removes the final custody entry during trusted item destruction, including
+    /// from Public. Unlike `take`, this never transfers the item to another owner.
+    ///
+    /// This is only the inventory part of a terminal lifecycle commit: the caller
+    /// must validate the exact item instance and end its lifetime in the same
+    /// serialized operation. Never use this to detach a still-live item. Checks
+    /// World, inventory identity, live owner and source membership before writing;
+    /// any `Err` leaves custody unchanged. Does not reserve or blacklist the ID.
+    pub fn remove_destroyed_item(&mut self, handle: InventoryHandle, item: ItemId) -> Result<()> {
+        self.store.check_world(self.world)?;
+        self.check_inventory(handle)?;
+        self.store.remove_destroyed_item(handle, item)
     }
 
     /// Atomically and immediately moves custody and both member sets, expected O(1).

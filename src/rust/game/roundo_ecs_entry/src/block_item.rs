@@ -191,6 +191,15 @@ pub(crate) fn create_item(
     }
 }
 
+/// Releases this module's cached grant only after the exact instance has ended.
+/// Partial initialization need not have installed a grant; no replacement grant
+/// or owner is manufactured during cleanup.
+pub(crate) fn forget_destroyed_item(world: &mut World, item: ItemId) {
+    if let Some(mut sources) = world.get_resource_mut::<BlockItemSources>() {
+        sources.reads.remove(&item);
+    }
+}
+
 /// Readback of the stored composition after explicit creation. Custody and data
 /// access are validated without interpreting the payload as a gameplay method.
 #[derive(SystemParam)]
