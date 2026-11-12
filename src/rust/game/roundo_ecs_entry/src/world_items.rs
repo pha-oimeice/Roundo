@@ -203,7 +203,7 @@ impl Plugin for WorldItemsPlugin {
 /// `ItemPickup` is scheduler-visible; use separate systems with an explicit order.
 #[derive(SystemParam)]
 pub struct WorldItems<'w, 's> {
-    world: WorldId,
+    world: Local<'s, WorldId>,
     representations: ResMut<'w, Representations>,
     inventories: Inventories<'w, 's>,
     commands: Commands<'w, 's>,
@@ -219,7 +219,7 @@ impl WorldItems<'_, '_> {
         item: ItemId,
         description: DroppedSphere,
     ) -> Result<Entity, WorldItemError> {
-        if self.world != self.representations.world {
+        if *self.world != self.representations.world {
             return Err(WorldItemError::WrongWorld);
         }
         let public = self.inventories.public_inventory()?;
@@ -251,7 +251,7 @@ impl WorldItems<'_, '_> {
 
     /// Removes only the world representation, never the item or Public custody.
     pub fn remove(&mut self, item: ItemId) -> Result<(), WorldItemError> {
-        if self.world != self.representations.world {
+        if *self.world != self.representations.world {
             return Err(WorldItemError::WrongWorld);
         }
         self.inventories.public_inventory()?;
@@ -277,7 +277,7 @@ impl WorldItems<'_, '_> {
 /// this parameter does not advance or rebuild the physics world itself.
 #[derive(SystemParam)]
 pub struct ItemPickup<'w, 's> {
-    world: WorldId,
+    world: Local<'s, WorldId>,
     representations: ResMut<'w, Representations>,
     inventories: Inventories<'w, 's>,
     spatial: SpatialQuery<'w, 's>,
@@ -288,7 +288,7 @@ impl ItemPickup<'_, '_> {
     /// Owned sorted candidate identities, not authorization or cached hit proofs.
     /// Only exact intersections of currently Public registered bodies are returned.
     pub fn candidates(&self, range: PickupSphere) -> Result<Vec<ItemId>, WorldItemError> {
-        if self.world != self.representations.world {
+        if *self.world != self.representations.world {
             return Err(WorldItemError::WrongWorld);
         }
         let public = self.inventories.public_inventory()?;
@@ -323,7 +323,7 @@ impl ItemPickup<'_, '_> {
         range: PickupSphere,
         receiver: InventoryHandle,
     ) -> Result<(), WorldItemError> {
-        if self.world != self.representations.world {
+        if *self.world != self.representations.world {
             return Err(WorldItemError::WrongWorld);
         }
         let public = self.inventories.public_inventory()?;

@@ -205,7 +205,7 @@ pub(crate) fn forget_destroyed_item(world: &mut World, item: ItemId) {
 #[derive(SystemParam)]
 pub(crate) struct BlockItemData<'w, 's> {
     sources: Res<'w, BlockItemSources>,
-    items: ItemReads<'w>,
+    items: ItemReads<'w, 's>,
     inventories: Inventories<'w, 's>,
 }
 

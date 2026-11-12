@@ -162,13 +162,13 @@ pub(super) fn clear_incarnation(mut world: DeferredWorld, context: HookContext) 
     }
 }
 fn cleanup_coordinate_demands(
-    event: On<Discard, LocalCoordinate>,
+    event: On<Discard<LocalCoordinate>>,
     runtime: Option<ResMut<Runtime>>,
 ) {
     cleanup_demands_for_entity(event.entity, runtime);
 }
 fn cleanup_coordinate_identity_demands(
-    event: On<Discard, LocalCoordinateIdentity>,
+    event: On<Discard<LocalCoordinateIdentity>>,
     runtime: Option<ResMut<Runtime>>,
 ) {
     cleanup_demands_for_entity(event.entity, runtime);

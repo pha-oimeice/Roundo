@@ -381,10 +381,7 @@ pub(super) fn submit_terminal_request(
         .and_then(serde_json::Value::as_str)
         .unwrap_or_default()
         .to_owned();
-    match pipe
-        .io()
-        .submit(request, roundo_webui::UiCommandSource::Host)
-    {
+    match pipe.io().submit(request, roundo_ui::UiCommandSource::Host) {
         Ok(call) => {
             responses.0.push(PendingTerminalResponse { command, call });
             None

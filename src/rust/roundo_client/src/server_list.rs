@@ -81,12 +81,15 @@ struct ProbeEntry {
 pub(crate) struct ProbeOutput {
     pub(crate) status: String,
     pub(crate) message: Option<String>,
+    /// QUIC's estimated round-trip time in milliseconds; absent without a successful probe.
+    pub(crate) latency_ms: Option<u128>,
 }
 impl ProbeOutput {
     fn status(status: &str) -> Self {
         Self {
             status: status.into(),
             message: None,
+            latency_ms: None,
         }
     }
 }
@@ -307,6 +310,7 @@ fn probe_server(
             return ProbeOutput {
                 status: "error".into(),
                 message: Some(message),
+                latency_ms: None,
             };
         }
     };
@@ -316,10 +320,15 @@ fn probe_server(
         config.certificate_policy,
         Duration::from_secs(2),
     ) {
-        Ok(_) => ProbeOutput::status("reachable"),
+        Ok(latency) => ProbeOutput {
+            status: "reachable".into(),
+            message: None,
+            latency_ms: Some(latency.as_millis()),
+        },
         Err(error) => ProbeOutput {
             status: "unreachable".into(),
             message: Some(error.to_string()),
+            latency_ms: None,
         },
     }
 }

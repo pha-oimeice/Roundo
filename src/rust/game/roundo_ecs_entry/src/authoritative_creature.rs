@@ -431,7 +431,7 @@ fn cleanup_factory_invalidation(
     }
 }
 
-fn cleanup_removed_player_assembly(removal: On<Remove, Player>, mut cleanup: AssemblyCleanup) {
+fn cleanup_removed_player_assembly(removal: On<Remove<Player>>, mut cleanup: AssemblyCleanup) {
     let life = cleanup
         .markers
         .get(removal.entity)
@@ -443,7 +443,7 @@ fn cleanup_removed_player_assembly(removal: On<Remove, Player>, mut cleanup: Ass
 }
 
 fn cleanup_removed_controller_assembly(
-    removal: On<Remove, Controller>,
+    removal: On<Remove<Controller>>,
     controllers: Query<&Controller>,
     mut cleanup: AssemblyCleanup,
 ) {

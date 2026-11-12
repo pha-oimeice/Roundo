@@ -1,374 +1,206 @@
-//! Reconnecting QUIC client hosted on a dedicated Tokio runtime thread.
+//! Reconnecting business-session adapter hosted above Quinnet's byte transport.
 
 use super::*;
+use bevy_quinnet::client::connection::ConnectionFailedEvent;
+use roundo_contracts::{GAME_PROTOCOL_VERSION, RESOURCE_PROTOCOL_VERSION};
 
-/// Handle for one reconnecting network client and its bounded outbound queues.
-///
-/// The worker reconnects until [`shutdown`](Self::shutdown) or drop. Application
-/// callbacks run on the networking runtime, not on the thread that owns this
-/// handle. The handle itself does not expose connection state.
+/// Nonblocking admission to independent business queues. Success means local
+/// admission only. The transport has its own byte window, unrelated to these
+/// message-count capacities. Shutdown joins all callbacks before returning.
 pub struct ClientNetwork {
-    stream0_outbound: mpsc::Sender<ClientMessage>,
-    stream1_outbound: mpsc::Sender<ClientMessage>,
-    shutdown: watch::Sender<bool>,
-    worker: std::sync::Mutex<Option<thread::JoinHandle<()>>>,
+    outbound: [mpsc::Sender<ClientMessage>; 2],
+    worker: Worker,
 }
-
 impl ClientNetwork {
-    /// Creates the Tokio runtime and starts a reconnecting worker thread.
-    ///
-    /// Success means only that the local runtime and queues were created. TLS
-    /// setup, dialing, and session negotiation happen asynchronously. Dial and
-    /// negotiation failures reach [`ClientHooks::on_connection_error`]; TLS
-    /// setup failure is logged and stops the worker. Configured queue capacities
-    /// are clamped to at least one item.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the Tokio runtime cannot be created.
     pub fn start(
         config: ClientNetworkConfig,
         hooks: Arc<dyn ClientHooks>,
     ) -> Result<Self, NetworkError> {
-        log::info!(
-            "starting network client: quic_address={}, server_name={}, certificate_policy={:?}, reconnect_delay_ms={}",
-            config.quic_address,
-            config.server_name,
-            config.certificate_policy,
-            config.reconnect_delay.as_millis()
-        );
-        let runtime = Builder::new_multi_thread()
-            .enable_all()
-            .build()
-            .map_err(NetworkError::from_display)?;
-        let admission = config.admission;
-        let (stream0_outbound, stream0_receiver) =
-            mpsc::channel(admission.capacity(StreamId::Stream0).max(1));
-        let (stream1_outbound, stream1_receiver) =
-            mpsc::channel(admission.capacity(StreamId::Stream1).max(1));
-        let (shutdown, shutdown_receiver) = watch::channel(false);
-        let worker = thread::spawn(move || {
-            runtime.block_on(run_client(
+        config.outbound.validate()?;
+        let (game, game_rx) = mpsc::channel(config.outbound.game_capacity);
+        let (resource, resource_rx) = mpsc::channel(config.outbound.resource_capacity);
+        let (worker, ()) = Worker::start(move |stop, ready| {
+            run_client(
                 config,
                 hooks,
-                stream0_receiver,
-                stream1_receiver,
-                shutdown_receiver,
-            ));
-        });
-
+                BatchWriter::new(game_rx, resource_rx),
+                stop,
+                ready,
+            )
+        })?;
         Ok(Self {
-            stream0_outbound,
-            stream1_outbound,
-            shutdown,
-            worker: std::sync::Mutex::new(Some(worker)),
+            outbound: [game, resource],
+            worker,
         })
     }
-
-    /// Attempts to enqueue one application message without blocking.
-    ///
-    /// The message classification selects its logical stream.
-    /// Admission success guarantees only insertion into the selected local
-    /// queue; it does not imply an active connection or peer delivery. Messages
-    /// not consumed by the current transport attempt are discarded at the next
-    /// session boundary and never migrate to another authoritative session.
-    /// Session-negotiation messages cannot be submitted through this method.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error for a negotiation message, a full bounded queue, or a
-    /// stopped worker. Messages are scoped to the currently establishing/active
-    /// transport attempt: anything still queued
-    /// when a later session is established is discarded before that session's
-    /// callback. The converted message is not returned on failure.
-    pub fn send<Message>(&self, message: Message) -> Result<(), NetworkError>
-    where
-        Message: Into<ClientMessage>,
-    {
+    pub fn send<M: Into<ClientMessage>>(&self, message: M) -> Result<(), NetworkError> {
         let message = message.into();
-        let message_kind = message.kind();
-        let Some(stream) = message.stream() else {
-            return Err(NetworkError::new(format!(
-                "negotiation message {message_kind} cannot enter an application queue"
-            )));
-        };
-        let admission = match stream {
-            StreamId::Stream0 => admit(&self.stream0_outbound, message),
-            StreamId::Stream1 => admit(&self.stream1_outbound, message),
-        };
-        match admission {
+        let class = message
+            .traffic_class()
+            .ok_or_else(|| NetworkError::new("negotiation cannot enter a business queue"))?;
+        match admit(&self.outbound[class as usize], message) {
             AdmissionResult::Queued => Ok(()),
             AdmissionResult::Saturated => {
-                log::warn!(
-                    "rejected client message: stream={stream:?}, message={message_kind}, reason=outbound_saturated"
-                );
-                Err(NetworkError::new("network outbound queue is saturated"))
+                Err(NetworkError::new("business outbound queue is saturated"))
             }
-            AdmissionResult::Closed => {
-                log::warn!(
-                    "failed to queue client message: stream={stream:?}, message={message_kind}, reason=network_client_stopped"
-                );
-                Err(NetworkError::new("network client is no longer running"))
-            }
+            AdmissionResult::Closed => Err(NetworkError::new("network client stopped")),
         }
     }
-
-    /// Requests shutdown and waits for reconnect and stream I/O to end.
-    ///
-    /// This blocks the current OS thread while joining the worker. Calling it
-    /// more than once is harmless; dropping the handle performs the same step.
-    /// A worker panic is logged rather than propagated.
     pub fn shutdown(&self) {
-        log::info!("network client shutdown requested");
-        let shutdown_result = self.shutdown.send(true);
-        if shutdown_result.is_err() {
-            log::debug!("network client shutdown receiver was already closed");
-        }
-        let worker = self
-            .worker
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .take();
-        if let Some(worker) = worker {
-            if worker.thread().id() == thread::current().id() {
-                log::error!("network client worker attempted to join itself during shutdown");
-                return;
-            }
-            if let Err(error) = worker.join() {
-                log::error!("network client worker panicked during shutdown: {error:?}");
-            }
-        }
+        self.worker.shutdown();
     }
 }
 
-impl Drop for ClientNetwork {
-    fn drop(&mut self) {
-        self.shutdown();
-    }
-}
-
-async fn run_client(
+fn run_client(
     config: ClientNetworkConfig,
     hooks: Arc<dyn ClientHooks>,
-    mut stream0_outbound: mpsc::Receiver<ClientMessage>,
-    mut stream1_outbound: mpsc::Receiver<ClientMessage>,
-    mut shutdown: watch::Receiver<bool>,
-) {
-    let tls_config = match tls::create_client_tls_config(&config.certificate_policy) {
-        Ok(config) => config,
-        Err(error) => {
-            log::error!("failed to configure QUIC TLS client: {error}");
-            return;
-        }
-    };
-    let mut attempt = 0_u64;
-    loop {
-        if *shutdown.borrow() {
-            log::info!("network client stopped before connection attempt");
-            return;
-        }
-        attempt += 1;
-        log::info!(
-            "connecting to QUIC server: attempt={attempt}, quic_address={}",
-            config.quic_address
-        );
-        let establishment = tokio::select! {
-            changed = shutdown.changed() => {
-                if changed.is_err() || *shutdown.borrow() {
-                    log::info!("network client stopped during connection establishment");
-                    return;
+    mut output: BatchWriter<ClientMessage>,
+    stop: Arc<AtomicBool>,
+    ready: SyncSender<Result<(), NetworkError>>,
+) -> Result<(), NetworkError> {
+    let mut app = App::new();
+    app.add_plugins(QuinnetClientPlugin::default());
+    ready.send(Ok(())).map_err(NetworkError::from_display)?;
+    let mut trusted = CertStore::new();
+    let mut id = None;
+    let mut retry_at = Instant::now();
+    let mut connected = false;
+    let mut session_ready = false;
+    let mut transport = ByteTransport::default();
+    let mut input = BatchReader::<ServerMessage>::default();
+    run_polling_bridge(&stop, || {
+        app.update();
+        update_trust(&mut app, &mut trusted);
+        let failure = app
+            .world_mut()
+            .resource_mut::<Messages<ConnectionFailedEvent>>()
+            .drain()
+            .find(|event| Some(event.id) == id)
+            .map(|event| NetworkError::from_display(event.err));
+        let step = (|| -> Result<(), NetworkError> {
+            if id.is_none() {
+                if Instant::now() < retry_at {
+                    return Ok(());
                 }
-                continue;
-            }
-            result = establish_client_sessions(
-                &config,
-                Arc::clone(&tls_config),
-                hooks.resource_catalog_fingerprint(),
-            ) => result,
-        };
-        match establishment {
-            Ok(sessions) => {
-                log::info!(
-                    "QUIC stream0 and stream1 established: quic_address={}, server_name={}",
+                output.reset();
+                transport = ByteTransport::default();
+                input = BatchReader::default();
+                let configuration = client_configuration(
                     config.quic_address,
-                    config.server_name
+                    &config.server_name,
+                    &config.certificate_policy,
+                    &trusted,
                 );
-                let (discarded_stream0, discarded_stream1) =
-                    discard_stale_outbound(&mut stream0_outbound, &mut stream1_outbound);
-                if discarded_stream0 != 0 || discarded_stream1 != 0 {
-                    log::warn!(
-                        "discarded stale client outbound messages at session boundary: stream0={discarded_stream0}, stream1={discarded_stream1}"
-                    );
+                id = Some(
+                    app.world_mut()
+                        .resource_mut::<QuinnetClient>()
+                        .open_connection(configuration)
+                        .map_err(NetworkError::from_display)?,
+                );
+            }
+            if let Some(error) = failure {
+                return Err(error);
+            }
+            let current = id.expect("opened connection");
+            let mut client = app.world_mut().resource_mut::<QuinnetClient>();
+            let connection = client
+                .get_connection_mut_by_id(current)
+                .ok_or_else(|| NetworkError::new("Quinnet connection disappeared"))?;
+            match connection.state() {
+                ConnectionState::Connecting => return Ok(()),
+                ConnectionState::Disconnected => {
+                    return Err(NetworkError::new("Quinnet connection closed"));
                 }
-                hooks.on_connection_established();
-                run_client_sessions(
-                    sessions,
-                    Arc::clone(&hooks),
-                    config.admission,
-                    &mut stream0_outbound,
-                    &mut stream1_outbound,
-                    &mut shutdown,
-                )
-                .await;
-                if !*shutdown.borrow() {
-                    hooks.on_connection_lost();
+                ConnectionState::Connected => {}
+            }
+            if !connected {
+                output.control(ClientMessage::JoinPublicSession {
+                    resource_fingerprint: hooks.resource_catalog_fingerprint(),
+                });
+                connected = true;
+            }
+            // A conforming peer has at most one data block and one ACK in flight.
+            // Bound each pump's work even if an untrusted peer sends continuously.
+            for _ in 0..2 {
+                let (channel, bytes) = match connection.dequeue_undispatched_bytes_from_peer() {
+                    Ok(payload) => payload,
+                    Err(mpsc::error::TryRecvError::Empty) => break,
+                    Err(mpsc::error::TryRecvError::Disconnected) => {
+                        return Err(NetworkError::new("Quinnet receive worker stopped"));
+                    }
+                };
+                if let Some(batch) = transport.receive(channel, bytes)? {
+                    for message in input.receive(&batch)? {
+                        match message {
+                            ServerMessage::SessionEstablished { .. } if !session_ready => {
+                                // No queued work from dialing/previous epochs survives
+                                // the authoritative session boundary.
+                                output.reset();
+                                output.control(ClientMessage::Ready {
+                                    game_protocol_version: GAME_PROTOCOL_VERSION,
+                                    resource_protocol_version: RESOURCE_PROTOCOL_VERSION,
+                                });
+                                output.open();
+                                session_ready = true;
+                                hooks.on_connection_established();
+                            }
+                            ServerMessage::Game(message) if session_ready => {
+                                hooks.on_server_game_message(message)
+                            }
+                            ServerMessage::Resource(message) if session_ready => {
+                                hooks.on_server_resource_message(message)
+                            }
+                            ServerMessage::Error { code } => {
+                                return Err(NetworkError::new(format!(
+                                    "session rejected: {code:?}"
+                                )));
+                            }
+                            message => {
+                                return Err(NetworkError::new(format!(
+                                    "unexpected server business message: {}",
+                                    message.kind()
+                                )));
+                            }
+                        }
+                    }
                 }
             }
-            Err(error) => {
-                log::warn!("network connection failed: {error}");
+            if transport.can_prepare() {
+                if let Some(batch) = output.prepare()? {
+                    transport.prepare(batch)?;
+                }
+            }
+            transport.flush(|channel, bytes| {
+                client_send_result(connection.send_payload_on(channel, bytes))
+            })
+        })();
+        if let Err(error) = step {
+            log::warn!("Quinnet client connection ended: {error}");
+            if let Some(current) = id.take() {
+                if let Err(close) = app
+                    .world_mut()
+                    .resource_mut::<QuinnetClient>()
+                    .close_connection(current)
+                {
+                    log::debug!("Quinnet client was already closed: {close}");
+                }
+            }
+            if session_ready {
+                hooks.on_connection_lost();
+            } else {
                 hooks.on_connection_error(&error);
             }
+            connected = false;
+            session_ready = false;
+            output.reset();
+            input = BatchReader::default();
+            transport = ByteTransport::default();
+            retry_at = Instant::now() + config.reconnect_delay;
         }
-        if *shutdown.borrow() {
-            log::info!("network client stopped");
-            return;
-        }
-        log::info!(
-            "scheduling network reconnect: delay_ms={}",
-            config.reconnect_delay.as_millis()
-        );
-        tokio::select! {
-            changed = shutdown.changed() => {
-                if changed.is_err() || *shutdown.borrow() {
-                    log::info!("network client stopped during reconnect delay");
-                    return;
-                }
-            }
-            _ = tokio::time::sleep(config.reconnect_delay) => {}
-        }
-    }
-}
-
-fn discard_stale_outbound(
-    stream0: &mut mpsc::Receiver<ClientMessage>,
-    stream1: &mut mpsc::Receiver<ClientMessage>,
-) -> (usize, usize) {
-    fn drain(receiver: &mut mpsc::Receiver<ClientMessage>) -> usize {
-        let mut count = 0;
-        while receiver.try_recv().is_ok() {
-            count += 1;
-        }
-        count
-    }
-    (drain(stream0), drain(stream1))
-}
-
-struct ClientSessions {
-    endpoint: quinn::Endpoint,
-    connection: quinn::Connection,
-    stream0: ClientGameSession<quic::PairedStream>,
-    stream1: ClientResourceSession<quic::PairedStream>,
-}
-
-async fn establish_client_sessions(
-    config: &ClientNetworkConfig,
-    tls_config: Arc<rustls::ClientConfig>,
-    resource_fingerprint: ResourceCatalogFingerprint,
-) -> Result<ClientSessions, NetworkError> {
-    let endpoint = quic::client_endpoint(config.quic_address, tls_config)?;
-    let connection = quic::dial(&endpoint, config.quic_address, &config.server_name).await?;
-    let streams = quic::establish_streams(&connection).await?;
-    let established = ClientSession::new(streams.stream0)
-        .join_public_session(resource_fingerprint)
-        .await
-        .map_err(NetworkError::from_display)?;
-    let session_info = established.session_info();
-    log::debug!(
-        "QUIC public session established: user_id={}, session_id={}",
-        session_info.user_session.user_id.0,
-        session_info.user_session.session_id.0
-    );
-    let stream0 = established
-        .enter_game()
-        .await
-        .map_err(NetworkError::from_display)?;
-    let stream1 = ClientResourceSession::initialize(streams.stream1)
-        .await
-        .map_err(NetworkError::from_display)?;
-    Ok(ClientSessions {
-        endpoint,
-        connection,
-        stream0,
-        stream1,
-    })
-}
-
-async fn run_client_sessions(
-    sessions: ClientSessions,
-    hooks: Arc<dyn ClientHooks>,
-    admission: TransportAdmissionPolicy,
-    stream0_outbound: &mut mpsc::Receiver<ClientMessage>,
-    stream1_outbound: &mut mpsc::Receiver<ClientMessage>,
-    shutdown: &mut watch::Receiver<bool>,
-) {
-    let ClientSessions {
-        endpoint,
-        connection,
-        stream0,
-        stream1,
-    } = sessions;
-    let mut stream0 = ConnectionIo::spawn(
-        stream0.into_connection(),
-        admission.capacity(StreamId::Stream0),
-    );
-    let mut stream1 = ConnectionIo::spawn(
-        stream1.into_connection(),
-        admission.capacity(StreamId::Stream1),
-    );
-    loop {
-        tokio::select! {
-            changed = shutdown.changed() => {
-                if changed.is_err() || *shutdown.borrow() {
-                    log::debug!("closing active QUIC connection after shutdown request");
-                    break;
-                }
-            }
-            message = stream0_outbound.recv() => match message {
-                Some(message) => {
-                    let message_kind = message.kind();
-                    if stream0.admit_message(message) != AdmissionResult::Queued {
-                        log::warn!("failed to forward client stream0 message: message={message_kind}, reason=connection_writer_stopped");
-                        break;
-                    }
-                }
-                None => break,
-            },
-            message = stream1_outbound.recv() => match message {
-                Some(message) => {
-                    let message_kind = message.kind();
-                    if stream1.admit_message(message) != AdmissionResult::Queued {
-                        log::warn!("failed to forward client stream1 message: message={message_kind}, reason=connection_writer_stopped");
-                        break;
-                    }
-                }
-                None => break,
-            },
-            event = stream0.receive() => match received_message(event, StreamId::Stream0, "server") {
-                Some(ServerMessage::Game(message)) => {
-                    hooks.on_server_game_message(message);
-                }
-                Some(message) => {
-                    log::warn!("unexpected server stream0 message: message={}", message.kind());
-                    break;
-                }
-                None => break,
-            },
-            event = stream1.receive() => match received_message(event, StreamId::Stream1, "server") {
-                Some(ServerMessage::Resource(message)) => {
-                    hooks.on_server_resource_message(message);
-                }
-                Some(message) => {
-                    log::warn!("unexpected server stream1 message: message={}", message.kind());
-                    break;
-                }
-                None => break,
-            },
-        }
-    }
-    stream0.shutdown();
-    stream1.shutdown();
-    let () = connection.close(quinn::VarInt::from_u32(0), b"client session closed");
-    drop(stream0);
-    drop(stream1);
-    endpoint.wait_idle().await;
+        BridgeStep::Idle
+    });
+    app.world_mut()
+        .resource_mut::<QuinnetClient>()
+        .close_all_connections();
+    Ok(())
 }

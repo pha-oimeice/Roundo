@@ -1,29 +1,35 @@
-//! Shared game-flow model and transition rules, independent of UI and networking.
+//! Bevy-native application flow and scene-instance composition.
 //!
-//! Each runtime owns its SceneState and supplies authoritative session facts.
-//! Sharing types does not replicate state or let a Client pause a Server world.
+//! Flow lives in `State<Scene>`; a `SceneRoot` owns one instantiated data hierarchy.
+//! Pausing changes flow without replacing the in-game hierarchy or stopping simulation.
 
-use std::fmt;
+use bevy::prelude::{Component, ComputedStates, States, bsn};
 
-/// Source-defined flow; Mod resources only present this state.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq, States)]
 pub enum Scene {
-    /// No established gameplay session, including connection attempts and errors.
     #[default]
     Menu,
     InGame(GameplayState),
 }
 
-/// Stable root identity. In-game state changes retain the same world/UI root.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
 pub enum SceneKind {
     #[default]
     Menu,
     InGame,
 }
 
-/// Paused suppresses interaction; it does not imply stopping world simulation.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+impl ComputedStates for SceneKind {
+    type SourceStates = Scene;
+    // Running/Paused share one root lifetime, including state-scoped entities.
+    const ALLOW_SAME_STATE_TRANSITIONS: bool = false;
+
+    fn compute(scene: Scene) -> Option<Self> {
+        Some(scene.kind())
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum GameplayState {
     Running,
     Paused,
@@ -42,57 +48,12 @@ impl Scene {
     }
 }
 
-/// Pure transition authority. Platform readiness and side effects belong to adapters.
-#[derive(Debug, Default)]
-pub struct SceneState {
-    current: Scene,
+/// One concrete hierarchy, not a business scene number or network authority.
+#[derive(Clone, Copy, Debug, Component)]
+pub struct SceneRoot {
+    pub kind: SceneKind,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum SceneTransitionError {
-    NotRunning,
-    NotPaused,
-}
-
-impl fmt::Display for SceneTransitionError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::NotRunning => write!(f, "pause requires a running game Scene"),
-            Self::NotPaused => write!(f, "resume requires a paused game Scene"),
-        }
-    }
-}
-impl std::error::Error for SceneTransitionError {}
-
-impl SceneState {
-    pub fn current(&self) -> Scene {
-        self.current
-    }
-
-    /// Session loss clears all game state. An unchanged active session preserves pause.
-    pub fn synchronize_session(&mut self, active: bool) {
-        self.current = match (active, self.current) {
-            (false, _) => Scene::Menu,
-            (true, Scene::Menu) => Scene::InGame(GameplayState::Running),
-            (true, current) => current,
-        };
-    }
-
-    /// Call only after the adapter accepts its pause effects. Failure is non-mutating.
-    pub fn pause(&mut self) -> Result<(), SceneTransitionError> {
-        if !self.current.gameplay_input_allowed() {
-            return Err(SceneTransitionError::NotRunning);
-        }
-        self.current = Scene::InGame(GameplayState::Paused);
-        Ok(())
-    }
-
-    /// Call after accepted resume effects, or when the pause presentation terminates.
-    pub fn resume(&mut self) -> Result<(), SceneTransitionError> {
-        if self.current != Scene::InGame(GameplayState::Paused) {
-            return Err(SceneTransitionError::NotPaused);
-        }
-        self.current = Scene::InGame(GameplayState::Running);
-        Ok(())
-    }
+pub fn scene_root(kind: SceneKind) -> impl bevy::scene::Scene {
+    bsn! { ~{SceneRoot { kind }} }
 }

@@ -1,0 +1,89 @@
+title = "物品栏"
+sources = { inventory = "client.inventory", bindings = "client.bindings" }
+model = {}
+[shortcuts]
+"roundo.inventory" = [{ kind = "command", name = "ui.back", arguments = {} }]
+"roundo.debug" = [{ kind = "command", name = "ui.open", arguments = { import = "debug" } }]
+
+[[nodes]]
+id = "page"
+kind = "column"
+style = { width = "100%", height = "100%", padding = 28.0, row_gap = 12.0, column_gap = 12.0 }
+[[nodes.children]]
+id = "heading"
+kind = "text"
+text = "物品栏 / 直接保管"
+style = { font_size = 28.0 }
+[[nodes.children]]
+id = "status"
+kind = "text"
+text = "状态：${data.inventory.status} · Controller ${data.inventory.controller_id}"
+[[nodes.children]]
+id = "pending"
+kind = "text"
+text = "尚未取得可检查的当前生命体快照，旧内容不会保留。请等待绑定或服务端更新。"
+visible = { op = "ne", left = "$data.inventory.status", right = "ready" }
+[[nodes.children]]
+id = "list"
+kind = "scroll"
+scrollbar_width = 8.0
+visible = { op = "eq", left = "$data.inventory.status", right = "ready" }
+style = { flex_grow = 1.0, min_height = 0.0, row_gap = 12.0, column_gap = 12.0 }
+[[nodes.children.children]]
+id = "bodies"
+kind = "repeat"
+items = "$data.inventory.bodies"
+alias = "body"
+key = "$body.role"
+style = { row_gap = 12.0, column_gap = 12.0 }
+[[nodes.children.children.children]]
+id = "body"
+kind = "column"
+style = { padding = 18.0, background = [23, 35, 51, 255], row_gap = 8.0, column_gap = 8.0 }
+[[nodes.children.children.children.children]]
+id = "role"
+kind = "text"
+text = "概念体角色：${body.role}"
+[[nodes.children.children.children.children]]
+id = "inventories"
+kind = "repeat"
+items = "$body.inventories"
+alias = "inventory"
+key = "$index"
+style = { row_gap = 8.0, column_gap = 8.0 }
+[[nodes.children.children.children.children.children]]
+id = "inventory"
+kind = "column"
+style = { row_gap = 4.0, column_gap = 4.0 }
+[[nodes.children.children.children.children.children.children]]
+id = "heading"
+kind = "text"
+text = "直接物品 ID（空列表表示物品栏为空）"
+[[nodes.children.children.children.children.children.children]]
+id = "items"
+kind = "repeat"
+items = "$inventory"
+alias = "item"
+key = "$item"
+[[nodes.children.children.children.children.children.children.children]]
+id = "item"
+kind = "text"
+text = "$item"
+[[nodes.children]]
+id = "scope"
+kind = "text"
+text = "只读：仅当前绑定生命体的相关概念体直接持有的物品；不包含 Public 或嵌套物品栏，不提供移动、使用或丢弃操作。"
+[[nodes.children]]
+id = "shortcut"
+kind = "text"
+text = { op = "shortcuts", bindings = "$data.bindings", function = "roundo.inventory" }
+[[nodes.children]]
+id = "close"
+kind = "button"
+text = "关闭 / Esc"
+on_activate = [{ kind = "command", name = "ui.back", arguments = {} }]
+[[nodes.children]]
+id = "error"
+kind = "text"
+text = "$error"
+style = { color = [255, 155, 155, 255] }

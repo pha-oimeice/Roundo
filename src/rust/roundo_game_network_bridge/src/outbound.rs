@@ -1,8 +1,8 @@
-//! Ordered client ECS polling and stream-0 sending; the lifecycle owns control protocol state.
+//! Ordered client ECS polling and game-queue admission; the lifecycle owns control protocol state.
 
 use super::*;
 
-/// Forwards sequenced controller events to stream 0 until shutdown or send failure.
+/// Forwards sequenced controller events to the game business queue until shutdown or send failure.
 ///
 /// The event that encounters saturation/closure is dropped, and the bridge stops
 /// permanently; it does not retry after network reconnection.
@@ -23,7 +23,7 @@ pub fn bridge_game_ecs_events(
     debug!("Stopped client game IPC bridge");
 }
 
-/// One production bridge step using the supplied stream-0 sender and lifecycle.
+/// One production bridge step using the supplied game-queue sender and lifecycle.
 pub fn bridge_game_event_step(
     marionette_ipc: &ClientMarionetteIpc,
     session_lifecycle: &ClientGameSessionLifecycle,

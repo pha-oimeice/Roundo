@@ -1,26 +1,15 @@
-//! Shared prioritized QUIC networking implementation.
-//!
-//! Client and server hosts configure the network, implement hooks, and exchange
-//! protocol messages. Runtime ownership, QUIC/TLS, framing, session establishment,
-//! unidirectional I/O tasks, reconnects, and connection lifecycle stay inside
-//! this crate. Game traffic uses high-priority `stream0`; resource traffic uses
-//! low-priority `stream1`.
+//! Business sessions, independent admission queues and priority batching above
+//! unmodified Quinnet. Quinnet transports opaque bytes and owns QUIC/TLS/framing.
+//! Each application batch can mix priority lanes and split messages; both peers
+//! reconstruct lane-local messages before dispatching business callbacks.
 
-pub mod connection;
-pub mod echo_test;
-pub mod frame;
-mod protocol;
-pub mod schema;
-pub mod session;
-
+mod batch;
 mod service;
 mod tls;
+mod transport;
 
-mod error;
-
-pub use error::ProtocolError;
 pub use service::{
     CertificatePolicy, ClientHooks, ClientNetwork, ClientNetworkConfig, HookFuture, NetworkError,
-    PublicSession, ServerAddresses, ServerHooks, ServerNetwork, ServerNetworkConfig,
-    ServerSendError, TransportAdmissionPolicy, probe_quic_endpoint,
+    OutboundQueuePolicy, PublicSession, ServerAddresses, ServerHooks, ServerNetwork,
+    ServerNetworkConfig, ServerSendError, probe_quic_endpoint,
 };

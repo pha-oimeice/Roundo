@@ -2,7 +2,7 @@
 //!
 //! The dispatcher is rebuilt over short-lived borrows for each request. This
 //! keeps command definitions source-neutral while allowing handlers to mutate
-//! non-`Send` Bevy/WebView state only on the owning thread.
+//! Bevy native UI state only on the owning thread.
 
 use super::*;
 
@@ -10,14 +10,12 @@ use super::*;
 ///
 /// Consuming this value bounds every borrowed capability to one request and
 /// prevents handlers from retaining main-world references.
-pub(super) struct ClientCommandApplication<'a> {
+pub(super) struct ClientCommandApplication<'a, 'w> {
     pub(super) config: &'a mut ClientConfigStore,
     pub(super) network: &'a mut crate::network::ClientNetworkManager,
     pub(super) dev_level: &'a mut DevLevel,
     pub(super) camera_position: Option<[f32; 3]>,
-    pub(super) webui: Option<&'a mut roundo_webui::UiLifecycleManager>,
-    pub(super) navigation: Option<&'a mut roundo_webui::UiNavigationExecutor>,
-    pub(super) scene: Option<&'a mut crate::scene::ClientSceneManager>,
+    pub(super) ui: Option<&'a mut roundo_ui::UiLifecycleManager<'w>>,
     pub(super) hud: &'a HudCache,
     pub(super) input_registry: &'a roundo_marionette::InputFunctionRegistry,
 }
@@ -27,21 +25,19 @@ pub(super) struct ClientCommandApplication<'a> {
 enum CommandEffect {
     #[default]
     Respond,
-    Opening(roundo_webui::UiOpening),
     Quit,
 }
 
-impl ClientCommandApplication<'_> {
+impl ClientCommandApplication<'_, '_> {
     /// Admits and executes one request, then owns its response settlement.
     ///
-    /// An accepted Opening transfers this exact sender to document lifetime;
-    /// all other responses are settled here. The return value requests AppExit
-    /// only after an accepted Quit response has been attempted. Callers do not
-    /// interpret command names, output fields, or navigation ordering.
+    /// Native opens construct the actual widget tree before returning success.
+    /// Responses are settled here; an accepted Quit requests AppExit only after
+    /// attempting its response. No rendered-frame receipt is implied.
     pub(super) fn execute(
         self,
         request: serde_json::Value,
-        ui_source: Option<roundo_webui::UiInstanceId>,
+        ui_source: Option<roundo_ui::UiInstanceId>,
         reply: roundo_toolbox::request_response_pipe::ResponseSender<serde_json::Value>,
     ) -> bool {
         let command_name = request["command"].as_str().unwrap_or_default().to_owned();
@@ -51,19 +47,16 @@ impl ClientCommandApplication<'_> {
             network,
             dev_level,
             camera_position,
-            webui,
-            navigation,
-            scene,
+            ui,
             hud,
             input_registry,
         } = self;
 
-        // Admission is deliberately outside individual handlers: every command
-        // arriving from a WebView must prove that its host-bound source endpoint
-        // is still committed, loaded, enabled, and not destroying before any
-        // business capability can accept it. Visibility and focus are irrelevant.
+        // Source identity is ECS instance liveness plus active scene ownership,
+        // not a business ID or an authorization grant. Queued work from a
+        // destroyed view is rejected before invoking any business operation.
         if let Some(source) = ui_source {
-            let admitted = webui
+            let admitted = ui
                 .as_deref()
                 .is_some_and(|manager| manager.command_source_is_live(source));
             if !admitted {
@@ -75,28 +68,17 @@ impl ClientCommandApplication<'_> {
         let config = RefCell::new(config);
         let network = RefCell::new(network);
         let dev_level = RefCell::new(dev_level);
-        let webui = RefCell::new(webui);
-        let navigation = RefCell::new(navigation);
-        let scene = RefCell::new(scene);
-        let execute_scene_intent = |intent, effect: &mut CommandEffect| {
-            let mut scene = scene.borrow_mut();
-            let scene = scene.as_deref_mut().ok_or_else(scene_unavailable)?;
-            let mut webui = webui.borrow_mut();
-            let ui = webui.as_deref_mut().ok_or_else(scene_unavailable)?;
-            let mut navigation = navigation.borrow_mut();
-            let navigation = navigation.as_deref_mut().ok_or_else(scene_unavailable)?;
-            let outcome = scene
-                .execute(intent, &network.borrow().status().status, ui, navigation)
-                .map_err(scene_transition_error)?;
-            match outcome {
-                crate::scene::ClientUiOutcome::Opening { opening, resource } => {
-                    *effect = CommandEffect::Opening(opening);
-                    Ok(UiOpenOutput { resource })
-                }
-                crate::scene::ClientUiOutcome::Completed => Ok(UiOpenOutput {
-                    resource: String::new(),
-                }),
+        let ui = RefCell::new(ui);
+        let execute_scene_intent = |intent| {
+            let mut manager = ui.borrow_mut();
+            let manager = manager.as_deref_mut().ok_or_else(scene_unavailable)?;
+            if !manager
+                .world
+                .contains_resource::<bevy::prelude::State<roundo_scene::Scene>>()
+            {
+                return Err(scene_unavailable());
             }
+            crate::scene::execute(intent, manager).map_err(scene_transition_error)
         };
         let mut registry = roundo_cli::json_command::CommandRegistry::<CommandEffect>::default();
 
@@ -418,39 +400,24 @@ impl ClientCommandApplication<'_> {
             })
         });
         // Scene intents are source-neutral game logic, not UI imports or focus effects.
-        registry.register_typed::<ScenePauseDefinition>(|_, effect| {
-            execute_scene_intent(crate::scene::ClientUiIntent::Pause, effect)
-                .map(|_| EmptyOutput {})
+        registry.register_typed::<ScenePauseDefinition>(|_, _| {
+            execute_scene_intent(crate::scene::ClientUiIntent::Pause).map(|_| EmptyOutput {})
         });
-        registry.register_typed::<SceneResumeDefinition>(|_, effect| {
-            execute_scene_intent(crate::scene::ClientUiIntent::Resume, effect)
-                .map(|_| EmptyOutput {})
+        registry.register_typed::<SceneResumeDefinition>(|_, _| {
+            execute_scene_intent(crate::scene::ClientUiIntent::Resume).map(|_| EmptyOutput {})
         });
-        // Web UI navigation requires the already-admitted live source and both
-        // logical lifecycle and platform navigation capabilities.
         registry.register_typed::<UiBackDefinition>(|_, _| {
             let source = ui_source.ok_or_else(|| {
                 roundo_cli::json_command::CommandError::new(
                     "stale_ui_instance",
-                    "ui.back requires a live WebView source",
+                    "ui.back requires a live native UI source",
                 )
             })?;
-            let mut webui = webui.borrow_mut();
-            let manager = webui.as_deref_mut().ok_or_else(|| {
-                roundo_cli::json_command::CommandError::new(
-                    "stale_ui_instance",
-                    "Web UI is unavailable",
-                )
-            })?;
-            let mut navigation = navigation.borrow_mut();
-            let navigation = navigation.as_deref_mut().ok_or_else(|| {
-                roundo_cli::json_command::CommandError::new(
-                    "ui_navigation_failed",
-                    "Web UI navigation is unavailable",
-                )
-            })?;
-            navigation
-                .back(manager, source)
+            let mut manager = ui.borrow_mut();
+            manager
+                .as_deref_mut()
+                .ok_or_else(scene_unavailable)?
+                .back(source)
                 .map_err(map_ui_lifecycle_error)?;
             Ok(EmptyOutput {})
         });
@@ -463,43 +430,22 @@ impl ClientCommandApplication<'_> {
                     roundo_cli::json_command::CommandError::new("debug_not_submitted", error)
                 })
         });
-        registry.register_typed::<UiOpenDefinition>(|input, effect| {
+        registry.register_typed::<UiOpenDefinition>(|input, _| {
             let source = ui_source.ok_or_else(|| {
                 roundo_cli::json_command::CommandError::new(
                     "stale_ui_instance",
-                    "ui.open requires a live WebView source",
+                    "ui.open requires a live native UI source",
                 )
             })?;
-            let mut webui = webui.borrow_mut();
-            let state = webui.as_deref_mut().ok_or_else(|| {
-                roundo_cli::json_command::CommandError::new(
-                    "invalid_ui_resource",
-                    "Web UI is unavailable",
-                )
-            })?;
-            let target = state
+            let mut manager = ui.borrow_mut();
+            let manager = manager.as_deref_mut().ok_or_else(scene_unavailable)?;
+            let target = manager
                 .resolve_import(source, &input.import)
                 .map_err(map_ui_lifecycle_error)?;
             let resource = target.resource().to_owned();
-            log::debug!("Resolved Web UI navigation target `{resource}`");
-            let mut navigation = navigation.borrow_mut();
-            let navigation = navigation.as_deref_mut().ok_or_else(|| {
-                roundo_cli::json_command::CommandError::new(
-                    "ui_navigation_failed",
-                    "Web UI navigation is unavailable",
-                )
-            })?;
-            let opened = navigation.navigate(
-                state,
-                roundo_webui::UiCommandSource::WebView(source),
-                target,
-            );
-            let opening = opened.map_err(|error| {
-                log::error!("Web UI navigation to `{resource}` failed: {error}");
-                map_ui_lifecycle_error(error)
-            })?;
-            *effect = CommandEffect::Opening(opening);
-            log::info!("Web UI navigation accepted for `{resource}`");
+            manager
+                .navigate(roundo_ui::UiCommandSource::Native(source), target)
+                .map_err(map_ui_lifecycle_error)?;
             Ok(UiOpenOutput { resource })
         });
         // Fail fast if declaration/catalog and executable registration drift.
@@ -512,25 +458,12 @@ impl ClientCommandApplication<'_> {
         let mut quit_accepted = false;
         if command_succeeded {
             match effect {
-                CommandEffect::Opening(opening) => {
-                    let completed = navigation
-                        .borrow_mut()
-                        .as_deref_mut()
-                        .expect("an accepted opening has its navigation executor")
-                        .complete_open_command(opening, reply, response);
-                    assert!(
-                        completed.is_ok(),
-                        "a fresh exact opening accepts its response"
-                    );
-                    return false;
-                }
                 CommandEffect::Quit => quit_accepted = true,
                 CommandEffect::Respond => {}
             }
         }
         let source_was_destroyed = ui_source.is_some_and(|source| {
-            !webui
-                .borrow()
+            !ui.borrow()
                 .as_deref()
                 .is_some_and(|manager| manager.command_source_is_live(source))
         });

@@ -39,43 +39,37 @@ macro_rules! identifier {
     };
 }
 
-/// Exact stream-0 application version required during session setup.
-/// Version 28 replaces direct block triggers with explicit item-instance use.
-pub const GAME_PROTOCOL_VERSION: u16 = 28;
-/// Exact stream-1 application version required during session setup.
-/// Version 5 removes client Chunk requests; payload delivery is server-owned push.
-pub const RESOURCE_PROTOCOL_VERSION: u16 = 5;
+/// Exact game application version required during session setup.
+/// Version 29 uses priority-batched byte transport and one readiness message.
+pub const GAME_PROTOCOL_VERSION: u16 = 29;
+/// Exact resource application version required during session setup.
+/// Version 6 shares the priority-batched byte transport with game messages.
+pub const RESOURCE_PROTOCOL_VERSION: u16 = 6;
 
-/// Logical QUIC stream role encoded as one wire byte during stream pairing.
+/// Application-side priority lane, unrelated to Quinnet channel or QUIC stream IDs.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 #[repr(u8)]
-pub enum StreamId {
-    /// Session negotiation and latency-sensitive game traffic.
-    Stream0 = 0,
-    /// Chunk versions and resource payload traffic.
-    Stream1 = 1,
+pub enum TrafficClass {
+    Game = 0,
+    Resource = 1,
 }
 
-impl StreamId {
-    /// Both logical stream roles in wire-ID order.
-    pub const ALL: [Self; 2] = [Self::Stream0, Self::Stream1];
+impl TrafficClass {
+    pub const ALL: [Self; 2] = [Self::Game, Self::Resource];
 
-    /// Decodes a wire role, returning `None` for unknown values.
     pub const fn from_wire(value: u8) -> Option<Self> {
         match value {
-            0 => Some(Self::Stream0),
-            1 => Some(Self::Stream1),
+            0 => Some(Self::Game),
+            1 => Some(Self::Resource),
             _ => None,
         }
     }
 }
 
-/// Application message classification shared by envelope routing.
-///
-/// The stream is a protocol role, not a delivery, authorization, or retry policy.
+/// Business classification for admission and batching, not transport scheduling.
 /// Negotiation envelopes deliberately do not implement this trait.
 pub trait ApplicationMessage {
-    const STREAM: StreamId;
+    const CLASS: TrafficClass;
 }
 
 identifier!(ConnectionId);
@@ -116,7 +110,7 @@ pub struct PredictionAnchorState {
     pub radius_chunks: u16,
 }
 
-/// Versioned sparse virtual-cell environment update carried by stream 1.
+/// Versioned sparse virtual-cell environment update carried by the resource lane.
 ///
 /// `fields` uses bit 0 for gravity, bit 1 for static friction, and bit 2 for
 /// kinetic friction. Fields not selected by the mask use protocol defaults.
@@ -173,10 +167,8 @@ pub struct SessionInfo {
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, Hash, PartialEq, Serialize)]
 pub struct ResourceCatalogFingerprint(pub [u8; 32]);
 
-/// Top-level client-to-server envelope shared by both logical streams.
-///
-/// Session layers constrain negotiation variants to their linear phase; service
-/// routing accepts `Game` only on stream 0 and `Resource` only on stream 1.
+/// Client-to-server business messages, reconstructed before session dispatch.
+/// Negotiation is ordered on the game lane; application lanes have independent FIFO order.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize, WireEnvelope)]
 pub enum ClientMessage {
     #[wire(negotiation)]
@@ -185,8 +177,8 @@ pub enum ClientMessage {
     },
     #[wire(negotiation)]
     Ready {
-        stream: StreamId,
-        protocol_version: u16,
+        game_protocol_version: u16,
+        resource_protocol_version: u16,
     },
     #[wire(application)]
     Game(ClientGameMessage),
@@ -194,10 +186,8 @@ pub enum ClientMessage {
     Resource(ClientResourceMessage),
 }
 
-/// Top-level server-to-client envelope shared by both logical streams.
-///
-/// `SessionEstablished` and `Error` are negotiation messages. Service routing
-/// accepts `Game` only on stream 0 and `Resource` only on stream 1.
+/// Server-to-client business messages, reconstructed before session dispatch.
+/// `SessionEstablished` and `Error` are negotiation messages on the game lane.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize, WireEnvelope)]
 pub enum ServerMessage {
     #[wire(negotiation)]
@@ -481,7 +471,7 @@ pub enum DirectedControllerInput {
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize, WireMessage)]
-#[wire(envelope = ClientMessage::Game, stream = StreamId::Stream0)]
+#[wire(envelope = ClientMessage::Game, class = TrafficClass::Game)]
 pub enum ClientGameMessage {
     Inventory(inventory::InventoryRequest),
     Debug(debug::DebugRequest),
@@ -509,13 +499,13 @@ pub enum ClientGameMessage {
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize, WireMessage)]
-#[wire(envelope = ClientMessage::Resource, stream = StreamId::Stream1)]
+#[wire(envelope = ClientMessage::Resource, class = TrafficClass::Resource)]
 pub enum ClientResourceMessage {
     SetChunkViewDistance { chunks: u16 },
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize, WireMessage)]
-#[wire(envelope = ServerMessage::Game, stream = StreamId::Stream0)]
+#[wire(envelope = ServerMessage::Game, class = TrafficClass::Game)]
 pub enum ServerGameMessage {
     Inventory(inventory::InventoryReply),
     Debug(debug::DebugReply),
@@ -549,7 +539,7 @@ pub enum ServerGameMessage {
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize, WireMessage)]
-#[wire(envelope = ServerMessage::Resource, stream = StreamId::Stream1)]
+#[wire(envelope = ServerMessage::Resource, class = TrafficClass::Resource)]
 pub enum ServerResourceMessage {
     RenderingAnchorSpawned {
         anchor: RenderingAnchorState,

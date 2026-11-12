@@ -29,7 +29,7 @@ use crate::{
     formula::{snap_distance, surface_direction, surface_is_legal},
 };
 use avian3d::{
-    math::{AdjustPrecision as _, AsF32 as _},
+    math::ToRealPrecision as _,
     prelude::{
         Collider, MoveAndSlide, RigidBody, Sensor, ShapeCastConfig, SpatialQuery,
         SpatialQueryFilter,

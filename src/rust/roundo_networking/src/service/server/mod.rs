@@ -1,394 +1,206 @@
-//! Threaded QUIC listener and non-blocking outbound routing API.
-
+//! Quinnet listener and business-session routing facade.
 use super::registry::ConnectionRegistry;
 use super::*;
+use bevy_quinnet::{
+    server::{
+        EndpointAddrConfiguration, QuinnetServer, QuinnetServerPlugin, ServerEndpointConfiguration,
+        ServerEndpointConfigurationDefaultables,
+    },
+    shared::AsyncRuntime,
+};
+mod peer;
+use peer::Peer;
 
-mod connection;
-
-use connection::*;
-
-/// Rejection of a non-blocking server send. Only saturation is retryable on
-/// this physical connection; its message is returned without cloning payloads.
 #[derive(Debug)]
 pub enum ServerSendError {
     Saturated(ServerMessage),
     Closed,
     NegotiationMessage,
 }
-
-/// Running network server backed by a dedicated Tokio runtime thread.
-///
-/// Connection tasks register bounded per-stream senders for direct and fan-out
-/// routing. Dropping the final handle requests shutdown and joins the runtime.
 pub struct ServerNetwork {
     registry: ConnectionRegistry,
-    shutdown: watch::Sender<bool>,
+    worker: Worker,
     addresses: ServerAddresses,
-    worker: std::sync::Mutex<Option<thread::JoinHandle<()>>>,
 }
-
 impl ServerNetwork {
-    /// Initializes host state, TLS, and the QUIC listener on a worker thread.
-    ///
-    /// This call blocks for startup readiness for at most ten seconds. Success
-    /// means the listener is bound and accepting connections. Host initialization
-    /// and TLS preparation may perform blocking database or filesystem work on
-    /// the runtime worker before readiness is reported.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when runtime creation, hook initialization, TLS setup,
-    /// endpoint binding/address lookup, or bounded startup notification fails.
     pub fn start(
         config: ServerNetworkConfig,
         hooks: Arc<dyn ServerHooks>,
     ) -> Result<Self, NetworkError> {
-        log::info!(
-            "starting network server: quic_address={}, certificate_directory={}",
-            config.quic_address,
-            config.certificate_directory.display()
-        );
-        let runtime = Builder::new_multi_thread()
-            .enable_all()
-            .build()
-            .map_err(NetworkError::from_display)?;
+        config.outbound.validate()?;
         let registry = ConnectionRegistry::default();
-        let (shutdown, shutdown_receiver) = watch::channel(false);
-        let (ready_sender, ready_receiver) = sync_channel(1);
-        let runtime_registry = registry.clone();
-        let join_handle = thread::spawn(move || {
-            if let Err(error) = runtime.block_on(run_server(
-                config,
-                hooks,
-                runtime_registry,
-                shutdown_receiver,
-                ready_sender,
-            )) {
-                log::error!("network server stopped: {error}");
-            }
-        });
-
-        let addresses = match ready_receiver.recv_timeout(STARTUP_TIMEOUT) {
-            Ok(Ok(addresses)) => addresses,
-            Ok(Err(error)) => {
-                join_startup_worker(join_handle, "startup failed");
-                return Err(error);
-            }
-            Err(RecvTimeoutError::Timeout) => {
-                let shutdown_result = shutdown.send(true);
-                if shutdown_result.is_err() {
-                    log::debug!(
-                        "network server startup timed out after worker had already stopped"
-                    );
-                }
-                join_startup_worker(join_handle, "startup timed out");
-                return Err(NetworkError::new("timed out while starting network server"));
-            }
-            Err(RecvTimeoutError::Disconnected) => {
-                join_startup_worker(join_handle, "startup channel disconnected");
-                return Err(NetworkError::new("network server stopped before startup"));
-            }
-        };
-
+        let worker_registry = registry.clone();
+        let (worker, addresses) = Worker::start(move |stop, ready| {
+            run_server(config, hooks, worker_registry, stop, ready)
+        })?;
         Ok(Self {
             registry,
-            shutdown,
+            worker,
             addresses,
-            worker: std::sync::Mutex::new(Some(join_handle)),
         })
     }
-
-    /// Returns the bound listener addresses captured at successful startup.
     pub const fn addresses(&self) -> ServerAddresses {
         self.addresses
     }
-
-    /// Attempts to enqueue one message for one connection without blocking.
-    ///
-    /// The message classification selects its logical stream.
-    /// Returns `true` only for local queue admission. It returns `false` for a
-    /// negotiation message, unknown/closed connection, or saturated queue; the
-    /// converted message is then dropped. Admission does not imply peer delivery.
-    pub fn send_to_connection<Message>(&self, connection_id: ConnectionId, message: Message) -> bool
-    where
-        Message: Into<ServerMessage>,
-    {
-        let message = message.into();
-        let message_kind = message.kind();
-        let Some(stream) = message.stream() else {
-            log::warn!(
-                "rejected server negotiation message in application queue: connection_id={}, message={message_kind}",
-                connection_id.0
-            );
-            return false;
-        };
-        let admission = self
-            .registry
-            .send_to_connection(connection_id, stream, message);
-        match admission {
-            AdmissionResult::Queued => true,
-            AdmissionResult::Saturated => {
+    /// Success means business-queue admission, not byte submission or delivery.
+    pub fn send_to_connection<M: Into<ServerMessage>>(&self, id: ConnectionId, message: M) -> bool {
+        match self.try_send_to_connection(id, message) {
+            Ok(()) => true,
+            Err(error) => {
+                let reason = match error {
+                    ServerSendError::Saturated(_) => "business_queue_saturated",
+                    ServerSendError::Closed => "connection_closed",
+                    ServerSendError::NegotiationMessage => "negotiation_in_business_queue",
+                };
                 log::warn!(
-                    "rejected server message: connection_id={}, stream={stream:?}, message={message_kind}, reason=outbound_saturated",
-                    connection_id.0
-                );
-                false
-            }
-            AdmissionResult::Closed => {
-                log::warn!(
-                    "failed to queue server message: connection_id={}, stream={stream:?}, message={message_kind}, reason=connection_unavailable",
-                    connection_id.0
+                    "business send rejected: connection={}, reason={reason}",
+                    id.0
                 );
                 false
             }
         }
     }
-
-    /// Attempts local queue admission, returning the message on saturation.
-    ///
-    /// Unlike [`Self::send_to_connection`], this does not log or discard a full
-    /// queue's message. The caller owns retry, ordering and shutdown policy.
-    /// The message classification selects its stream; negotiation messages are
-    /// rejected. Success means queue admission only, not delivery to the peer.
-    pub fn try_send_to_connection<Message>(
+    pub fn try_send_to_connection<M: Into<ServerMessage>>(
         &self,
-        connection_id: ConnectionId,
-        message: Message,
-    ) -> Result<(), ServerSendError>
-    where
-        Message: Into<ServerMessage>,
-    {
+        id: ConnectionId,
+        message: M,
+    ) -> Result<(), ServerSendError> {
         let message = message.into();
-        let Some(stream) = message.stream() else {
-            return Err(ServerSendError::NegotiationMessage);
-        };
+        let class = message
+            .traffic_class()
+            .ok_or(ServerSendError::NegotiationMessage)?;
         self.registry
-            .try_send_to_connection(connection_id, stream, message)
+            .try_send_to_connection(id, class, message)
             .map_err(|error| match error {
                 mpsc::error::TrySendError::Full(message) => ServerSendError::Saturated(message),
                 mpsc::error::TrySendError::Closed(_) => ServerSendError::Closed,
             })
     }
-
-    /// Attempts non-blocking fan-out to every connection in one user session.
-    ///
-    /// The message classification selects its stream. Each recipient is admitted
-    /// independently in unspecified order. Negotiation messages are rejected;
-    /// saturation or closure may produce partial delivery, logged without retry.
-    pub fn send_to_session<Message>(&self, user_session: UserSession, message: Message)
-    where
-        Message: Into<ServerMessage>,
-    {
+    pub fn send_to_session<M: Into<ServerMessage>>(&self, session: UserSession, message: M) {
         let message = message.into();
-        let message_kind = message.kind();
-        let Some(stream) = message.stream() else {
-            log::warn!(
-                "rejected server session negotiation message in application queue: message={message_kind}"
-            );
+        let Some(class) = message.traffic_class() else {
+            log::warn!("negotiation message rejected from session fanout");
             return;
         };
-        let (target_count, queued_count) =
-            self.registry.send_to_session(user_session, stream, message);
-        log_server_fanout(
-            "session",
-            stream,
-            message_kind,
-            target_count,
-            queued_count,
-            Some(user_session),
-        );
+        let (targets, queued) = self.registry.send_to_session(session, class, message);
+        if targets != queued {
+            log::warn!("partial session business fanout: {queued}/{targets}");
+        }
     }
-
-    /// Attempts non-blocking fan-out to every currently registered connection.
-    ///
-    /// The message classification selects its stream. Recipient order is
-    /// unspecified. Negotiation messages are rejected; saturation or closure can
-    /// produce partial delivery, which is logged and not retried.
-    pub fn send_to_all<Message>(&self, message: Message)
-    where
-        Message: Into<ServerMessage>,
-    {
+    pub fn send_to_all<M: Into<ServerMessage>>(&self, message: M) {
         let message = message.into();
-        let message_kind = message.kind();
-        let Some(stream) = message.stream() else {
-            log::warn!(
-                "rejected server broadcast negotiation message in application queue: message={message_kind}"
-            );
+        let Some(class) = message.traffic_class() else {
+            log::warn!("negotiation message rejected from broadcast");
             return;
         };
-        let (target_count, queued_count) = self.registry.send_to_all(stream, message);
-        log_server_fanout(
-            "all",
-            stream,
-            message_kind,
-            target_count,
-            queued_count,
-            None,
-        );
+        let (targets, queued) = self.registry.send_to_all(class, message);
+        if targets != queued {
+            log::warn!("partial business broadcast: {queued}/{targets}");
+        }
     }
-
-    /// Stops the network worker and waits for its listener and connection tasks.
-    ///
-    /// This blocks the current OS thread. It is idempotent, closes the QUIC
-    /// endpoint, and waits for connection tasks; worker panics are logged rather
-    /// than propagated. Dropping the handle performs the same shutdown.
     pub fn shutdown(&self) {
-        log::info!("network server shutdown requested");
-        let shutdown_result = self.shutdown.send(true);
-        if shutdown_result.is_err() {
-            log::debug!("network server shutdown receiver was already closed");
-        }
-        let worker = self
-            .worker
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .take();
-        if let Some(worker) = worker {
-            if worker.thread().id() == thread::current().id() {
-                log::error!("network server worker attempted to join itself during shutdown");
-                return;
-            }
-            if let Err(error) = worker.join() {
-                log::error!("network server worker panicked during shutdown: {error:?}");
-            }
-        }
+        self.worker.shutdown();
     }
 }
 
-impl Drop for ServerNetwork {
-    fn drop(&mut self) {
-        self.shutdown();
-    }
-}
-
-async fn run_server(
+fn run_server(
     config: ServerNetworkConfig,
     hooks: Arc<dyn ServerHooks>,
     registry: ConnectionRegistry,
-    shutdown: watch::Receiver<bool>,
-    ready_sender: SyncSender<Result<ServerAddresses, NetworkError>>,
+    stop: Arc<AtomicBool>,
+    ready: SyncSender<Result<ServerAddresses, NetworkError>>,
 ) -> Result<(), NetworkError> {
-    if let Err(error) = hooks.initialize().await {
-        let error = NetworkError::new(error);
-        notify_startup(&ready_sender, Err(error.clone()), "hook initialization");
-        return Err(error);
+    let mut app = App::new();
+    app.add_plugins(QuinnetServerPlugin::default());
+    let runtime = app.world().resource::<AsyncRuntime>().handle().clone();
+    let (initialized, mut initialization) = tokio::sync::oneshot::channel();
+    let initialize_hooks = hooks.clone();
+    runtime.spawn(async move {
+        let _ = initialized.send(initialize_hooks.initialize().await);
+    });
+    let mut initialized = None;
+    run_polling_bridge(&stop, || match initialization.try_recv() {
+        Ok(result) => {
+            initialized = Some(result.map_err(NetworkError::new));
+            BridgeStep::Stop
+        }
+        Err(tokio::sync::oneshot::error::TryRecvError::Empty) => BridgeStep::Idle,
+        Err(error) => {
+            initialized = Some(Err(NetworkError::from_display(error)));
+            BridgeStep::Stop
+        }
+    });
+    initialized.ok_or_else(|| NetworkError::new("server startup cancelled"))??;
+    let certificate = tls::server_files(&config)?;
+    let addresses = {
+        let mut server = app.world_mut().resource_mut::<QuinnetServer>();
+        server
+            .start_endpoint(ServerEndpointConfiguration {
+                addr_config: EndpointAddrConfiguration::from_addr(config.quic_address),
+                cert_mode: certificate,
+                defaultables: ServerEndpointConfigurationDefaultables {
+                    send_channels_cfg: transport::channels(),
+                },
+            })
+            .map_err(NetworkError::from_display)?;
+        ServerAddresses {
+            quic_address: server.endpoint().local_addr(),
+        }
+    };
+    ready
+        .send(Ok(addresses))
+        .map_err(NetworkError::from_display)?;
+    let mut peers = HashMap::<u64, Peer>::new();
+    run_polling_bridge(&stop, || {
+        app.update();
+        let mut server = app.world_mut().resource_mut::<QuinnetServer>();
+        let endpoint = server.endpoint_mut();
+        let current: HashSet<_> = endpoint.clients().into_iter().collect();
+        let gone: Vec<_> = peers
+            .keys()
+            .filter(|id| !current.contains(id))
+            .copied()
+            .collect();
+        for id in gone {
+            if let Some(peer) = peers.remove(&id) {
+                peer.disconnected(&registry, hooks.as_ref());
+            }
+        }
+        for id in current {
+            let peer = peers.entry(id).or_insert_with(|| {
+                Peer::new(
+                    endpoint
+                        .connection(id)
+                        .expect("published Quinnet peer")
+                        .remote_addr(),
+                    config.outbound,
+                )
+            });
+            let close = match peer.pump(id, endpoint, &runtime, &registry, &hooks) {
+                Ok(close) => close,
+                Err(error) => {
+                    log::warn!("business peer rejected: client_id={id}, error={error}");
+                    true
+                }
+            };
+            if close {
+                // Revoke project routing before any later bridge can address it.
+                if let Some(peer) = peers.remove(&id) {
+                    peer.disconnected(&registry, hooks.as_ref());
+                }
+                if let Err(error) = endpoint.disconnect_client(id) {
+                    log::debug!("Quinnet peer already closed: {error}");
+                }
+            }
+        }
+        BridgeStep::Idle
+    });
+    for peer in peers.values() {
+        peer.disconnected(&registry, hooks.as_ref());
     }
-
-    let tls = match tls::prepare_server_tls(
-        &config.certificate_directory,
-        &config.server_alternative_names,
-        config.generate_self_signed_certificate,
-    ) {
-        Ok(tls) => tls,
-        Err(error) => {
-            notify_startup(&ready_sender, Err(error.clone()), "TLS preparation");
-            return Err(error);
-        }
-    };
-    let quic_endpoint = match quic::server_endpoint(config.quic_address, Arc::clone(&tls.config)) {
-        Ok(endpoint) => endpoint,
-        Err(error) => {
-            notify_startup(&ready_sender, Err(error.clone()), "QUIC endpoint creation");
-            return Err(error);
-        }
-    };
-    let quic_address = match quic_endpoint.local_addr() {
-        Ok(address) => address,
-        Err(error) => {
-            let error = NetworkError::from_display(error);
-            notify_startup(&ready_sender, Err(error.clone()), "listener address lookup");
-            return Err(error);
-        }
-    };
-    let addresses = ServerAddresses { quic_address };
-    log::info!("network listener started: quic_address={quic_address}");
-    notify_startup(&ready_sender, Ok(addresses), "listener readiness");
-
-    run_quic_listener(quic_endpoint, hooks, registry, config.admission, shutdown).await;
-    log::info!("network server stopped");
+    app.world_mut()
+        .resource_mut::<QuinnetServer>()
+        .stop_endpoint()
+        .map_err(NetworkError::from_display)?;
     Ok(())
-}
-
-fn join_startup_worker(worker: thread::JoinHandle<()>, context: &str) {
-    if let Err(error) = worker.join() {
-        log::error!("network server worker panicked while handling {context}: {error:?}");
-    }
-}
-
-fn notify_startup(
-    sender: &SyncSender<Result<ServerAddresses, NetworkError>>,
-    result: Result<ServerAddresses, NetworkError>,
-    stage: &str,
-) {
-    let notification = sender.send(result);
-    if notification.is_err() {
-        log::warn!(
-            "cannot report network server startup result: stage={stage}, reason=startup_receiver_closed"
-        );
-    }
-}
-
-// Accepts connections concurrently; shutdown closes the endpoint and joins every task.
-async fn run_quic_listener(
-    endpoint: quinn::Endpoint,
-    hooks: Arc<dyn ServerHooks>,
-    registry: ConnectionRegistry,
-    admission: TransportAdmissionPolicy,
-    mut shutdown: watch::Receiver<bool>,
-) {
-    let mut connections = tokio::task::JoinSet::new();
-    loop {
-        tokio::select! {
-            changed = shutdown.changed() => {
-                if changed.is_err() || *shutdown.borrow() {
-                    break;
-                }
-            }
-            incoming = endpoint.accept() => match incoming {
-                Some(incoming) => {
-                    let hooks = Arc::clone(&hooks);
-                    let registry = registry.clone();
-                    connections.spawn(async move {
-                        process_server_connection(incoming, hooks, registry, admission).await;
-                    });
-                }
-                None => break,
-            },
-            Some(result) = connections.join_next(), if !connections.is_empty() => {
-                if let Err(error) = result {
-                    log::warn!("QUIC connection task stopped unexpectedly: {error}");
-                }
-            }
-        }
-    }
-    let () = endpoint.close(quinn::VarInt::from_u32(0), b"server shutdown");
-    endpoint.wait_idle().await;
-    while let Some(result) = connections.join_next().await {
-        if let Err(error) = result {
-            log::warn!("QUIC connection task stopped unexpectedly: {error}");
-        }
-    }
-}
-
-fn log_server_fanout(
-    target: &'static str,
-    stream: StreamId,
-    message_kind: &'static str,
-    target_count: usize,
-    queued_count: usize,
-    user_session: Option<UserSession>,
-) {
-    if queued_count == target_count {
-        return;
-    }
-    match user_session {
-        Some(user_session) => log::warn!(
-            "partially queued server message fanout: target={target}, stream={stream:?}, user_id={}, session_id={}, message={message_kind}, recipients={queued_count}, attempted={target_count}",
-            user_session.user_id.0,
-            user_session.session_id.0
-        ),
-        None => log::warn!(
-            "partially queued server message fanout: target={target}, stream={stream:?}, message={message_kind}, recipients={queued_count}, attempted={target_count}"
-        ),
-    }
 }

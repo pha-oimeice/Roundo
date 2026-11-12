@@ -7,13 +7,15 @@ use super::{
 use bevy::{
     ecs::{
         change_detection::Tick,
-        query::{FilteredAccessSet, QueryBuilder},
-        system::{ReadOnlySystemParam, SystemMeta, SystemParam, SystemParamValidationError},
+        query::QueryBuilder,
+        system::{
+            ReadOnlySystemParam, SystemAccess, SystemMeta, SystemParam, SystemParamValidationError,
+        },
         world::{
             FilteredEntityMut, FilteredEntityRef, WorldId, unsafe_world_cell::UnsafeWorldCell,
         },
     },
-    prelude::{Entity, Query, Res, World},
+    prelude::{Entity, Local, Query, Res, World},
 };
 use std::any::Any;
 
@@ -77,7 +79,7 @@ macro_rules! registered_query {
             fn init_access(
                 state: &Self::State,
                 meta: &mut SystemMeta,
-                access: &mut FilteredAccessSet,
+                access: &mut SystemAccess,
                 world: &mut World,
             ) {
                 <Query<$data> as SystemParam>::init_access(&state.0, meta, access, world);
@@ -118,14 +120,14 @@ unsafe impl ReadOnlySystemParam for RegisteredReads<'_, '_> {}
 #[derive(SystemParam)]
 pub struct AttributeReads<'w, 's> {
     registry: Res<'w, AttributeRegistry>,
-    world: WorldId,
+    world: Local<'s, WorldId>,
     entities: RegisteredReads<'w, 's>,
 }
 impl AttributeReads<'_, '_> {
     pub fn describe(&self, id: AttributeId) -> Result<&AttributeDescriptor, AttributeAccessError> {
         Ok(self
             .registry
-            .checked_entry(self.world, self.entities.domain, id)?
+            .checked_entry(*self.world, self.entities.domain, id)?
             .descriptor())
     }
     pub fn get(
@@ -135,7 +137,7 @@ impl AttributeReads<'_, '_> {
     ) -> Result<Option<AttributeRef<'_>>, AttributeAccessError> {
         let entry = self
             .registry
-            .checked_entry(self.world, self.entities.domain, id)?;
+            .checked_entry(*self.world, self.entities.domain, id)?;
         let target = self
             .entities
             .query
@@ -158,14 +160,14 @@ impl AttributeReads<'_, '_> {
 #[derive(SystemParam)]
 pub struct AttributeWrites<'w, 's> {
     registry: Res<'w, AttributeRegistry>,
-    world: WorldId,
+    world: Local<'s, WorldId>,
     entities: RegisteredWrites<'w, 's>,
 }
 impl AttributeWrites<'_, '_> {
     pub fn describe(&self, id: AttributeId) -> Result<&AttributeDescriptor, AttributeAccessError> {
         Ok(self
             .registry
-            .checked_entry(self.world, self.entities.domain, id)?
+            .checked_entry(*self.world, self.entities.domain, id)?
             .descriptor())
     }
     pub fn get(
@@ -175,7 +177,7 @@ impl AttributeWrites<'_, '_> {
     ) -> Result<Option<AttributeRef<'_>>, AttributeAccessError> {
         let entry = self
             .registry
-            .checked_entry(self.world, self.entities.domain, id)?;
+            .checked_entry(*self.world, self.entities.domain, id)?;
         let target = self
             .entities
             .query
@@ -198,7 +200,7 @@ impl AttributeWrites<'_, '_> {
     ) -> Result<(), AttributeAccessError> {
         let entry = self
             .registry
-            .checked_entry(self.world, self.entities.domain, id)?;
+            .checked_entry(*self.world, self.entities.domain, id)?;
         let mut target = self
             .entities
             .query

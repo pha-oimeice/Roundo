@@ -87,7 +87,7 @@ pub struct ControlPreparing {
     pub controller_id: ControllerId,
 }
 
-/// Client's stream-0 readiness after discarding old prediction and pending input.
+/// Client's game-lane readiness after discarding old prediction and pending input.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct Ready {
     pub request_id: ControlRequestId,

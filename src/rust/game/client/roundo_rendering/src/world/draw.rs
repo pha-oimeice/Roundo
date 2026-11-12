@@ -16,12 +16,19 @@ pub(super) fn world_primitive_state() -> PrimitiveState {
 
 pub(super) fn prepare_view_pipelines(
     mut commands: Commands,
-    views: Query<(Entity, &ViewTarget, &Msaa), bevy::prelude::With<bevy::prelude::Camera3d>>,
+    views: Query<(
+        Entity,
+        &ViewTarget,
+        &Msaa,
+        bevy::prelude::Has<bevy::prelude::Camera3d>,
+    )>,
     pipelines: Res<WorldPipelines>,
     pipeline_cache: Res<PipelineCache>,
     mut view_pipelines: ResMut<WorldViewPipelines>,
 ) {
-    for (entity, target, msaa) in &views {
+    // Prewarm from actual targets, including the menu's 2D camera. Waiting for
+    // an active 3D camera would defer vertex/fragment validation until game entry.
+    for (entity, target, msaa, is_3d) in &views {
         let key = (target.main_texture_format(), msaa.samples());
         let id = *view_pipelines.0.entry(key).or_insert_with(|| {
             pipeline_cache.queue_render_pipeline(RenderPipelineDescriptor {
@@ -61,7 +68,9 @@ pub(super) fn prepare_view_pipelines(
                 ..Default::default()
             })
         });
-        commands.entity(entity).insert(WorldViewPipeline(id));
+        if is_3d {
+            commands.entity(entity).insert(WorldViewPipeline(id));
+        }
     }
 }
 
@@ -85,7 +94,7 @@ pub(super) fn prepare_view_bind_group(
 pub(super) fn world_draw(
     view: ViewQuery<(
         &ViewTarget,
-        &ViewDepthTexture,
+        &ViewDepthStencilTexture,
         &ViewUniformOffset,
         &WorldViewPipeline,
         &ExtractedCamera,

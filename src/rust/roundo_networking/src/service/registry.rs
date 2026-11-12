@@ -1,207 +1,116 @@
-//! Concurrent indexes for connection routing and session fan-out.
-
+//! Process-unique physical identities and business-queue routing, not byte flow control.
 use super::*;
 
 #[derive(Clone, Default)]
-/// Maps connection and session identities to bounded stream senders.
 pub(super) struct ConnectionRegistry {
-    connections: Arc<RwLock<HashMap<ConnectionId, ConnectionSenders>>>,
+    connections: Arc<RwLock<HashMap<ConnectionId, [mpsc::Sender<ServerMessage>; 2]>>>,
     sessions: Arc<RwLock<HashMap<UserSession, HashSet<ConnectionId>>>>,
 }
-
-/// Per-connection admission channels ordered by stream priority.
-struct ConnectionSenders {
-    stream0: mpsc::Sender<ServerMessage>,
-    stream1: mpsc::Sender<ServerMessage>,
-}
-
 impl ConnectionRegistry {
-    /// Publishes a connection to the sender index and then the session index.
-    ///
-    /// The two separately locked maps are not updated atomically: concurrent
-    /// direct routing may observe the sender before session fan-out can find it.
-    pub(super) fn register(
-        &self,
-        connection_id: ConnectionId,
-        user_session: UserSession,
-        stream0: mpsc::Sender<ServerMessage>,
-        stream1: mpsc::Sender<ServerMessage>,
-    ) {
-        self.connections_write()
-            .insert(connection_id, ConnectionSenders { stream0, stream1 });
-        self.sessions_write()
-            .entry(user_session)
-            .or_default()
-            .insert(connection_id);
-    }
-
-    /// Removes a connection from both indexes.
-    ///
-    /// Returns whether the sender entry existed. Removal is not atomic across
-    /// the separately locked maps; an index mismatch is logged.
-    pub(super) fn unregister(
-        &self,
-        connection_id: ConnectionId,
-        user_session: UserSession,
-    ) -> bool {
-        let removed = self.connections_write().remove(&connection_id).is_some();
-        let mut sessions = self.sessions_write();
-        if let Some(connection_ids) = sessions.get_mut(&user_session) {
-            let session_connection_removed = connection_ids.remove(&connection_id);
-            if removed != session_connection_removed {
-                log::warn!(
-                    "connection registry indexes diverged during removal: connection_id={}, user_id={}, session_id={}, sender_removed={removed}, session_removed={session_connection_removed}",
-                    connection_id.0,
-                    user_session.user_id.0,
-                    user_session.session_id.0
-                );
-            }
-            if connection_ids.is_empty() {
-                let removed_session = sessions.remove(&user_session);
-                debug_assert!(removed_session.is_some());
-            }
-        } else if removed {
-            log::warn!(
-                "connection registry session index was missing during removal: connection_id={}, user_id={}, session_id={}",
-                connection_id.0,
-                user_session.user_id.0,
-                user_session.session_id.0
-            );
-        }
-        removed
-    }
-
-    /// Attempts bounded, non-blocking admission for one connection.
-    ///
-    /// A missing connection and a closed writer both produce
-    /// [`AdmissionResult::Closed`]. Queue success does not imply peer delivery.
-    pub(super) fn send_to_connection(
-        &self,
-        connection_id: ConnectionId,
-        stream: StreamId,
-        message: ServerMessage,
-    ) -> AdmissionResult {
-        match self.try_send_to_connection(connection_id, stream, message) {
-            Ok(()) => AdmissionResult::Queued,
-            Err(mpsc::error::TrySendError::Full(_)) => AdmissionResult::Saturated,
-            Err(mpsc::error::TrySendError::Closed(_)) => AdmissionResult::Closed,
-        }
-    }
-
-    /// Returns ownership on rejection so adapters can retain saturated messages.
-    pub(super) fn try_send_to_connection(
-        &self,
-        connection_id: ConnectionId,
-        stream: StreamId,
-        message: ServerMessage,
-    ) -> Result<(), mpsc::error::TrySendError<ServerMessage>> {
-        let connections = self.connections_read();
-        let Some(senders) = connections.get(&connection_id) else {
-            return Err(mpsc::error::TrySendError::Closed(message));
-        };
-        senders.sender(stream).try_send(message)
-    }
-
-    /// Independently attempts non-blocking admission to each connection in a session.
-    ///
-    /// The returned pair is `(targets_found, messages_queued)`. Fan-out is not
-    /// atomic, iteration order is unspecified, and saturated/closed recipients
-    /// do not roll back successful admissions.
-    pub(super) fn send_to_session(
-        &self,
-        user_session: UserSession,
-        stream: StreamId,
-        message: ServerMessage,
-    ) -> (usize, usize) {
-        let sessions = self.sessions_read();
-        let connection_ids = sessions.get(&user_session).cloned().unwrap_or_default();
-        let target_count = connection_ids.len();
-        let connections = self.connections_read();
-        let queued_count = connection_ids
-            .into_iter()
-            .filter_map(|connection_id| {
-                let senders = connections.get(&connection_id);
-                senders
-            })
-            .filter(|senders| {
-                admit(senders.sender(stream), message.clone()) == AdmissionResult::Queued
-            })
-            .count();
-        (target_count, queued_count)
-    }
-
-    /// Independently attempts non-blocking admission to every registered connection.
-    ///
-    /// The returned pair is `(targets_found, messages_queued)`. Fan-out is not
-    /// atomic, iteration order is unspecified, and partial success is retained.
-    pub(super) fn send_to_all(&self, stream: StreamId, message: ServerMessage) -> (usize, usize) {
-        let connections = self.connections_read();
-        let target_count = connections.len();
-        let queued_count = connections
-            .values()
-            .filter(|senders| {
-                admit(senders.sender(stream), message.clone()) == AdmissionResult::Queued
-            })
-            .count();
-        (target_count, queued_count)
-    }
-
-    /// Allocates one physical ID, unique across every server service in this
-    /// process. Exhaustion rejects the connection rather than wrapping onto an
-    /// earlier live or queued identity. Restart creates fresh IPC queues as well.
     pub(super) fn next_connection_id(&self) -> Option<ConnectionId> {
-        static NEXT_CONNECTION_ID: AtomicU64 = AtomicU64::new(0);
-        Self::allocate_from(&NEXT_CONNECTION_ID)
-    }
-
-    fn allocate_from(counter: &AtomicU64) -> Option<ConnectionId> {
-        counter
-            .try_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        NEXT.try_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
             .ok()
             .map(ConnectionId)
     }
-
-    // Poison recovery preserves service availability and records the invariant breach.
-    fn connections_read(&self) -> RwLockReadGuard<'_, HashMap<ConnectionId, ConnectionSenders>> {
-        let guard = self.connections.read();
-        guard.unwrap_or_else(|poisoned| {
-            log::error!("recovering poisoned connection sender registry read lock");
-            poisoned.into_inner()
-        })
+    pub(super) fn register(
+        &self,
+        id: ConnectionId,
+        session: UserSession,
+        senders: [mpsc::Sender<ServerMessage>; 2],
+    ) {
+        self.connections_write().insert(id, senders);
+        self.sessions_write().entry(session).or_default().insert(id);
     }
-
-    fn connections_write(&self) -> RwLockWriteGuard<'_, HashMap<ConnectionId, ConnectionSenders>> {
-        let guard = self.connections.write();
-        guard.unwrap_or_else(|poisoned| {
-            log::error!("recovering poisoned connection sender registry write lock");
-            poisoned.into_inner()
-        })
-    }
-
-    // Session locks use the same explicit poison-recovery policy.
-    fn sessions_read(&self) -> RwLockReadGuard<'_, HashMap<UserSession, HashSet<ConnectionId>>> {
-        let guard = self.sessions.read();
-        guard.unwrap_or_else(|poisoned| {
-            log::error!("recovering poisoned connection session registry read lock");
-            poisoned.into_inner()
-        })
-    }
-
-    fn sessions_write(&self) -> RwLockWriteGuard<'_, HashMap<UserSession, HashSet<ConnectionId>>> {
-        let guard = self.sessions.write();
-        guard.unwrap_or_else(|poisoned| {
-            log::error!("recovering poisoned connection session registry write lock");
-            poisoned.into_inner()
-        })
-    }
-}
-
-impl ConnectionSenders {
-    /// Selects the bounded channel associated with a protocol stream.
-    fn sender(&self, stream: StreamId) -> &mpsc::Sender<ServerMessage> {
-        match stream {
-            StreamId::Stream0 => &self.stream0,
-            StreamId::Stream1 => &self.stream1,
+    pub(super) fn unregister(&self, id: ConnectionId, session: UserSession) -> bool {
+        let removed = self.connections_write().remove(&id).is_some();
+        let mut sessions = self.sessions_write();
+        if let Some(ids) = sessions.get_mut(&session) {
+            if ids.remove(&id) != removed {
+                log::error!("connection routing indexes diverged: {}", id.0);
+            }
+            if ids.is_empty() {
+                sessions.remove(&session);
+            }
+        } else if removed {
+            log::error!("connection session index missing: {}", id.0);
         }
+        removed
+    }
+    pub(super) fn try_send_to_connection(
+        &self,
+        id: ConnectionId,
+        class: TrafficClass,
+        message: ServerMessage,
+    ) -> Result<(), mpsc::error::TrySendError<ServerMessage>> {
+        let connections = self.connections_read();
+        let Some(senders) = connections.get(&id) else {
+            return Err(mpsc::error::TrySendError::Closed(message));
+        };
+        senders[class as usize].try_send(message)
+    }
+    pub(super) fn send_to_session(
+        &self,
+        session: UserSession,
+        class: TrafficClass,
+        message: ServerMessage,
+    ) -> (usize, usize) {
+        let ids = self
+            .sessions_read()
+            .get(&session)
+            .cloned()
+            .unwrap_or_default();
+        let targets = ids.len();
+        let connections = self.connections_read();
+        let queued = ids
+            .iter()
+            .filter_map(|id| connections.get(id))
+            .filter(|senders| {
+                admit(&senders[class as usize], message.clone()) == AdmissionResult::Queued
+            })
+            .count();
+        (targets, queued)
+    }
+    pub(super) fn send_to_all(
+        &self,
+        class: TrafficClass,
+        message: ServerMessage,
+    ) -> (usize, usize) {
+        let connections = self.connections_read();
+        let queued = connections
+            .values()
+            .filter(|senders| {
+                admit(&senders[class as usize], message.clone()) == AdmissionResult::Queued
+            })
+            .count();
+        (connections.len(), queued)
+    }
+    fn connections_read(
+        &self,
+    ) -> RwLockReadGuard<'_, HashMap<ConnectionId, [mpsc::Sender<ServerMessage>; 2]>> {
+        self.connections.read().unwrap_or_else(|p| {
+            log::error!("poisoned connection registry");
+            p.into_inner()
+        })
+    }
+    fn connections_write(
+        &self,
+    ) -> RwLockWriteGuard<'_, HashMap<ConnectionId, [mpsc::Sender<ServerMessage>; 2]>> {
+        self.connections.write().unwrap_or_else(|p| {
+            log::error!("poisoned connection registry");
+            p.into_inner()
+        })
+    }
+    fn sessions_read(&self) -> RwLockReadGuard<'_, HashMap<UserSession, HashSet<ConnectionId>>> {
+        self.sessions.read().unwrap_or_else(|p| {
+            log::error!("poisoned session registry");
+            p.into_inner()
+        })
+    }
+    fn sessions_write(&self) -> RwLockWriteGuard<'_, HashMap<UserSession, HashSet<ConnectionId>>> {
+        self.sessions.write().unwrap_or_else(|p| {
+            log::error!("poisoned session registry");
+            p.into_inner()
+        })
     }
 }

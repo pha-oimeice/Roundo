@@ -1,0 +1,62 @@
+title = "调试工具"
+sources = { connection = "client.connection", bindings = "client.bindings" }
+model = {}
+[shortcuts]
+"roundo.debug" = [{ kind = "command", name = "ui.back", arguments = {} }]
+
+[[nodes]]
+id = "page"
+kind = "column"
+style = { width = "100%", height = "100%", padding = 28.0, row_gap = 16.0, column_gap = 16.0 }
+[[nodes.children]]
+id = "heading"
+kind = "text"
+text = "调试工具"
+style = { font_size = 28.0 }
+[[nodes.children]]
+id = "connection"
+kind = "text"
+text = "连接状态：${data.connection.status.status}"
+[[nodes.children]]
+id = "scope"
+kind = "text"
+text = "仅通过原生业务接口操作。选择器用于诊断路由，不授予访问权；请求入队不代表操作完成。"
+[[nodes.children]]
+id = "life"
+kind = "button"
+text = "概念体 / 生命体 / 数据协作"
+on_activate = [{ kind = "command", name = "ui.open", arguments = { import = "life" } }]
+[[nodes.children]]
+id = "inventories"
+kind = "button"
+text = "物品栏与保管关系"
+on_activate = [{ kind = "command", name = "ui.open", arguments = { import = "inventories" } }]
+[[nodes.children]]
+id = "items"
+kind = "button"
+text = "物品实例创建 / 删除"
+on_activate = [{ kind = "command", name = "ui.open", arguments = { import = "items" } }]
+[[nodes.children]]
+id = "runtime"
+kind = "button"
+text = "运行状态 / 只读快照"
+on_activate = [{ kind = "command", name = "ui.open", arguments = { import = "runtime" } }]
+[[nodes.children]]
+id = "settings"
+kind = "button"
+text = "快捷键设置"
+on_activate = [{ kind = "command", name = "ui.open", arguments = { import = "settings" } }]
+[[nodes.children]]
+id = "shortcut"
+kind = "text"
+text = { op = "shortcuts", bindings = "$data.bindings", function = "roundo.debug" }
+[[nodes.children]]
+id = "error"
+kind = "text"
+text = "$error"
+style = { color = [255, 155, 155, 255] }
+[[nodes.children]]
+id = "back"
+kind = "button"
+text = "关闭 / Esc"
+on_activate = [{ kind = "command", name = "ui.back", arguments = {} }]

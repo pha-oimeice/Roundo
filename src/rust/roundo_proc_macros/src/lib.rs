@@ -11,9 +11,9 @@ use syn::{DeriveInput, LitChar, LitStr, Type, parse_macro_input};
 
 mod wire;
 
-/// Generates diagnostic `kind()`, `ApplicationMessage::STREAM`, and envelope
+/// Generates diagnostic `kind()`, `ApplicationMessage::CLASS`, and envelope
 /// conversion for an application enum owned by `roundo_contracts`.
-/// Requires `#[wire(envelope = Envelope::Variant, stream = StreamId::Variant)]`.
+/// Requires `#[wire(envelope = Envelope::Variant, class = TrafficClass::Variant)]`.
 /// Does not alter the enum, its Serde representation, or transport behavior.
 #[proc_macro_derive(WireMessage, attributes(wire))]
 pub fn derive_wire_message(input: TokenStream) -> TokenStream {

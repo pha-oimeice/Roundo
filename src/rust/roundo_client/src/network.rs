@@ -373,7 +373,7 @@ pub(crate) fn network_config(
             CertificatePolicy::TrustOnFirstUse
         },
         reconnect_delay: Duration::from_secs(5),
-        admission: roundo_networking::TransportAdmissionPolicy::default(),
+        outbound: roundo_networking::OutboundQueuePolicy::default(),
     })
 }
 
@@ -415,7 +415,7 @@ pub(crate) fn resolve_socket_address(
     Ok((resolved, host.to_string()))
 }
 
-/// Forwards chunk demand to stream 1 until shutdown or send failure.
+/// Forwards chunk demand to the resource business queue until shutdown or send failure.
 ///
 /// The event that encounters saturation/closure is dropped, and the bridge stops
 /// permanently; it does not retry after network reconnection.

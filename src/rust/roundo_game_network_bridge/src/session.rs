@@ -16,7 +16,7 @@ pub use inventory::InventoryView;
 /// Owns the complete client-side authority-session seam.
 ///
 /// Clones share one lifecycle mutex. Inbound messages, control receipts and
-/// stream-0 sends cannot cross an end/begin transition while it is held; each
+/// game-queue sends cannot cross an end/begin transition while it is held; each
 /// domain observes FIFO lifecycle commands around its session-scoped payloads.
 #[derive(Clone)]
 pub struct ClientGameSessionLifecycle {
@@ -366,7 +366,7 @@ impl ClientGameSessionLifecycle {
     }
 
     /// Atomically validates the FIFO epoch, deduplicates the selected
-    /// controller, and dispatches its ticketed Acquire on stream 0.
+    /// controller, and dispatches its ticketed Acquire through the game queue.
     ///
     /// A failed dispatch remains reserved for this epoch and completes through
     /// the normal result path; repeated snapshots never create a retry storm.
@@ -493,7 +493,7 @@ impl ClientGameSessionLifecycle {
 
     /// Explicitly starts one new ticketed Acquire only after this lifecycle has
     /// delivered a failed Acquire completion in the active, activated epoch.
-    /// The supplied stream-0 sender uses this lifecycle's admission and correlation.
+    /// The supplied game-queue sender uses this lifecycle's admission and correlation.
     pub fn retry_failed_acquire_with_sender(
         &self,
         controller: ControllerId,
@@ -578,7 +578,7 @@ impl ClientGameSessionLifecycle {
         )
     }
 
-    /// Uses the same production stream-0 send as all ticketed control traffic.
+    /// Uses the same production game-queue admission as all ticketed control traffic.
     pub fn retry_failed_acquire(
         &self,
         network: &ClientNetwork,
@@ -621,7 +621,7 @@ impl ClientGameSessionLifecycle {
         Ok(())
     }
 
-    /// Atomically allocates and dispatches on the actual production stream-0
+    /// Atomically allocates and dispatches on the actual production game-queue
     /// transport under the session lock. A failed enqueue completes locally;
     /// it never falls back to the unsafe legacy Acquire/Release route.
     pub fn send_control_request(
@@ -637,7 +637,7 @@ impl ClientGameSessionLifecycle {
         })
     }
 
-    /// Uses an injected stream-0 sender with the same Acquire admission and
+    /// Uses an injected game-queue sender with the same Acquire admission and
     /// completion projection as `send_control_request`.
     pub fn send_control_request_with_sender(
         &self,

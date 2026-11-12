@@ -11,6 +11,7 @@ path = "src/main.rs"
 bevy.workspace = true
 env_logger.workspace = true
 log.workspace = true
+open.workspace = true
 roundo_cli.workspace = true
 roundo_contracts.workspace = true
 roundo_scene.workspace = true
@@ -23,7 +24,7 @@ roundo_game_network_bridge = { workspace = true, default-features = false, featu
 roundo_presence.workspace = true
 roundo_rendering.workspace = true
 roundo_toolbox.workspace = true
-roundo_webui.workspace = true
+roundo_ui.workspace = true
 roundo_user_config.workspace = true
 schemars.workspace = true
 serde.workspace = true

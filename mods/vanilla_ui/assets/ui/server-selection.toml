@@ -1,0 +1,214 @@
+title = "服务器"
+sources = { servers = "client.servers" }
+model = { index = -1, name = "", address = "", original_name = "", original_address = "", invalidated = false }
+on_open = [{ kind = "command", name = "server.refresh", arguments = {} }]
+[on_data]
+servers = [
+    { kind = "set", path = "model.invalidated", value = { op = "and", values = [{ op = "ne", left = "$model.index", right = -1 }, { op = "not", value = { op = "any", items = "$data.servers.servers", alias = "current", condition = { op = "and", values = [{ op = "eq", left = "$current.index", right = "$model.index" }, { op = "eq", left = "$current.name", right = "$model.original_name" }, { op = "eq", left = "$current.address", right = "$model.original_address" }] } } }] } },
+    { kind = "set", path = "model.index", value = { op = "if", condition = "$model.invalidated", then = -1, else = "$model.index" } },
+    { kind = "set", path = "model.name", value = { op = "if", condition = "$model.invalidated", then = "", else = "$model.name" } },
+    { kind = "set", path = "model.address", value = { op = "if", condition = "$model.invalidated", then = "", else = "$model.address" } },
+]
+[shortcuts]
+"roundo.debug" = [{ kind = "command", name = "ui.open", arguments = { import = "debug" } }]
+
+[[nodes]]
+id = "page"
+kind = "column"
+style = { width = "100%", height = "100%", padding = 28.0, row_gap = 12.0, column_gap = 12.0, align_items = "Start" }
+[[nodes.children]]
+id = "heading"
+kind = "text"
+text = "服务器"
+style = { font_size = 28.0, flex_shrink = 0.0 }
+
+[[nodes.children]]
+id = "server-list"
+kind = "column"
+style = { width = "100%", max_width = 760.0, height = "44%", flex_shrink = 0.0, row_gap = 8.0, column_gap = 8.0 }
+[[nodes.children.children]]
+id = "list"
+kind = "scroll"
+scrollbar_width = 8.0
+style = { flex_grow = 1.0, min_height = 0.0, padding = 8.0, background = [24, 28, 35, 255] }
+[[nodes.children.children.children]]
+id = "servers"
+kind = "repeat"
+items = "$data.servers.servers"
+alias = "server"
+key = "$server.index"
+style = { row_gap = 8.0, column_gap = 8.0 }
+[[nodes.children.children.children.children]]
+id = "row"
+kind = "row"
+style = { row_gap = 12.0, column_gap = 12.0, align_items = "Center", flex_shrink = 0.0 }
+[[nodes.children.children.children.children.children]]
+id = "select"
+kind = "button"
+text = "$server.name"
+style = { flex_grow = 1.0, min_width = 0.0 }
+on_activate = [
+    { kind = "set", path = "model.index", value = "$server.index" },
+    { kind = "set", path = "model.name", value = "$server.name" },
+    { kind = "set", path = "model.address", value = "$server.address" },
+    { kind = "set", path = "model.original_name", value = "$server.name" },
+    { kind = "set", path = "model.original_address", value = "$server.address" },
+]
+[[nodes.children.children.children.children.children]]
+id = "latency"
+kind = "text"
+visible = { op = "eq", left = "$server.probe.status", right = "reachable" }
+text = "${server.probe.latency_ms} ms"
+style = { color = [100, 220, 140, 255], flex_shrink = 0.0 }
+[[nodes.children.children.children.children.children]]
+id = "probe-error"
+kind = "text"
+visible = { op = "or", values = [{ op = "eq", left = "$server.probe.status", right = "unreachable" }, { op = "eq", left = "$server.probe.status", right = "error" }] }
+text = "$server.probe.message"
+style = { color = [255, 110, 110, 255], max_width = "60%", min_width = 0.0 }
+[[nodes.children.children.children.children.children]]
+id = "probe-pending"
+kind = "text"
+visible = { op = "or", values = [{ op = "eq", left = "$server.probe.status", right = "probing" }, { op = "eq", left = "$server.probe.status", right = "unknown" }] }
+text = { op = "if", condition = { op = "eq", left = "$server.probe.status", right = "probing" }, then = "探测中…", else = "未探测" }
+style = { color = [170, 180, 195, 255], flex_shrink = 0.0 }
+
+[[nodes.children.children]]
+id = "actions"
+kind = "row"
+style = { row_gap = 8.0, column_gap = 8.0, flex_wrap = "Wrap", flex_shrink = 0.0 }
+[[nodes.children.children.children]]
+id = "connect"
+kind = "button"
+text = "连接"
+enabled = { op = "ne", left = "$model.index", right = -1 }
+on_activate = [
+    { kind = "command", name = "server.connect", arguments = { index = "$model.index" } },
+    { kind = "command", name = "ui.open", arguments = { import = "connecting" } },
+]
+[[nodes.children.children.children]]
+id = "add"
+kind = "button"
+text = "添加"
+on_activate = [{ kind = "command", name = "server.add", arguments = { name = "$model.name", address = "$model.address" } }]
+[[nodes.children.children.children]]
+id = "edit"
+kind = "button"
+text = "保存修改"
+enabled = { op = "ne", left = "$model.index", right = -1 }
+on_activate = [
+    { kind = "command", name = "server.edit", arguments = { index = "$model.index", server = { name = "$model.name", address = "$model.address" } } },
+    { kind = "set", path = "model.original_name", value = "$model.name" },
+    { kind = "set", path = "model.original_address", value = "$model.address" },
+]
+[[nodes.children.children.children]]
+id = "delete"
+kind = "button"
+text = "删除"
+enabled = { op = "ne", left = "$model.index", right = -1 }
+on_activate = [{ kind = "command", name = "server.delete", arguments = { index = "$model.index" } }]
+[[nodes.children.children.children]]
+id = "refresh"
+kind = "button"
+text = "刷新探测"
+on_activate = [{ kind = "command", name = "server.refresh", arguments = {} }]
+
+[[nodes.children]]
+id = "details"
+kind = "scroll"
+scrollbar_width = 8.0
+style = { width = "100%", max_width = 760.0, flex_grow = 1.0, min_height = 0.0, row_gap = 10.0, column_gap = 10.0, padding = 8.0 }
+[[nodes.children.children]]
+id = "details-heading"
+kind = "text"
+text = "详细信息"
+style = { font_size = 22.0, flex_shrink = 0.0 }
+[[nodes.children.children]]
+id = "id-row"
+kind = "row"
+style = { row_gap = 12.0, column_gap = 12.0, align_items = "Center", flex_shrink = 0.0 }
+[[nodes.children.children.children]]
+id = "label"
+kind = "text"
+text = "ID（列表索引）"
+style = { width = 140.0, flex_shrink = 0.0 }
+[[nodes.children.children.children]]
+id = "value"
+kind = "text-input"
+value = { op = "if", condition = { op = "eq", left = "$model.index", right = -1 }, then = "", else = "${model.index}" }
+enabled = false
+style = { flex_grow = 1.0, min_width = 0.0 }
+[[nodes.children.children]]
+id = "name-row"
+kind = "row"
+style = { row_gap = 12.0, column_gap = 12.0, align_items = "Center", flex_shrink = 0.0 }
+[[nodes.children.children.children]]
+id = "label"
+kind = "text"
+text = "名称"
+style = { width = 140.0, flex_shrink = 0.0 }
+[[nodes.children.children.children]]
+id = "value"
+kind = "text-input"
+value = "$model.name"
+bind = "model.name"
+style = { flex_grow = 1.0, min_width = 0.0 }
+[[nodes.children.children]]
+id = "address-row"
+kind = "row"
+style = { row_gap = 12.0, column_gap = 12.0, align_items = "Center", flex_shrink = 0.0 }
+[[nodes.children.children.children]]
+id = "label"
+kind = "text"
+text = "地址（host:port）"
+style = { width = 140.0, flex_shrink = 0.0 }
+[[nodes.children.children.children]]
+id = "value"
+kind = "text-input"
+value = "$model.address"
+bind = "model.address"
+style = { flex_grow = 1.0, min_width = 0.0 }
+[[nodes.children.children]]
+id = "status-row"
+kind = "row"
+style = { row_gap = 12.0, column_gap = 12.0, align_items = "Center", flex_shrink = 0.0 }
+[[nodes.children.children.children]]
+id = "label"
+kind = "text"
+text = "状态"
+style = { width = 140.0, flex_shrink = 0.0 }
+[[nodes.children.children.children]]
+id = "unselected"
+kind = "text-input"
+visible = { op = "eq", left = "$model.index", right = -1 }
+value = ""
+enabled = false
+style = { flex_grow = 1.0, min_width = 0.0 }
+[[nodes.children.children.children]]
+id = "selected-status"
+kind = "repeat"
+items = "$data.servers.servers"
+alias = "server"
+key = "$server.index"
+visible = { op = "ne", left = "$model.index", right = -1 }
+style = { flex_grow = 1.0, min_width = 0.0 }
+[[nodes.children.children.children.children]]
+id = "value"
+kind = "text-input"
+visible = { op = "eq", left = "$server.index", right = "$model.index" }
+value = { op = "if", condition = { op = "eq", left = "$server.probe.status", right = "reachable" }, then = "可联通 · ${server.probe.latency_ms} ms", else = { op = "if", condition = { op = "eq", left = "$server.probe.status", right = "probing" }, then = "探测中…", else = { op = "if", condition = { op = "eq", left = "$server.probe.status", right = "unknown" }, then = "未探测", else = "${server.probe.status}: ${server.probe.message}" } } }
+enabled = false
+style = { width = "100%", min_width = 0.0 }
+
+[[nodes.children]]
+id = "error"
+kind = "text"
+visible = { op = "ne", left = "$error", right = "" }
+text = "$error"
+style = { color = [255, 110, 110, 255], flex_shrink = 0.0 }
+[[nodes.children]]
+id = "back"
+kind = "button"
+text = "返回"
+style = { flex_shrink = 0.0 }
+on_activate = [{ kind = "command", name = "ui.back", arguments = {} }]

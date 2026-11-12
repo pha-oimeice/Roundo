@@ -71,18 +71,18 @@ fn install_with_manager(
 /// This is not a native-code sandbox. Publication does not issue an ItemId,
 /// grant recipient access or complete an Inventory/game-instance transaction.
 #[derive(SystemParam)]
-pub struct ItemPublisher<'w> {
-    world: WorldId,
+pub struct ItemPublisher<'w, 's> {
+    world: Local<'s, WorldId>,
     data: ResMut<'w, ItemRuntimeData>,
     authority: ResMut<'w, ItemRuntimeAuthority>,
 }
 
-impl ItemPublisher<'_> {
+impl ItemPublisher<'_, '_> {
     /// Publishes an instance identity with no prototype or mandatory type payload.
     /// Registered Specialized sources can subsequently be composed through ItemWrites.
     /// This creates a data authorization target, not custody or gameplay permission.
     pub fn publish_instance(&mut self, item: ItemId) -> Result<(), ItemAccessError> {
-        check_world(self.world, &self.data, &self.authority)?;
+        check_world(*self.world, &self.data, &self.authority)?;
         if self.authority.owners.contains_key(&item) || self.data.store.type_key(item).is_some() {
             return Err(ItemAccessError::AlreadyPublished);
         }
@@ -104,7 +104,7 @@ impl ItemPublisher<'_> {
         item: ItemId,
         definition: &ResourceName,
     ) -> Result<(), ItemAccessError> {
-        if self.world != self.data.world || self.world != self.authority.world {
+        if *self.world != self.data.world || *self.world != self.authority.world {
             return Err(ItemAccessError::WrongWorld);
         }
         if self.authority.owners.contains_key(&item) || self.data.store.type_key(item).is_some() {
@@ -173,13 +173,13 @@ fn authorized_read<R>(
 ///
 ///
 #[derive(SystemParam)]
-pub struct ItemReads<'w> {
-    world: WorldId,
+pub struct ItemReads<'w, 's> {
+    world: Local<'s, WorldId>,
     data: Res<'w, ItemRuntimeData>,
     authority: Res<'w, ItemRuntimeAuthority>,
 }
 
-impl ItemReads<'_> {
+impl ItemReads<'_, '_> {
     /// Reads native data only inside the current grant's protected callback.
     ///
     /// Return an owned snapshot; the callback's payload borrow cannot escape:
@@ -192,7 +192,7 @@ impl ItemReads<'_> {
         read: impl for<'data> FnOnce(&'data DeclaredItemData) -> R,
     ) -> Result<R, ItemAccessError> {
         authorized_read(
-            self.world,
+            *self.world,
             &self.data,
             &self.authority,
             item,
@@ -232,7 +232,7 @@ impl ItemReads<'_> {
         read: impl for<'data> FnOnce(&'data T) -> R,
     ) -> Result<Option<R>, ItemAccessError> {
         authorized_read(
-            self.world,
+            *self.world,
             &self.data,
             &self.authority,
             item,
@@ -248,13 +248,13 @@ impl ItemReads<'_> {
 
 /// Recipient modification capability; reading additionally requires a Read grant.
 #[derive(SystemParam)]
-pub struct ItemWrites<'w> {
-    world: WorldId,
+pub struct ItemWrites<'w, 's> {
+    world: Local<'s, WorldId>,
     data: ResMut<'w, ItemRuntimeData>,
     authority: Res<'w, ItemRuntimeAuthority>,
 }
 
-impl ItemWrites<'_> {
+impl ItemWrites<'_, '_> {
     /// Reads native data with a separate Read grant.
     pub fn with_data<R>(
         &self,
@@ -263,7 +263,7 @@ impl ItemWrites<'_> {
         read: impl for<'data> FnOnce(&'data DeclaredItemData) -> R,
     ) -> Result<R, ItemAccessError> {
         authorized_read(
-            self.world,
+            *self.world,
             &self.data,
             &self.authority,
             item,
@@ -295,7 +295,7 @@ impl ItemWrites<'_> {
         read: impl for<'data> FnOnce(&'data T) -> R,
     ) -> Result<Option<R>, ItemAccessError> {
         authorized_read(
-            self.world,
+            *self.world,
             &self.data,
             &self.authority,
             item,
@@ -319,7 +319,7 @@ impl ItemWrites<'_> {
         access: &ItemModifyAccess,
         data: toml::Table,
     ) -> Result<(), ItemAccessError> {
-        check_world(self.world, &self.data, &self.authority)?;
+        check_world(*self.world, &self.data, &self.authority)?;
         let owner = self
             .authority
             .owners
@@ -356,7 +356,7 @@ impl ItemWrites<'_> {
         access: &ItemModifyAccess,
         value: T,
     ) -> Result<(), ItemAccessError> {
-        check_world(self.world, &self.data, &self.authority)?;
+        check_world(*self.world, &self.data, &self.authority)?;
         let owner = self
             .authority
             .owners
@@ -379,7 +379,7 @@ impl ItemWrites<'_> {
     }
 }
 
-impl ItemWrites<'_> {
+impl ItemWrites<'_, '_> {
     /// Removes one source after exact-target Modify authorization. Other data,
     /// custody and grants are unchanged; an absent source returns false.
     pub fn remove_specialized<T: SpecializedData>(
@@ -388,7 +388,7 @@ impl ItemWrites<'_> {
         item: ItemId,
         access: &ItemModifyAccess,
     ) -> Result<bool, ItemAccessError> {
-        check_world(self.world, &self.data, &self.authority)?;
+        check_world(*self.world, &self.data, &self.authority)?;
         let owner = self
             .authority
             .owners
@@ -418,7 +418,7 @@ impl ItemWrites<'_> {
 /// caches in the same serialized operation. It grants no Player authority.
 #[derive(SystemParam)]
 pub struct ItemLifecycle<'w, 's> {
-    world: WorldId,
+    world: Local<'s, WorldId>,
     data: ResMut<'w, ItemRuntimeData>,
     authority: ResMut<'w, ItemRuntimeAuthority>,
     inventories: Inventories<'w, 's>,
@@ -442,7 +442,7 @@ impl ItemLifecycle<'_, '_> {
         item: ItemId,
         expected: &ItemInstanceId,
     ) -> Result<(), ItemDestructionError> {
-        check_world(self.world, &self.data, &self.authority)?;
+        check_world(*self.world, &self.data, &self.authority)?;
         let owner = self
             .authority
             .owners
@@ -471,18 +471,18 @@ impl ItemLifecycle<'_, '_> {
 
 /// Trusted host grant issuer/revoker, not a recipient self-service capability.
 #[derive(SystemParam)]
-pub struct ItemAdministration<'w> {
-    world: WorldId,
+pub struct ItemAdministration<'w, 's> {
+    world: Local<'s, WorldId>,
     data: Res<'w, ItemRuntimeData>,
     authority: ResMut<'w, ItemRuntimeAuthority>,
 }
 
-impl ItemAdministration<'_> {
+impl ItemAdministration<'_, '_> {
     /// Copies the existing exact resource identity without issuing a grant.
     /// Capture this when selecting an instance, not by resolving an old business
     /// number again just before destruction. This identity is not Player authority.
     pub fn instance_id(&self, item: ItemId) -> Result<ItemInstanceId, ItemAccessError> {
-        check_world(self.world, &self.data, &self.authority)?;
+        check_world(*self.world, &self.data, &self.authority)?;
         self.authority
             .owners
             .get(&item)
@@ -492,7 +492,7 @@ impl ItemAdministration<'_> {
 
     /// Issues an independent Read grant for a published item.
     pub fn grant_read(&mut self, item: ItemId) -> Result<ItemReadAccess, ItemAccessError> {
-        check_world(self.world, &self.data, &self.authority)?;
+        check_world(*self.world, &self.data, &self.authority)?;
         self.authority
             .owners
             .get_mut(&item)
@@ -504,7 +504,7 @@ impl ItemAdministration<'_> {
 
     /// Issues an independent Modify grant without read permission.
     pub fn grant_modify(&mut self, item: ItemId) -> Result<ItemModifyAccess, ItemAccessError> {
-        check_world(self.world, &self.data, &self.authority)?;
+        check_world(*self.world, &self.data, &self.authority)?;
         self.authority
             .owners
             .get_mut(&item)
@@ -520,7 +520,7 @@ impl ItemAdministration<'_> {
         item: ItemId,
         access: &ItemReadAccess,
     ) -> Result<bool, ItemAccessError> {
-        check_world(self.world, &self.data, &self.authority)?;
+        check_world(*self.world, &self.data, &self.authority)?;
         self.authority
             .owners
             .get_mut(&item)
@@ -535,7 +535,7 @@ impl ItemAdministration<'_> {
         item: ItemId,
         access: &ItemModifyAccess,
     ) -> Result<bool, ItemAccessError> {
-        check_world(self.world, &self.data, &self.authority)?;
+        check_world(*self.world, &self.data, &self.authority)?;
         self.authority
             .owners
             .get_mut(&item)

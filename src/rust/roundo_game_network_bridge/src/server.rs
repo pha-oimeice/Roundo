@@ -597,7 +597,7 @@ impl ServerHooks for ServerHooksAdapter {
     }
 }
 
-/// Drains presence events one at a time and projects them onto stream 0.
+/// Drains presence events one at a time and projects them onto the game business queue.
 ///
 /// Player-join events instead establish local-coordinate subscription state.
 /// Failed ECS or network admission is logged by the relevant adapter and is not

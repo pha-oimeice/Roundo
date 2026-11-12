@@ -11,7 +11,7 @@ use crate::{
 };
 use bevy::{
     ecs::{system::SystemParam, world::WorldId},
-    prelude::{App, On, ResMut},
+    prelude::{App, Local, On, ResMut},
 };
 use roundo_life::{ConceptBodyHandle, FactoryInvalidation, LifeInstances, LifeRuntimePlugin};
 use std::fmt;
@@ -117,7 +117,7 @@ pub struct EconomyCounts {
 /// operation exists. Detached balances are retained, not purged or inherited.
 #[derive(SystemParam)]
 pub struct Banks<'w, 's> {
-    world: WorldId,
+    world: Local<'s, WorldId>,
     life: LifeInstances<'w, 's>,
     store: ResMut<'w, BankStore>,
 }
@@ -133,7 +133,7 @@ impl Banks<'_, '_> {
     /// A bare handle carries no World origin: binding does not authenticate its
     /// original provenance or Player permissions, only current World selection.
     pub fn bind_owner(&self, body: ConceptBodyHandle) -> Result<BankOwner, BankError> {
-        self.store.check_world(self.world)?;
+        self.store.check_world(*self.world)?;
         self.live(body)?;
         Ok(BankOwner::new(self.store.domain(), body))
     }
@@ -141,7 +141,7 @@ impl Banks<'_, '_> {
     /// Creates only a bank from immutable catalogue-bound approval, no accounts.
     /// World precedes approval provenance and identity allocation checks.
     pub fn create(&mut self, approval: BankApproval) -> Result<BankHandle, BankError> {
-        self.store.check_world(self.world)?;
+        self.store.check_world(*self.world)?;
         self.store.create(approval)
     }
 
@@ -153,7 +153,7 @@ impl Banks<'_, '_> {
         owner: BankOwner,
         schema: CurrencySchema<C>,
     ) -> Result<(), BankError> {
-        self.store.check_world(self.world)?;
+        self.store.check_world(*self.world)?;
         self.store.preflight_currency(bank, owner, schema)?;
         self.live(owner.body())?;
         self.store.open_account(bank, owner, schema)
@@ -169,7 +169,7 @@ impl Banks<'_, '_> {
         schema: CurrencySchema<C>,
         read: impl for<'q> FnOnce(&'q C::Quantity) -> T,
     ) -> Result<T, BankError> {
-        self.store.check_world(self.world)?;
+        self.store.check_world(*self.world)?;
         self.store.preflight_currency(bank, owner, schema)?;
         self.live(owner.body())?;
         self.store.with_balance(bank, owner, schema, read)
@@ -184,7 +184,7 @@ impl Banks<'_, '_> {
         schema: RuleSchema<R>,
         context: &R::Context,
     ) -> Result<(), BankError> {
-        self.store.check_world(self.world)?;
+        self.store.check_world(*self.world)?;
         self.store.preflight_rule(bank, owner, schema)?;
         self.live(owner.body())?;
         self.store.acquire(bank, owner, schema, context)
@@ -199,7 +199,7 @@ impl Banks<'_, '_> {
         schema: RuleSchema<R>,
         context: &R::Context,
     ) -> Result<(), BankError> {
-        self.store.check_world(self.world)?;
+        self.store.check_world(*self.world)?;
         self.store.preflight_rule(bank, owner, schema)?;
         self.live(owner.body())?;
         self.store.use_currency(bank, owner, schema, context)
@@ -215,14 +215,14 @@ impl Banks<'_, '_> {
         schema: CurrencySchema<C>,
         read: impl for<'q> FnOnce(&'q C::Quantity) -> T,
     ) -> Result<Option<T>, BankError> {
-        self.store.check_world(self.world)?;
+        self.store.check_world(*self.world)?;
         self.store.with_detached_balance(bank, owner, schema, read)
     }
 
     /// World -> O(1) stored counts; no Body scan or cleanup. Delayed dead
     /// registrations still count as live_accounts until notification cleanup.
     pub fn counts(&self) -> Result<EconomyCounts, BankError> {
-        self.store.check_world(self.world)?;
+        self.store.check_world(*self.world)?;
         let (banks, live_accounts, detached_accounts) = self.store.counts();
         Ok(EconomyCounts {
             banks,

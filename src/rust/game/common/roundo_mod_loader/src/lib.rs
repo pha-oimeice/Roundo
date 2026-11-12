@@ -9,7 +9,7 @@ mod resource_types;
 pub use resource_types::{
     ATOMIC_VOXEL_RESOURCE_TYPE, INPUT_RESOURCE_TYPE, ITEM_RESOURCE_TYPE, LoadedResourceTypes,
     ResourceTypeCatalog, ResourceTypeId, ResourceTypeLoadError, ResourceTypeLoadErrors,
-    WEB_UI_RESOURCE_TYPE,
+    UI_RESOURCE_TYPE,
 };
 
 use serde::Deserialize;

@@ -7,7 +7,7 @@
 
 use crate::local_coordinate::data::{CHUNK_EDGE_LENGTH, Chunk, LocalCoordinate};
 use crate::{LocalCoordinateId, LocalCoordinateIdentity};
-use avian3d::{math::Vector, prelude::Collider};
+use avian3d::{math::RVector, prelude::Collider};
 use bevy::prelude::{
     App, ChildOf, Commands, Component, DetectChanges, DetectChangesMut, Entity, IVec3,
     IntoScheduleConfigs, Plugin, Query, Res, Resource, SystemSet, Transform, Update, Without,
@@ -415,7 +415,7 @@ fn chunk_collider_mesh(
     local_coordinate: &LocalCoordinate,
     chunk_position: IVec3,
     chunk: &Chunk,
-) -> (Vec<Vector>, Vec<[u32; 3]>) {
+) -> (Vec<RVector>, Vec<[u32; 3]>) {
     let mut vertices = Vec::new();
     let mut indices = Vec::new();
     let chunk_origin = chunk_position * CHUNK_EDGE_LENGTH;
@@ -459,7 +459,7 @@ fn local_coordinate_is_solid(local_coordinate: &LocalCoordinate, position: IVec3
 }
 
 fn push_face(
-    vertices: &mut Vec<Vector>,
+    vertices: &mut Vec<RVector>,
     indices: &mut Vec<[u32; 3]>,
     position: IVec3,
     face: usize,
@@ -507,7 +507,9 @@ fn push_face(
         _ => unreachable!("a cube has exactly six faces"),
     };
     let first = u32::try_from(vertices.len()).expect("one chunk collider fits in u32 indices");
-    vertices.extend(corners.map(|corner| Vector::new(corner[0], corner[1], corner[2])));
+    vertices.extend(corners.map(|corner| {
+        RVector::new(corner[0].into(), corner[1].into(), corner[2].into())
+    }));
     indices.extend([[first, first + 1, first + 2], [first, first + 2, first + 3]]);
 }
 

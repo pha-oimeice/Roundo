@@ -12,8 +12,8 @@ use crate::local_coordinate::{
 };
 use bevy::{
     ecs::system::SystemParam,
-    math::Ray3d,
     prelude::{GlobalTransform, IVec3, Query, Res, Vec3, Vec3A},
+    shape::Ray3d,
     tasks::ComputeTaskPool,
 };
 

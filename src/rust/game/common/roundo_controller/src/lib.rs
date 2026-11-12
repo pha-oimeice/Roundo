@@ -279,7 +279,7 @@ impl Plugin for ControllerLifecyclePlugin {
 }
 
 fn reclaim_removed_player(
-    removal: On<Remove, Player>,
+    removal: On<Remove<Player>>,
     mut players: ResMut<PlayerRegistry>,
     mut controllers: Query<&mut Controller>,
 ) {
@@ -294,7 +294,7 @@ fn reclaim_removed_player(
 }
 
 fn reclaim_removed_intent_body(
-    removal: On<Remove, IntentBodyId>,
+    removal: On<Remove<IntentBodyId>>,
     identities: Query<&ConceptBodyIdentity>,
     controllers: Query<(Entity, &Controller)>,
     mut retirement: lifecycle::ControllerRetirement,
@@ -338,7 +338,7 @@ fn reclaim_invalidated_factory_body(
 }
 
 fn reconcile_removed_controller(
-    removal: On<Remove, Controller>,
+    removal: On<Remove<Controller>>,
     mut retirement: lifecycle::ControllerRetirement,
 ) {
     retirement.reconcile_removed(removal.entity);

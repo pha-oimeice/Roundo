@@ -1,15 +1,13 @@
-//! Client adapter for shared Scene rules. Mod UI actions are not Scene intents.
+//! Native Bevy scene flow. UI construction succeeds before a transition is accepted.
 
 mod runtime;
+pub(crate) use runtime::reconcile_scene;
 pub use runtime::{ClientScenePlugin, ClientSceneSystemSet};
 
 use crate::network::ClientConnectionStatus;
-use bevy::prelude::Resource;
-use roundo_scene::{GameplayState, Scene, SceneKind, SceneState};
-use roundo_webui::{
-    UiCommandSource, UiInstanceId, UiLifecycleError, UiLifecycleManager, UiNavigationExecutor,
-    UiOpening,
-};
+use bevy::{prelude::*, state::state::StateTransition};
+use roundo_scene::{GameplayState, Scene, SceneKind};
+use roundo_ui::{UiCommandSource, UiInstanceId, UiLifecycleError, UiLifecycleManager};
 use std::fmt;
 
 #[derive(Clone, Copy, Debug)]
@@ -19,184 +17,149 @@ pub enum ClientUiIntent {
     Escape,
 }
 
-pub enum ClientUiOutcome {
-    Opening {
-        opening: UiOpening,
-        resource: String,
-    },
-    Completed,
-}
-
-/// Hardware/presentation adapters consume this projection, not flow heuristics.
 #[derive(Default, Resource)]
 pub struct ClientSceneProjection {
     pub focused: Option<UiInstanceId>,
     pub world_active: bool,
     pub gameplay_input: bool,
 }
-
-#[derive(Default, Resource)]
-pub struct ClientSceneManager {
-    state: SceneState,
-    pause_ui: Option<UiInstanceId>,
-}
-
+#[derive(Component)]
+struct PauseMenu;
 #[derive(Debug)]
 pub enum SceneTransitionError {
-    Rule(roundo_scene::SceneTransitionError),
+    NotRunning,
+    NotPaused,
     PresentationNotReady,
     Ui(UiLifecycleError),
 }
 impl fmt::Display for SceneTransitionError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Rule(error) => error.fmt(f),
+            Self::NotRunning => write!(f, "pause requires a running game Scene"),
+            Self::NotPaused => write!(f, "resume requires a paused game Scene"),
             Self::PresentationNotReady => write!(f, "Scene presentation is not ready"),
             Self::Ui(error) => error.fmt(f),
         }
     }
 }
 impl std::error::Error for SceneTransitionError {}
-
-impl ClientSceneManager {
-    pub fn synchronize(&mut self, status: &ClientConnectionStatus, ui: &UiLifecycleManager) {
-        let previous = self.state.current();
-        self.state
-            .synchronize_session(*status == ClientConnectionStatus::Connected);
-        self.pause_ui = self.pause_ui.filter(|id| ui.open_is_active(*id));
-        if self.state.current() == Scene::Menu {
-            self.pause_ui = None;
-        } else if self.pause_ui.is_none()
-            && self.state.current() == Scene::InGame(GameplayState::Paused)
+fn current(ui: &UiLifecycleManager) -> Scene {
+    *ui.world.resource::<State<Scene>>().get()
+}
+fn transition(ui: &mut UiLifecycleManager, next: Scene) {
+    if current(ui) != next {
+        ui.world.resource_mut::<NextState<Scene>>().set(next);
+    }
+}
+/// Resource borrows must have returned before running OnEnter/OnExit systems.
+pub fn apply_pending_transition(world: &mut World) {
+    if !matches!(
+        world.get_resource::<NextState<Scene>>(),
+        Some(NextState::Pending(_) | NextState::PendingIfDifferent(_))
+    ) {
+        return;
+    }
+    let previous = *world.resource::<State<Scene>>().get();
+    world.run_schedule(StateTransition);
+    let next = *world.resource::<State<Scene>>().get();
+    if previous != next {
+        log::info!("Client Scene transition: {previous:?} -> {next:?}");
+    }
+}
+fn pause_entity(ui: &mut UiLifecycleManager) -> Option<Entity> {
+    let entities = ui
+        .world
+        .query_filtered::<Entity, With<PauseMenu>>()
+        .iter(ui.world)
+        .collect::<Vec<_>>();
+    let entities = entities
+        .into_iter()
+        .filter(|e| ui.command_source_is_live(UiInstanceId::from_entity(*e)))
+        .collect::<Vec<_>>();
+    assert!(
+        entities.len() <= 1,
+        "only one pause presentation can be owned"
+    );
+    entities.into_iter().next()
+}
+pub fn synchronize(world: &mut World, status: &ClientConnectionStatus) {
+    UiLifecycleManager::with(world, |ui| {
+        if *status != ClientConnectionStatus::Connected {
+            transition(ui, Scene::Menu);
+        } else if current(ui) == Scene::Menu
+            || (current(ui) == Scene::InGame(GameplayState::Paused) && pause_entity(ui).is_none())
         {
-            self.state.resume().expect("a terminated pause can resume");
+            transition(ui, Scene::InGame(GameplayState::Running));
         }
-        self.trace_transition(previous);
-    }
-
-    pub fn root_scene(&self) -> SceneKind {
-        self.state.current().kind()
-    }
-
-    /// Accepts flow intents; physical input is interpreted by the input module.
-    pub fn execute(
-        &mut self,
-        intent: ClientUiIntent,
-        status: &ClientConnectionStatus,
-        ui: &mut UiLifecycleManager,
-        navigation: &mut UiNavigationExecutor,
-    ) -> Result<ClientUiOutcome, SceneTransitionError> {
-        self.synchronize(status, ui);
-        let previous = self.state.current();
-        let result = match intent {
-            ClientUiIntent::Pause => self.pause(ui, navigation),
-            ClientUiIntent::Resume => self.resume(ui, navigation),
-            ClientUiIntent::Escape => {
-                if ui.recovery_surface().is_some() {
-                    return Ok(ClientUiOutcome::Completed);
+    });
+    apply_pending_transition(world);
+}
+pub fn execute(
+    intent: ClientUiIntent,
+    ui: &mut UiLifecycleManager,
+) -> Result<(), SceneTransitionError> {
+    match intent {
+        ClientUiIntent::Pause => pause(ui),
+        ClientUiIntent::Resume => resume(ui),
+        ClientUiIntent::Escape => {
+            if let Some(focused) = ui.focused_instance() {
+                if ui.is_root(focused) {
+                    return Ok(());
                 }
-                if let Some(focused) = ui.focused_declaration() {
-                    if ui.is_root_document(focused.instance) {
-                        return Ok(ClientUiOutcome::Completed);
+                if Some(focused.entity()) == pause_entity(ui) {
+                    return resume(ui);
+                }
+                ui.back(focused).map_err(SceneTransitionError::Ui)
+            } else {
+                match current(ui) {
+                    Scene::InGame(GameplayState::Paused) => resume(ui),
+                    Scene::InGame(GameplayState::Running) if !ui.blocks_gameplay_input() => {
+                        pause(ui)
                     }
-                    if Some(focused.instance) == self.pause_ui {
-                        return self.resume(ui, navigation);
-                    }
-                    // Back is generic navigation, not a named Mod UI operation.
-                    match navigation.back(ui, focused.instance) {
-                        Ok(_) | Err(UiLifecycleError::CannotCloseUiRoot) => {
-                            Ok(ClientUiOutcome::Completed)
-                        }
-                        Err(error) => Err(SceneTransitionError::Ui(error)),
-                    }
-                } else {
-                    match self.state.current() {
-                        Scene::Menu => Ok(ClientUiOutcome::Completed),
-                        Scene::InGame(GameplayState::Paused) => self.resume(ui, navigation),
-                        Scene::InGame(GameplayState::Running) if !ui.blocks_gameplay_input() => {
-                            self.pause(ui, navigation)
-                        }
-                        Scene::InGame(GameplayState::Running) => Ok(ClientUiOutcome::Completed),
-                    }
+                    _ => Ok(()),
                 }
             }
-        };
-        self.trace_transition(previous);
-        result
-    }
-
-    pub fn projection(
-        &self,
-        ui: &UiLifecycleManager,
-        navigation: &UiNavigationExecutor,
-    ) -> ClientSceneProjection {
-        let world_active =
-            self.root_scene() == SceneKind::InGame && ui.root_scene() == SceneKind::InGame;
-        let focused = ui.focused_declaration().map(|value| value.instance);
-        ClientSceneProjection {
-            focused,
-            world_active,
-            gameplay_input: world_active
-                && self.state.current().gameplay_input_allowed()
-                && !ui.blocks_gameplay_input()
-                && focused.is_none()
-                && ui.recovery_surface().is_none()
-                && navigation.host_has_keyboard_focus(),
         }
     }
-
-    fn pause(
-        &mut self,
-        ui: &mut UiLifecycleManager,
-        navigation: &mut UiNavigationExecutor,
-    ) -> Result<ClientUiOutcome, SceneTransitionError> {
-        if !self.state.current().gameplay_input_allowed() {
-            return Err(SceneTransitionError::Rule(
-                roundo_scene::SceneTransitionError::NotRunning,
-            ));
-        }
-        if ui.root_scene() != SceneKind::InGame || ui.recovery_surface().is_some() {
-            return Err(SceneTransitionError::PresentationNotReady);
-        }
-        let target = ui
-            .resolve_slot_path("roundo.pause-menu", None)
-            .map_err(|error| {
-                SceneTransitionError::Ui(UiLifecycleError::Registry(error.to_string()))
-            })?;
-        let resource = target.resource().to_owned();
-        let opening = navigation
-            .navigate(ui, UiCommandSource::Host, target)
-            .map_err(SceneTransitionError::Ui)?;
-        self.pause_ui = Some(opening.instance_id());
-        self.state
-            .pause()
-            .expect("pause admission checked the same state");
-        Ok(ClientUiOutcome::Opening { opening, resource })
+}
+pub fn projection(ui: &UiLifecycleManager, window_focused: bool) -> ClientSceneProjection {
+    let state = current(ui);
+    let in_game = state.kind() == SceneKind::InGame && ui.root_scene() == SceneKind::InGame;
+    let focused = ui.focused_instance();
+    ClientSceneProjection {
+        focused,
+        world_active: in_game && ui.world_visible(),
+        gameplay_input: in_game
+            && state.gameplay_input_allowed()
+            && !ui.blocks_gameplay_input()
+            && focused.is_none()
+            && window_focused,
     }
-
-    fn resume(
-        &mut self,
-        ui: &mut UiLifecycleManager,
-        navigation: &mut UiNavigationExecutor,
-    ) -> Result<ClientUiOutcome, SceneTransitionError> {
-        let id = self.pause_ui.ok_or(SceneTransitionError::Rule(
-            roundo_scene::SceneTransitionError::NotPaused,
-        ))?;
-        if !ui.command_source_is_live(id) {
-            return Err(SceneTransitionError::PresentationNotReady);
-        }
-        navigation.back(ui, id).map_err(SceneTransitionError::Ui)?;
-        self.pause_ui = None;
-        self.state
-            .resume()
-            .expect("an owned pause belongs to Paused");
-        Ok(ClientUiOutcome::Completed)
+}
+fn pause(ui: &mut UiLifecycleManager) -> Result<(), SceneTransitionError> {
+    if !current(ui).gameplay_input_allowed() {
+        return Err(SceneTransitionError::NotRunning);
     }
-
-    fn trace_transition(&self, previous: Scene) {
-        let next = self.state.current();
-        if previous != next {
-            log::info!("Client Scene transition: {previous:?} -> {next:?}");
-        }
+    if ui.root_scene() != SceneKind::InGame {
+        return Err(SceneTransitionError::PresentationNotReady);
     }
+    let target = ui
+        .resolve_slot("roundo.pause-menu")
+        .map_err(SceneTransitionError::Ui)?;
+    let instance = ui
+        .navigate(UiCommandSource::Host, target)
+        .map_err(SceneTransitionError::Ui)?;
+    ui.world.entity_mut(instance.entity()).insert(PauseMenu);
+    transition(ui, Scene::InGame(GameplayState::Paused));
+    Ok(())
+}
+fn resume(ui: &mut UiLifecycleManager) -> Result<(), SceneTransitionError> {
+    if current(ui) != Scene::InGame(GameplayState::Paused) {
+        return Err(SceneTransitionError::NotPaused);
+    }
+    let entity = pause_entity(ui).ok_or(SceneTransitionError::NotPaused)?;
+    ui.back(UiInstanceId::from_entity(entity))
+        .map_err(SceneTransitionError::Ui)?;
+    transition(ui, Scene::InGame(GameplayState::Running));
+    Ok(())
 }

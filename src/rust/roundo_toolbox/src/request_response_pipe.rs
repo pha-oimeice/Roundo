@@ -60,7 +60,7 @@ pub struct JsonRequestResponseIo<Response> {
 
 /// JSON submission adapter that carries non-JSON command context separately.
 /// This is intentionally a concrete transport shape rather than a trait: the
-/// host has two real adapters (terminal and WebView), while their command
+/// host has two real adapters (terminal and native UI), while their command
 /// payload remains source-neutral.
 #[derive(Clone)]
 pub struct ContextualJsonRequestResponseIo<Context, Response> {

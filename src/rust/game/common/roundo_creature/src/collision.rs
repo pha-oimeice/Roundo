@@ -2,7 +2,7 @@
 //! Creature public API boundary.
 
 use avian3d::{
-    math::{AdjustPrecision as _, AsF32 as _},
+    math::{ToF32Precision as _, ToRealPrecision as _},
     prelude::{
         Collider, MoveAndSlide, MoveAndSlideConfig, MoveAndSlideHitResponse, SpatialQueryFilter,
     },
@@ -31,20 +31,20 @@ pub(crate) fn move_aabb(
     config.skin_width = 0.001;
     let output = mover.move_and_slide(
         aabb,
-        position.adjust_precision(),
-        Quat::IDENTITY.adjust_precision(),
-        velocity.adjust_precision(),
+        position.real(),
+        Quat::IDENTITY,
+        velocity,
         dt,
         &config,
         &SpatialQueryFilter::from_excluded_entities([entity]),
         |hit| {
-            normals.push(hit.normal.f32());
+            normals.push(hit.normal.as_vec3());
             MoveAndSlideHitResponse::Accept
         },
     );
     CollisionResult {
         position: output.position.f32(),
-        velocity: output.projected_velocity.f32(),
+        velocity: output.projected_velocity,
         normals,
     }
 }

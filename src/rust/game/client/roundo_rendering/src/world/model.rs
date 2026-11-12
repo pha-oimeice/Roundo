@@ -59,12 +59,16 @@ pub(super) fn read_gpu_status(
         ..,
         move |status| {
             let bytes = status
-                .map(|()| {
-                    let bytes = mapped.slice(..).get_mapped_range().to_vec();
+                .map_err(|error| error.to_string())
+                .and_then(|()| {
+                    let bytes = mapped
+                        .slice(..)
+                        .get_mapped_range()
+                        .map(|view| view.to_vec())
+                        .map_err(|error| error.to_string());
                     mapped.unmap();
                     bytes
-                })
-                .map_err(|error| error.to_string());
+                });
             *completed.lock().expect("GPU status lock") = Some(bytes);
         },
     );

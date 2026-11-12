@@ -4,13 +4,13 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+bevy.workspace = true
+bevy_quinnet = { workspace = true, features = ["client", "server"] }
+bytes.workspace = true
 log.workspace = true
 postcard.workspace = true
-quinn.workspace = true
 rcgen.workspace = true
 roundo_contracts.workspace = true
-rustls.workspace = true
+roundo_toolbox.workspace = true
 serde.workspace = true
-sha2.workspace = true
 tokio.workspace = true
-webpki-roots.workspace = true

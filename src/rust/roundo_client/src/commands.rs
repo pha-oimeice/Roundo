@@ -13,8 +13,7 @@ use crate::server_list::{ClientConfigStore, ServerListOutput};
 use bevy::{
     app::AppExit,
     prelude::{
-        App, IntoScheduleConfigs, MessageWriter, Query, Res, ResMut, Resource, Time, Transform,
-        Update,
+        App, IntoScheduleConfigs, Mut, Query, Res, ResMut, Resource, Time, Transform, Update, World,
     },
 };
 use roundo_cli::{
@@ -30,7 +29,7 @@ use roundo_user_config::{
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use std::{cell::RefCell, collections::VecDeque, process::Command};
+use std::{cell::RefCell, collections::VecDeque};
 
 const MAX_JSON_COMMANDS_PER_UPDATE: usize = 64;
 const SERVER_LIST_DATA: &str = "client.servers";
@@ -44,7 +43,7 @@ const HUD_SYNC_INTERVAL_SECS: f32 = 0.05;
 /// ECS-owned consumer side of the bounded client command queue.
 #[derive(Resource)]
 pub(crate) struct ClientCommandPipe(
-    RequestResponsePipe<CommandTransport<roundo_webui::UiCommandSource>, serde_json::Value>,
+    RequestResponsePipe<CommandTransport<roundo_ui::UiCommandSource>, serde_json::Value>,
 );
 
 impl ClientCommandPipe {
@@ -54,27 +53,27 @@ impl ClientCommandPipe {
 
     pub(crate) fn io(
         &self,
-    ) -> ContextualJsonRequestResponseIo<roundo_webui::UiCommandSource, serde_json::Value> {
+    ) -> ContextualJsonRequestResponseIo<roundo_ui::UiCommandSource, serde_json::Value> {
         ContextualJsonRequestResponseIo::new(self.0.io())
     }
 
     fn try_receive(
         &self,
     ) -> Option<(
-        CommandTransport<roundo_webui::UiCommandSource>,
+        CommandTransport<roundo_ui::UiCommandSource>,
         roundo_toolbox::request_response_pipe::ResponseSender<serde_json::Value>,
     )> {
         self.0.try_receive()
     }
 }
 
-/// Main-world phase that executes commands before the Web UI platform phase.
+/// Main-world command and snapshot phase, before native widget projection.
 #[derive(Clone, Debug, Eq, Hash, PartialEq, bevy::prelude::SystemSet)]
 pub(crate) enum ClientCommandSystemSet {
     ExecuteAndPublish,
 }
 
-/// Installs the client-owned command catalog and its terminal/Web UI adapters.
+/// Installs the client-owned command catalog and terminal/native UI adapters.
 pub(crate) struct ClientCommandsPlugin;
 
 impl bevy::prelude::Plugin for ClientCommandsPlugin {
@@ -84,7 +83,7 @@ impl bevy::prelude::Plugin for ClientCommandsPlugin {
 }
 
 /// Read-only diagnostic cache consumed by the HUD command. Producers update
-/// this resource; Web UI only crosses the small `hud.show` command seam.
+/// this resource; native UI reads its published snapshot.
 #[derive(Resource, Clone, Debug, Serialize)]
 pub struct HudCache {
     /// Statistics over at most the latest 120 valid frame durations.
@@ -187,31 +186,18 @@ fn validate_external_url(value: &str) -> Result<&str, roundo_cli::json_command::
 ///
 /// Success means only that the helper process started.
 fn open_external_url(url: &str) -> std::io::Result<()> {
-    #[cfg(target_os = "windows")]
-    let mut command = {
-        let mut command = Command::new("rundll32.exe");
-        command.arg("url.dll,FileProtocolHandler").arg(url);
-        command
-    };
-    #[cfg(target_os = "macos")]
-    let mut command = {
-        let mut command = Command::new("open");
-        command.arg(url);
-        command
-    };
-    #[cfg(all(unix, not(target_os = "macos")))]
-    let mut command = {
-        let mut command = Command::new("xdg-open");
-        command.arg(url);
-        command
-    };
-    command.spawn().map(|_| ())
+    // Preserve the existing no-wait contract rather than adopting the dependency's
+    // timed early-exit probe. The dependency still owns detachment and child reaping;
+    // a successful return is not a receipt from the browser that will open the URL.
+    open::that_detached_with_timeout(url, std::time::Duration::ZERO)
 }
 
-fn configure_webui_ipc_order(app: &mut App) {
+fn configure_ui_order(app: &mut App) {
     app.configure_sets(
         Update,
-        ClientCommandSystemSet::ExecuteAndPublish.before(roundo_webui::WebUiSystemSet::Platform),
+        ClientCommandSystemSet::ExecuteAndPublish
+            .after(roundo_ui::UiSystemSet::Ingress)
+            .before(roundo_ui::UiSystemSet::Project),
     );
 }
 
@@ -219,7 +205,7 @@ fn configure_webui_ipc_order(app: &mut App) {
 ///
 /// Preinserted command pipes and configuration stores are preserved.
 fn configure(app: &mut App) {
-    configure_webui_ipc_order(app);
+    configure_ui_order(app);
     if !app.world().contains_resource::<ClientCommandPipe>() {
         app.insert_resource(ClientCommandPipe::bounded(256));
     }
@@ -250,60 +236,74 @@ fn configure(app: &mut App) {
 }
 
 /// Drains source-neutral JSON requests on the Bevy main world. This is the
-/// execution side of the Web UI/terminal command seam.
-fn process_json_commands(
-    pipe: Res<ClientCommandPipe>,
-    mut config: ResMut<ClientConfigStore>,
-    mut network: ResMut<crate::network::ClientNetworkManager>,
-    mut dev_level: ResMut<DevLevel>,
-    controller: Res<ClientPlayerController>,
-    cameras: Query<&Transform>,
-    mut app_exit: MessageWriter<AppExit>,
-    mut webui: Option<ResMut<roundo_webui::UiLifecycleManager>>,
-    mut navigation: Option<bevy::ecs::system::NonSendMut<roundo_webui::UiNavigationExecutor>>,
-    mut scene: Option<ResMut<crate::scene::ClientSceneManager>>,
-    hud: Res<HudCache>,
-    input_registry: Res<InputFunctionRegistry>,
-) {
+/// execution side of the native UI/terminal command seam.
+fn process_json_commands(world: &mut World) {
     for _ in 0..MAX_JSON_COMMANDS_PER_UPDATE {
-        let Some((transport, reply)) = pipe.try_receive() else {
+        let Some((transport, reply)) = world.resource::<ClientCommandPipe>().try_receive() else {
             break;
         };
-        let request = transport.command;
-        let ui_source = command_transport_source(transport.context);
-        let quit_accepted = application::ClientCommandApplication {
-            config: &mut config,
-            network: &mut network,
-            dev_level: &mut dev_level,
-            camera_position: controller
-                .camera()
-                .and_then(|entity| {
-                    let camera = cameras.get(entity);
-                    camera.ok()
-                })
-                .map(|transform| transform.translation.to_array()),
-            webui: webui.as_deref_mut(),
-            navigation: navigation.as_deref_mut(),
-            scene: scene.as_deref_mut(),
-            hud: &hud,
-            input_registry: &input_registry,
+        if world.contains_resource::<bevy::prelude::State<roundo_scene::Scene>>()
+            && roundo_ui::UiLifecycleManager::is_installed(world)
+        {
+            if let Err(error) = crate::scene::reconcile_scene(world) {
+                let command = transport.command["command"].as_str().unwrap_or_default();
+                let _ = reply.respond(terminal_error(command, "ui_presentation_failed", error));
+                world.write_message(AppExit::error());
+                break;
+            }
         }
-        .execute(request, ui_source, reply);
-        if quit_accepted {
-            let _exit_message = app_exit.write(AppExit::Success);
+        let camera_position = world
+            .resource::<ClientPlayerController>()
+            .camera()
+            .and_then(|entity| world.get::<Transform>(entity))
+            .map(|transform| transform.translation.to_array());
+        let quit = {
+            world.resource_scope(|world, mut config: Mut<ClientConfigStore>| {
+                world.resource_scope(
+                    |world, mut network: Mut<crate::network::ClientNetworkManager>| {
+                        world.resource_scope(|world, mut dev_level: Mut<DevLevel>| {
+                            world.resource_scope(|world, hud: Mut<HudCache>| {
+                                world.resource_scope(
+                                    |world, input_registry: Mut<InputFunctionRegistry>| {
+                                        let installed =
+                                            roundo_ui::UiLifecycleManager::is_installed(world);
+                                        let mut ui = roundo_ui::UiLifecycleManager { world };
+                                        application::ClientCommandApplication {
+                                            config: &mut config,
+                                            network: &mut network,
+                                            dev_level: &mut dev_level,
+                                            camera_position,
+                                            ui: installed.then_some(&mut ui),
+                                            hud: &hud,
+                                            input_registry: &input_registry,
+                                        }
+                                        .execute(
+                                            transport.command,
+                                            command_transport_source(transport.context),
+                                            reply,
+                                        )
+                                    },
+                                )
+                            })
+                        })
+                    },
+                )
+            })
+        };
+        crate::scene::apply_pending_transition(world);
+        if quit {
+            world.write_message(AppExit::Success);
         }
     }
 }
 
 /// Converts adapter-owned transport metadata into host authority. This is the
-/// only place where a WebView identity becomes a UI command source; the typed
+/// only place where a native view identity becomes a UI command source; the typed
 /// JSON command remains unchanged and source-neutral.
-fn command_transport_source(
-    source: roundo_webui::UiCommandSource,
-) -> Option<roundo_webui::UiInstanceId> {
+fn command_transport_source(source: roundo_ui::UiCommandSource) -> Option<roundo_ui::UiInstanceId> {
     match source {
-        roundo_webui::UiCommandSource::Host => None,
-        roundo_webui::UiCommandSource::WebView(instance) => Some(instance),
+        roundo_ui::UiCommandSource::Host => None,
+        roundo_ui::UiCommandSource::Native(instance) => Some(instance),
     }
 }
 
@@ -317,7 +317,7 @@ fn stale_ui_source_response(request: &serde_json::Value) -> serde_json::Value {
         data: None,
         error: Some(roundo_cli::json_command::CommandError::new(
             "stale_ui_instance",
-            "WebView command source is no longer live and loaded",
+            "native UI command source is no longer live",
         )),
     })
     .expect("serializable stale UI command result")
@@ -325,20 +325,85 @@ fn stale_ui_source_response(request: &serde_json::Value) -> serde_json::Value {
 
 /// Maps lifecycle-domain failures onto command error categories.
 fn map_ui_lifecycle_error(
-    error: roundo_webui::UiLifecycleError,
+    error: roundo_ui::UiLifecycleError,
 ) -> roundo_cli::json_command::CommandError {
     let code = match error {
-        roundo_webui::UiLifecycleError::UiInstanceLimit => "ui_instance_limit",
-        roundo_webui::UiLifecycleError::DuplicatePendingOpen => "ui_open_pending",
-        roundo_webui::UiLifecycleError::UnknownImport(_) => "unknown_ui_import",
-        roundo_webui::UiLifecycleError::StaleUiInstance => "stale_ui_instance",
-        roundo_webui::UiLifecycleError::CannotCloseUiRoot => "cannot_close_ui_root",
-        roundo_webui::UiLifecycleError::Registry(_) => "invalid_ui_resource",
-        roundo_webui::UiLifecycleError::NavigationFailed(_) => "ui_navigation_failed",
-        roundo_webui::UiLifecycleError::LoadTimeout => "ui_load_timeout",
-        roundo_webui::UiLifecycleError::InternalTree(_) => "internal_ui_error",
+        roundo_ui::UiLifecycleError::UiInstanceLimit => "ui_instance_limit",
+        roundo_ui::UiLifecycleError::UnknownImport(_) => "unknown_ui_import",
+        roundo_ui::UiLifecycleError::StaleUiInstance => "stale_ui_instance",
+        roundo_ui::UiLifecycleError::CannotCloseUiRoot => "cannot_close_ui_root",
+        roundo_ui::UiLifecycleError::Registry(_) => "invalid_ui_resource",
+        roundo_ui::UiLifecycleError::Presentation(_) => "ui_presentation_failed",
     };
     roundo_cli::json_command::CommandError::new(code, error.to_string())
 }
 
-// Samples only the currently bound valid camera; missing cameras clear position.
+/// Validate resource references against the actual client-owned producers/catalog.
+pub(crate) fn validate_ui_registry(
+    registry: &roundo_ui::UiRegistry,
+    inputs: &InputFunctionRegistry,
+) -> Result<(), String> {
+    use roundo_ui::schema::{Action, NodeDef};
+    fn actions(actions: &[Action], session: bool) -> Result<(), String> {
+        for action in actions {
+            match action {
+                Action::Command { name, .. }
+                    if CLIENT_COMMAND_CATALOG.dev_level(name).is_none() =>
+                {
+                    return Err(format!("unknown native UI command `{name}`"));
+                }
+                Action::Debug { .. } if !session => {
+                    return Err("debug action requires session_source".into());
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+    fn nodes(definitions: &[NodeDef], session: bool) -> Result<(), String> {
+        for node in definitions {
+            actions(&node.on_activate, session)?;
+            actions(&node.on_change, session)?;
+            nodes(&node.children, session)?;
+        }
+        Ok(())
+    }
+    for resource in registry.resources() {
+        let page = &resource.page;
+        for source in page.sources.values() {
+            if ![
+                SERVER_LIST_DATA,
+                SERVER_STATUS_DATA,
+                CONTROL_STATUS_DATA,
+                SETTINGS_DATA,
+                BINDINGS_DATA,
+                HUD_DATA,
+                "client.inventory",
+                "client.debug",
+            ]
+            .contains(&source.as_str())
+            {
+                return Err(format!(
+                    "{}: unknown Client Data source `{source}`",
+                    resource.name
+                ));
+            }
+        }
+        let session = page.session_source.is_some();
+        actions(&page.on_open, session)?;
+        for watcher in page.on_data.values() {
+            actions(watcher, session)?;
+        }
+        for (function, shortcut) in &page.shortcuts {
+            if inputs.function(function).is_none() {
+                return Err(format!(
+                    "{}: shortcut references unknown input function `{function}`",
+                    resource.name
+                ));
+            }
+            actions(shortcut, session)?;
+        }
+        nodes(&page.nodes, session)?;
+    }
+    Ok(())
+}

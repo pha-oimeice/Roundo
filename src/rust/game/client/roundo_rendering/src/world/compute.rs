@@ -8,6 +8,7 @@ pub(super) fn init_world_pipelines(
     asset_server: Res<bevy::prelude::AssetServer>,
     cache: Res<PipelineCache>,
 ) {
+    let shaders = WorldShaders::load(asset_server.as_ref());
     let compute_layout = BindGroupLayoutDescriptor::new(
         "world model generation",
         &BindGroupLayoutEntries::sequential(
@@ -54,7 +55,7 @@ pub(super) fn init_world_pipelines(
             ),
         ),
     );
-    let shader = load_embedded_asset!(asset_server.as_ref(), "shaders/world_greedy_emit.wgsl");
+    let shader = shaders.greedy_emit.clone();
     let build = |entry: &'static str| {
         cache.queue_compute_pipeline(ComputePipelineDescriptor {
             label: Some(Cow::Borrowed(entry)),
@@ -80,8 +81,7 @@ pub(super) fn init_world_pipelines(
             ),
         ),
     );
-    let select_shader =
-        load_embedded_asset!(asset_server.as_ref(), "shaders/world_model_select.wgsl");
+    let select_shader = shaders.model_select.clone();
     let select = |entry: &'static str| {
         cache.queue_compute_pipeline(ComputePipelineDescriptor {
             label: Some(Cow::Borrowed(entry)),
@@ -104,7 +104,7 @@ pub(super) fn init_world_pipelines(
     let surface_proxy_reduce = cache.queue_compute_pipeline(ComputePipelineDescriptor {
         label: Some(Cow::Borrowed("world QEF reference reduction")),
         layout: vec![surface_proxy_layout.clone()],
-        shader: load_embedded_asset!(asset_server.as_ref(), "shaders/world_surface_proxy.wgsl"),
+        shader: shaders.surface_proxy.clone(),
         entry_point: Some(Cow::Borrowed("reduce_qef_depth")),
         ..Default::default()
     });
@@ -123,7 +123,7 @@ pub(super) fn init_world_pipelines(
         cull: cache.queue_compute_pipeline(ComputePipelineDescriptor {
             label: Some(Cow::Borrowed("world layered frustum culling")),
             layout: vec![view_layout.clone(), cull_layout.clone()],
-            shader: load_embedded_asset!(asset_server.as_ref(), "shaders/world_cull_lod.wgsl"),
+            shader: shaders.cull_lod.clone(),
             entry_point: Some(Cow::Borrowed("main")),
             ..Default::default()
         }),
@@ -133,9 +133,12 @@ pub(super) fn init_world_pipelines(
         cull_layout,
         _surface_proxy_layout: surface_proxy_layout,
         _surface_proxy_reduce: surface_proxy_reduce,
-        vertex_shader: load_embedded_asset!(asset_server.as_ref(), "shaders/world_vertex.wgsl"),
-        fragment_shader: load_embedded_asset!(asset_server.as_ref(), "shaders/world_fragment.wgsl"),
+        vertex_shader: shaders.vertex.clone(),
+        fragment_shader: shaders.fragment.clone(),
     });
+    commands.insert_resource(shaders);
+    commands.insert_resource(WorldShaderInitialization::default());
+    commands.insert_resource(WorldViewPipelines::default());
 }
 
 fn storage(device: &RenderDevice, label: &'static str, size: u64, extra: BufferUsages) -> Buffer {

@@ -1,0 +1,179 @@
+# Native UI Resource Type. No browser documents or executable scripts.
+[theme]
+palette = "dark"
+font = "fonts/NotoSansSC.ttf"
+font_size = 18.0
+debug_receipt_timeout_secs = 15.0
+
+[slots]
+"roundo.menu-root" = "main-menu"
+"roundo.in-game-root" = "hud"
+"roundo.main-menu" = "main-menu"
+"roundo.server-selection" = "server-selection"
+"roundo.connecting" = "connecting"
+"roundo.hud" = "hud"
+"roundo.settings" = "settings"
+"roundo.pause-menu" = "pause-menu"
+"roundo.inventory" = "inventory"
+"roundo.debug" = "debug"
+"roundo.debug-life" = "debug-life"
+"roundo.debug-inventories" = "debug-inventories"
+"roundo.debug-items" = "debug-items"
+"roundo.debug-runtime" = "debug-runtime"
+
+[[resource]]
+name = "main-menu"
+entry = "main-menu.toml"
+interaction_mode = "ui"
+world_visibility = "hidden"
+max_instances = 1
+lifecycle_independent = false
+presentation = "exclusive"
+layout = { kind = "fullscreen" }
+background_color = [16, 21, 29, 255]
+[resource.imports]
+server-selection = "roundo.server-selection"
+settings = "roundo.settings"
+debug = "roundo.debug"
+
+[[resource]]
+name = "server-selection"
+entry = "server-selection.toml"
+interaction_mode = "ui"
+world_visibility = "hidden"
+max_instances = 1
+lifecycle_independent = false
+presentation = "exclusive"
+layout = { kind = "fullscreen" }
+background_color = [16, 21, 29, 255]
+[resource.imports]
+connecting = "roundo.connecting"
+debug = "roundo.debug"
+
+[[resource]]
+name = "connecting"
+entry = "connecting.toml"
+interaction_mode = "ui"
+world_visibility = "hidden"
+max_instances = 1
+lifecycle_independent = false
+presentation = "exclusive"
+layout = { kind = "fullscreen" }
+background_color = [16, 21, 29, 255]
+[resource.imports]
+debug = "roundo.debug"
+
+[[resource]]
+name = "hud"
+entry = "hud.toml"
+interaction_mode = "in-game"
+world_visibility = "visible"
+max_instances = 1
+lifecycle_independent = false
+presentation = "exclusive"
+layout = { kind = "fullscreen" }
+background_color = [0, 0, 0, 0]
+[resource.imports]
+inventory = "roundo.inventory"
+debug = "roundo.debug"
+
+[[resource]]
+name = "settings"
+entry = "settings.toml"
+interaction_mode = "ui"
+world_visibility = "hidden"
+max_instances = 1
+lifecycle_independent = false
+presentation = "exclusive"
+layout = { kind = "fullscreen" }
+background_color = [16, 21, 29, 255]
+[resource.imports]
+debug = "roundo.debug"
+
+[[resource]]
+name = "pause-menu"
+entry = "pause-menu.toml"
+interaction_mode = "ui"
+world_visibility = "visible"
+max_instances = 1
+lifecycle_independent = false
+presentation = "exclusive"
+layout = { kind = "fullscreen" }
+background_color = [5, 8, 12, 115]
+[resource.imports]
+settings = "roundo.settings"
+debug = "roundo.debug"
+
+[[resource]]
+name = "inventory"
+entry = "inventory.toml"
+interaction_mode = "ui"
+world_visibility = "visible"
+max_instances = 1
+lifecycle_independent = false
+presentation = "exclusive"
+layout = { kind = "fullscreen" }
+background_color = [5, 9, 16, 163]
+[resource.imports]
+debug = "roundo.debug"
+
+[[resource]]
+name = "debug"
+entry = "debug.toml"
+interaction_mode = "ui"
+world_visibility = "visible"
+max_instances = 1
+lifecycle_independent = false
+presentation = "exclusive"
+layout = { kind = "fullscreen" }
+background_color = [16, 21, 29, 245]
+[resource.imports]
+settings = "roundo.settings"
+life = "roundo.debug-life"
+inventories = "roundo.debug-inventories"
+items = "roundo.debug-items"
+runtime = "roundo.debug-runtime"
+
+[[resource]]
+name = "debug-life"
+entry = "debug-life.toml"
+interaction_mode = "ui"
+world_visibility = "visible"
+max_instances = 1
+lifecycle_independent = false
+presentation = "exclusive"
+layout = { kind = "fullscreen" }
+background_color = [16, 21, 29, 245]
+
+[[resource]]
+name = "debug-inventories"
+entry = "debug-inventories.toml"
+interaction_mode = "ui"
+world_visibility = "visible"
+max_instances = 1
+lifecycle_independent = false
+presentation = "exclusive"
+layout = { kind = "fullscreen" }
+background_color = [16, 21, 29, 245]
+
+[[resource]]
+name = "debug-items"
+entry = "debug-items.toml"
+interaction_mode = "ui"
+world_visibility = "visible"
+max_instances = 1
+lifecycle_independent = false
+presentation = "exclusive"
+layout = { kind = "fullscreen" }
+background_color = [16, 21, 29, 245]
+
+[[resource]]
+name = "debug-runtime"
+entry = "debug-runtime.toml"
+interaction_mode = "ui"
+world_visibility = "visible"
+max_instances = 1
+lifecycle_independent = false
+presentation = "exclusive"
+layout = { kind = "fullscreen" }
+background_color = [16, 21, 29, 245]

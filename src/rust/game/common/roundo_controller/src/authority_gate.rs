@@ -308,7 +308,7 @@ impl AuthorityGate {
         Ok(request)
     }
 
-    /// Proof is the ECS-observed stream-0 prefix of the exact old binding.
+    /// Proof is the ECS-observed game-lane prefix of the exact old binding.
     pub fn record_prefix(
         &mut self,
         request: RequestId,

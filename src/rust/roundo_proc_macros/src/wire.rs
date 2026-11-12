@@ -38,7 +38,7 @@ fn reject_wire_attributes(attributes: &[Attribute]) -> Result<()> {
 pub(super) fn message(input: DeriveInput) -> Result<TokenStream> {
     let variants = variants(&input)?;
     let mut envelope: Option<Path> = None;
-    let mut stream: Option<Path> = None;
+    let mut class: Option<Path> = None;
     for attribute in &input.attrs {
         if !attribute.path().is_ident("wire") {
             continue;
@@ -46,10 +46,10 @@ pub(super) fn message(input: DeriveInput) -> Result<TokenStream> {
         attribute.parse_nested_meta(|meta| {
             let target = if meta.path.is_ident("envelope") {
                 &mut envelope
-            } else if meta.path.is_ident("stream") {
-                &mut stream
+            } else if meta.path.is_ident("class") {
+                &mut class
             } else {
-                return Err(meta.error("expected envelope or stream"));
+                return Err(meta.error("expected envelope or class"));
             };
             if target.is_some() {
                 return Err(meta.error("duplicate wire metadata key"));
@@ -64,10 +64,10 @@ pub(super) fn message(input: DeriveInput) -> Result<TokenStream> {
             "WireMessage requires #[wire(envelope = Enum::Variant)]",
         )
     })?;
-    let stream = stream.ok_or_else(|| {
+    let class = class.ok_or_else(|| {
         syn::Error::new_spanned(
             &input.ident,
-            "WireMessage requires #[wire(stream = StreamId::Variant)]",
+            "WireMessage requires #[wire(class = TrafficClass::Variant)]",
         )
     })?;
     let mut envelope_type = envelope.clone();
@@ -105,7 +105,7 @@ pub(super) fn message(input: DeriveInput) -> Result<TokenStream> {
         }
 
         impl #impl_generics ::roundo_contracts::ApplicationMessage for #name #type_generics #where_clause {
-            const STREAM: ::roundo_contracts::StreamId = #stream;
+            const CLASS: ::roundo_contracts::TrafficClass = #class;
         }
 
         impl #impl_generics ::core::convert::From<#name #type_generics> for #envelope_type #where_clause {
@@ -121,7 +121,7 @@ pub(super) fn envelope(input: DeriveInput) -> Result<TokenStream> {
     reject_wire_attributes(&input.attrs)?;
     let mut names = Vec::new();
     let mut kinds = Vec::new();
-    let mut streams = Vec::new();
+    let mut classes = Vec::new();
     for variant in variants {
         let mut application = None;
         for attribute in &variant.attrs {
@@ -171,12 +171,12 @@ pub(super) fn envelope(input: DeriveInput) -> Result<TokenStream> {
             let ty = &fields.unnamed[0].ty;
             let name = &variant.ident;
             kinds.push(quote!(Self::#name(message) => message.kind()));
-            streams.push(quote!(Self::#name(_) => ::core::option::Option::Some(
-                <#ty as ::roundo_contracts::ApplicationMessage>::STREAM
+            classes.push(quote!(Self::#name(_) => ::core::option::Option::Some(
+                <#ty as ::roundo_contracts::ApplicationMessage>::CLASS
             )));
         } else {
             kinds.push(quote!(#pattern => #label));
-            streams.push(quote!(#pattern => ::core::option::Option::None));
+            classes.push(quote!(#pattern => ::core::option::Option::None));
         }
     }
     let name = &input.ident;
@@ -193,9 +193,9 @@ pub(super) fn envelope(input: DeriveInput) -> Result<TokenStream> {
                 match self { #(#kinds,)* }
             }
 
-            /// Returns the application stream; negotiation is not sendable through application queues.
-            pub const fn stream(&self) -> ::core::option::Option<::roundo_contracts::StreamId> {
-                match self { #(#streams,)* }
+            /// Returns the business lane; negotiation is not admitted through application queues.
+            pub const fn traffic_class(&self) -> ::core::option::Option<::roundo_contracts::TrafficClass> {
+                match self { #(#classes,)* }
             }
         }
     })

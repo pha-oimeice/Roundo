@@ -10,10 +10,12 @@ mod compute;
 mod draw;
 mod model;
 mod residency;
+mod shaders;
 use compute::*;
 use draw::*;
 use model::*;
 use residency::*;
+use shaders::*;
 
 mod arena;
 mod ranges;
@@ -52,8 +54,8 @@ use bevy::{
         },
         renderer::{RenderContext, RenderDevice, RenderQueue, ViewQuery},
         view::{
-            ExtractedView, Msaa, ViewDepthTexture, ViewTarget, ViewUniform, ViewUniformOffset,
-            ViewUniforms,
+            ExtractedView, Msaa, ViewDepthStencilTexture, ViewTarget, ViewUniform,
+            ViewUniformOffset, ViewUniforms,
         },
     },
 };
@@ -92,6 +94,7 @@ const MAX_GPU_GEOMETRY_SEGMENTS: u32 = 16;
 /// segments retain their initial total-reservation limit. Pixel error is a live
 /// selection policy and may change without rebuilding the SVO measurements.
 #[derive(Clone, Copy, Debug, ExtractResource, Resource)]
+#[extract_app(RenderApp)]
 pub struct WorldRenderSettings {
     /// Seed mixed into deterministic material/color selection for newly prepared chunks.
     pub material_seed: u32,
@@ -120,12 +123,7 @@ pub struct WorldRenderPlugin;
 
 impl bevy::prelude::Plugin for WorldRenderPlugin {
     fn build(&self, app: &mut App) {
-        embedded_asset!(app, "shaders/world_cull_lod.wgsl");
-        embedded_asset!(app, "shaders/world_greedy_emit.wgsl");
-        embedded_asset!(app, "shaders/world_model_select.wgsl");
-        embedded_asset!(app, "shaders/world_surface_proxy.wgsl");
-        embedded_asset!(app, "shaders/world_vertex.wgsl");
-        embedded_asset!(app, "shaders/world_fragment.wgsl");
+        register_world_shaders(app);
 
         app.init_resource::<WorldRenderSettings>()
             .add_plugins(ExtractResourcePlugin::<WorldRenderSettings>::default());
@@ -137,11 +135,15 @@ impl bevy::prelude::Plugin for WorldRenderPlugin {
             .init_resource::<ExtractedChunks>()
             .init_resource::<WorldResidency>()
             .init_resource::<WorldViewPipelines>()
+            .init_resource::<WorldShaderInitialization>()
             .add_systems(RenderStartup, init_world_pipelines)
             .add_systems(ExtractSchedule, extract_loaded_chunks)
             .add_systems(
                 Render,
-                (prepare_residency, prepare_view_pipelines)
+                (
+                    prepare_residency.run_if(world_shaders_ready),
+                    prepare_view_pipelines,
+                )
                     .chain()
                     .in_set(RenderSystems::PrepareResources),
             )
@@ -149,10 +151,22 @@ impl bevy::prelude::Plugin for WorldRenderPlugin {
                 Render,
                 prepare_view_bind_group.in_set(RenderSystems::PrepareBindGroups),
             )
-            .add_systems(Core3d, world_compute.in_set(Core3dSystems::Prepass))
+            .add_systems(
+                Render,
+                check_world_shader_initialization
+                    .after(RenderSystems::Prepare)
+                    .before(RenderSystems::Render),
+            )
+            .add_systems(
+                Core3d,
+                world_compute
+                    .run_if(world_shaders_ready)
+                    .in_set(Core3dSystems::Prepass),
+            )
             .add_systems(
                 Core3d,
                 world_draw
+                    .run_if(world_shaders_ready)
                     .in_set(Core3dSystems::MainPass)
                     .before(main_opaque_pass_3d),
             );

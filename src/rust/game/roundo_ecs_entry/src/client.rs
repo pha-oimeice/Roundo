@@ -59,9 +59,6 @@ impl ClientEcsRuntime {
                         title: "Roundo".to_string(),
                         position: WindowPosition::At(IVec2::new(0, 0)),
                         mode: WindowMode::Windowed,
-                        // Transparent native UI children composite over the
-                        // world swapchain; they must not clip its draw region.
-                        clip_children: false,
                         ..default()
                     }),
                     ..default()

@@ -13,7 +13,7 @@ pub(super) struct ServerIndexArguments {
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub(super) struct ControllerRetryAcquireArguments {
-    /// Non-empty ASCII decimal text preserves a `ControllerId` across Web UI and terminal input.
+    /// Non-empty ASCII decimal text preserves a `ControllerId` across UI and terminal input.
     pub(super) controller_id: String,
 }
 #[derive(Deserialize, JsonSchema)]
@@ -378,13 +378,13 @@ pub(super) struct ServerIndexOutput {
 }
 #[derive(Serialize, JsonSchema)]
 pub(super) struct ControllerRetryAcquireOutput {
-    /// Decimal text preserves the full `ControllerId` across the JSON/JS boundary.
+    /// Decimal text preserves the full `ControllerId` across JSON adapters.
     pub(super) controller_id: String,
     /// Decimal text preserves the full `u128` request correlation value.
     pub(super) request_id: String,
     pub(super) state: String,
 }
-/// One lifecycle-owned current-epoch Acquire projection for Web UI.
+/// One lifecycle-owned current-epoch Acquire projection for native UI.
 #[derive(Serialize)]
 pub(super) struct ClientControlStatusEntryOutput {
     pub(super) controller_id: String,
@@ -392,7 +392,7 @@ pub(super) struct ClientControlStatusEntryOutput {
     pub(super) state: String,
     pub(super) retryable: bool,
 }
-/// Read-only complete current-epoch control status collection for Web UI.
+/// Read-only complete current-epoch control status collection for native UI.
 #[derive(Serialize)]
 pub(super) struct ClientControlStatusOutput {
     pub(super) controls: Vec<ClientControlStatusEntryOutput>,
@@ -992,7 +992,7 @@ impl ClientCommandCatalog {
     }
 
     /// Refuses dispatch when composition omitted a catalog command. This check
-    /// is owned here rather than repeated by Web UI and terminal adapters.
+    /// is owned here rather than repeated by UI and terminal adapters.
     pub(super) fn assert_complete<Context>(
         &self,
         registry: &roundo_cli::json_command::CommandRegistry<'_, Context>,

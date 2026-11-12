@@ -14,7 +14,7 @@ pub fn network_config() -> ServerNetworkConfig {
         certificate_directory: PathBuf::from(&network.certificate_path).join("certs"),
         server_alternative_names: network.server_alternative_names.clone(),
         generate_self_signed_certificate: network.generate_self_signed_certificate,
-        admission: roundo_networking::TransportAdmissionPolicy::default(),
+        outbound: roundo_networking::OutboundQueuePolicy::default(),
     }
 }
 

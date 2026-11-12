@@ -26,7 +26,7 @@ fn init_logger() {
         .init();
 }
 
-fn main() {
+fn main() -> bevy::app::AppExit {
     init_logger();
     debug!("Hello Roundo Client!");
     let settings = config::settings();
@@ -38,9 +38,9 @@ fn main() {
             roundo_local_coordinate::AtomicVoxelRegistry::load,
         )
         .register(
-            roundo_mod_loader::WEB_UI_RESOURCE_TYPE,
+            roundo_mod_loader::UI_RESOURCE_TYPE,
             &[],
-            roundo_webui::UiRegistry::load,
+            roundo_ui::UiRegistry::load,
         )
         .register(
             roundo_mod_loader::INPUT_RESOURCE_TYPE,
@@ -51,7 +51,7 @@ fn main() {
             &mods_root,
             &[
                 roundo_mod_loader::ATOMIC_VOXEL_RESOURCE_TYPE,
-                roundo_mod_loader::WEB_UI_RESOURCE_TYPE,
+                roundo_mod_loader::UI_RESOURCE_TYPE,
                 roundo_mod_loader::INPUT_RESOURCE_TYPE,
             ],
         )
@@ -67,16 +67,18 @@ fn main() {
         )
         .expect("Atomic Voxel Resource Type must be published");
     let ui_registry = resources
-        .take::<roundo_webui::UiRegistry>(roundo_mod_loader::WEB_UI_RESOURCE_TYPE)
-        .expect("Web UI Resource Type must be published");
+        .take::<roundo_ui::UiRegistry>(roundo_mod_loader::UI_RESOURCE_TYPE)
+        .expect("native UI Resource Type must be published");
     let input_registry = resources
         .take::<roundo_marionette::InputFunctionRegistry>(roundo_mod_loader::INPUT_RESOURCE_TYPE)
         .expect("Input Resource Type must be published");
+    commands::validate_ui_registry(&ui_registry, &input_registry)
+        .unwrap_or_else(|error| panic!("invalid native UI command/data binding: {error}"));
     config::validate_input_configuration(&settings, &input_registry)
         .unwrap_or_else(|error| panic!("invalid configured input binding: {error}"));
     let resource_fingerprint = roundo_contracts::ResourceCatalogFingerprint(voxels.fingerprint());
     let (mut app, ecs) = ClientEcsRuntime::new(voxels).into_parts();
-    // Both Wry and terminal adapters submit to this shared bounded queue; the
+    // Both native UI and terminal adapters submit to this shared bounded queue; the
     // client-owned command plugin executes it on Bevy's main world.
     let command_pipe = commands::ClientCommandPipe::bounded(256);
     let command_io = command_pipe.io();
@@ -105,10 +107,10 @@ fn main() {
             RoundoCliPlugin,
             commands::ClientCommandsPlugin,
             targeting::ClientVoxelTargetingPlugin,
-            roundo_webui::RoundoWebUiPlugin::with_registry_and_command_io(ui_registry, command_io),
+            roundo_ui::RoundoUiPlugin::new(ui_registry, command_io),
             input::ClientInputPlugin,
             scene::ClientScenePlugin,
-            ui_host::ClientWebUiHostPlugin,
+            ui_host::ClientUiHostPlugin,
         ));
-    app.run();
+    app.run()
 }

@@ -3,7 +3,7 @@
 use crate::{InventoryError, InventoryHandle, InventoryOwner, ItemId, store::InventoryStore};
 use bevy::{
     ecs::{system::SystemParam, world::WorldId},
-    prelude::{App, On, Plugin, ResMut},
+    prelude::{App, Local, On, Plugin, ResMut},
 };
 use roundo_life::{
     ConceptBodyFactory, ConceptBodyHandle, FactoryInvalidation, LifeInstances, LifeRuntimePlugin,
@@ -101,7 +101,7 @@ fn clear_invalidated_owner(
 /// Snapshots are owned, unordered, do not track updates and grant no disclosure right.
 #[derive(SystemParam)]
 pub struct Inventories<'w, 's> {
-    world: WorldId,
+    world: Local<'s, WorldId>,
     life: LifeInstances<'w, 's>,
     store: ResMut<'w, InventoryStore>,
 }
@@ -129,7 +129,7 @@ impl Inventories<'_, '_> {
     /// The unique unrestricted fallback inventory of this World/store.
     /// Public custody does not imply a physical representation or data grant.
     pub fn public_inventory(&self) -> Result<InventoryHandle> {
-        self.store.check_world(self.world)?;
+        self.store.check_world(*self.world)?;
         let handle = self.store.public()?;
         self.check_inventory(handle)?;
         Ok(handle)
@@ -144,7 +144,7 @@ impl Inventories<'_, '_> {
     /// Returns this inventory's owner after World, identity and exact Body checks.
     /// The returned identity grants no Player access and can become stale later.
     pub fn owner(&self, handle: InventoryHandle) -> Result<InventoryOwner> {
-        self.store.check_world(self.world)?;
+        self.store.check_world(*self.world)?;
         self.check_inventory(handle)?;
         self.store.owner(handle)
     }
@@ -154,7 +154,7 @@ impl Inventories<'_, '_> {
     /// entire read without repairing or silently omitting it. O(allocated slots).
     /// This trusted-local enumeration is not permission to disclose the result.
     pub fn all(&self) -> Result<Vec<InventoryHandle>> {
-        self.store.check_world(self.world)?;
+        self.store.check_world(*self.world)?;
         let handles = self.store.all();
         for handle in &handles {
             self.check_inventory(*handle)?;
@@ -167,7 +167,7 @@ impl Inventories<'_, '_> {
     /// A bare Body has no World field: binding does not authenticate its origin
     /// or confer Player authorization. The owned context is tied to this store epoch.
     pub fn bind_owner(&self, body: ConceptBodyHandle) -> Result<InventoryOwner> {
-        self.store.check_world(self.world)?;
+        self.store.check_world(*self.world)?;
         self.live(body)?;
         Ok(InventoryOwner::new(self.store.domain(), body))
     }
@@ -177,7 +177,7 @@ impl Inventories<'_, '_> {
     /// then allocates identity (`IdentityExhausted` with no partial registration).
     /// Multiple independent inventories per Body are allowed; no Entity is spawned.
     pub fn create(&mut self, owner: InventoryOwner) -> Result<InventoryHandle> {
-        self.store.check_world(self.world)?;
+        self.store.check_world(*self.world)?;
         self.check_owner(owner)?;
         self.store.create(owner)
     }
@@ -187,7 +187,7 @@ impl Inventories<'_, '_> {
     /// Does not alter the items, their own inventories, IDs/data, or spawn physics.
     /// Cost is proportional to direct members; `Err` changes nothing.
     pub fn remove(&mut self, handle: InventoryHandle) -> Result<()> {
-        self.store.check_world(self.world)?;
+        self.store.check_world(*self.world)?;
         self.check_inventory(handle)?;
         self.store.remove(handle)
     }
@@ -197,7 +197,7 @@ impl Inventories<'_, '_> {
     /// including in this same inventory, is `ItemAlreadyHeld`. Identity/liveness
     /// errors take priority; `Err` changes nothing. Expected O(1), no Entity spawn.
     pub fn insert(&mut self, handle: InventoryHandle, item: ItemId) -> Result<()> {
-        self.store.check_world(self.world)?;
+        self.store.check_world(*self.world)?;
         self.check_inventory(handle)?;
         self.store.insert(handle, item)
     }
@@ -207,7 +207,7 @@ impl Inventories<'_, '_> {
     /// World -> H identity -> Body live -> source custody. `Err` changes nothing;
     /// expected O(1). No physical representation or nested traversal is created.
     pub fn take(&mut self, handle: InventoryHandle, item: ItemId) -> Result<()> {
-        self.store.check_world(self.world)?;
+        self.store.check_world(*self.world)?;
         self.check_inventory(handle)?;
         self.store.take(handle, item)
     }
@@ -221,7 +221,7 @@ impl Inventories<'_, '_> {
     /// World, inventory identity, live owner and source membership before writing;
     /// any `Err` leaves custody unchanged. Does not reserve or blacklist the ID.
     pub fn remove_destroyed_item(&mut self, handle: InventoryHandle, item: ItemId) -> Result<()> {
-        self.store.check_world(self.world)?;
+        self.store.check_world(*self.world)?;
         self.check_inventory(handle)?;
         self.store.remove_destroyed_item(handle, item)
     }
@@ -239,7 +239,7 @@ impl Inventories<'_, '_> {
         target: InventoryHandle,
         item: ItemId,
     ) -> Result<()> {
-        self.store.check_world(self.world)?;
+        self.store.check_world(*self.world)?;
         let source_owner = self.store.owner(source)?;
         let target_owner = self.store.owner(target)?;
         self.live(source_owner.body())?;
@@ -251,7 +251,7 @@ impl Inventories<'_, '_> {
     /// World -> H domain/structure -> Body live; errors are not silently cleaned.
     /// Does not change custody; later mutations do not change this Vec.
     pub fn items(&self, handle: InventoryHandle) -> Result<Vec<ItemId>> {
-        self.store.check_world(self.world)?;
+        self.store.check_world(*self.world)?;
         self.check_inventory(handle)?;
         self.store.items(handle)
     }
@@ -259,7 +259,7 @@ impl Inventories<'_, '_> {
     /// Current direct member count, O(1), after World, identity and Body checks.
     /// Not the Capacity or Occupancy attribute and not a capacity restriction.
     pub fn item_count(&self, handle: InventoryHandle) -> Result<usize> {
-        self.store.check_world(self.world)?;
+        self.store.check_world(*self.world)?;
         self.check_inventory(handle)?;
         self.store.item_count(handle)
     }
@@ -269,7 +269,7 @@ impl Inventories<'_, '_> {
     /// validated, then its exact Body: delayed dead-owner custody is
     /// `Err(OwnerNotLive)`, never disguised as None or silently cleaned.
     pub fn holder(&self, item: ItemId) -> Result<Option<InventoryHandle>> {
-        self.store.check_world(self.world)?;
+        self.store.check_world(*self.world)?;
         let holder = self.store.holder(item)?;
         if let Some(handle) = holder {
             self.check_inventory(handle)?;
@@ -282,7 +282,7 @@ impl Inventories<'_, '_> {
     /// return an empty Vec. No scanning/cleaning of other owners. Snapshot does not
     /// follow later registrations and grants neither validity nor disclosure rights.
     pub fn for_body(&self, owner: InventoryOwner) -> Result<Vec<InventoryHandle>> {
-        self.store.check_world(self.world)?;
+        self.store.check_world(*self.world)?;
         self.check_owner(owner)?;
         self.store.for_body(owner)
     }
@@ -292,7 +292,7 @@ impl Inventories<'_, '_> {
     /// This is not evidence that all inventories are live. Normal Factory cleanup
     /// has already reduced the count when removal returns.
     pub fn len(&self) -> Result<usize> {
-        self.store.check_world(self.world)?;
+        self.store.check_world(*self.world)?;
         Ok(self.store.len())
     }
 }

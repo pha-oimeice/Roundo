@@ -361,12 +361,12 @@ fn ground_normal(
     spatial
         .cast_shape_predicate(
             aabb,
-            transform.translation.adjust_precision(),
-            Quat::IDENTITY.adjust_precision(),
+            transform.translation.real(),
+            Quat::IDENTITY,
             direction,
             &config,
             &SpatialQueryFilter::from_excluded_entities([entity]),
             &|hit| !sensors.contains(hit),
         )
-        .map(|hit| hit.normal1.f32())
+        .map(|hit| hit.normal1)
 }

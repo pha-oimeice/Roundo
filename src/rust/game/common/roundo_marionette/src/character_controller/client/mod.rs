@@ -160,7 +160,7 @@ pub enum ClientMarionetteEvent {
     /// Same outbound FIFO as accepted Submit events; no acknowledgement implied.
     DrainBarrier(roundo_contracts::control_handoff::DrainBarrier),
     /// Emitted only after the producer and prediction ECS stages both revoked
-    /// their old state. The stream-0 bridge still must settle earlier FIFO items.
+    /// their old state. The game-queue bridge still must settle earlier FIFO items.
     PreparingCleaned {
         epoch: u64,
         preparing: roundo_contracts::control_handoff::ControlPreparing,

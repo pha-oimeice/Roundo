@@ -1,0 +1,231 @@
+title = "设置"
+sources = { settings = "client.settings", bindings = "client.bindings" }
+model = { binding_slot = "", binding_key = "", old_slot = "", old_key = "", editing = false, slot_id = "", slot_name = "", function = "" }
+[shortcuts]
+"roundo.debug" = [{ kind = "command", name = "ui.open", arguments = { import = "debug" } }]
+
+[[nodes]]
+id = "page"
+kind = "column"
+style = { width = "100%", height = "100%", padding = 24.0, row_gap = 12.0, column_gap = 12.0 }
+[[nodes.children]]
+id = "heading"
+kind = "text"
+text = "设置"
+style = { font_size = 28.0 }
+[[nodes.children]]
+id = "scroll"
+kind = "scroll"
+scrollbar_width = 8.0
+style = { flex_grow = 1.0, min_height = 0.0, row_gap = 12.0, column_gap = 12.0 }
+[[nodes.children.children]]
+id = "settings"
+kind = "repeat"
+items = "$data.settings.settings"
+alias = "setting"
+key = "$setting.key"
+style = { row_gap = 12.0, column_gap = 12.0 }
+[[nodes.children.children.children]]
+id = "row"
+kind = "row"
+style = { row_gap = 12.0, column_gap = 12.0, align_items = "Center" }
+[[nodes.children.children.children.children]]
+id = "name"
+kind = "text"
+text = "$setting.key"
+style = { width = 360.0 }
+[[nodes.children.children.children.children]]
+id = "value"
+kind = "number-input"
+integer = false
+value = "$setting.value"
+min = "$setting.min"
+max = "$setting.max"
+step = "$setting.step"
+style = { width = 220.0 }
+on_change = [{ kind = "command", name = "settings.set", arguments = { key = "$setting.key", value = "$event" } }]
+[[nodes.children.children.children.children]]
+id = "reset"
+kind = "button"
+text = "默认值"
+on_activate = [{ kind = "command", name = "settings.set", arguments = { key = "$setting.key", value = "$setting.default" } }]
+[[nodes.children.children]]
+id = "bindings-heading"
+kind = "text"
+text = "按键绑定（不写入任何硬编码默认绑定）"
+style = { font_size = 24.0 }
+[[nodes.children.children]]
+id = "bindings"
+kind = "repeat"
+items = "$data.bindings.bindings"
+alias = "binding"
+key = "${binding.slot}/${binding.key}"
+style = { row_gap = 8.0, column_gap = 8.0 }
+[[nodes.children.children.children]]
+id = "row"
+kind = "row"
+style = { row_gap = 12.0, column_gap = 12.0, align_items = "Center" }
+[[nodes.children.children.children.children]]
+id = "name"
+kind = "text"
+text = "${binding.slot} : ${binding.key}"
+style = { width = 420.0 }
+[[nodes.children.children.children.children]]
+id = "edit"
+kind = "button"
+text = "编辑"
+on_activate = [
+    { kind = "set", path = "model.old_slot", value = "$binding.slot" },
+    { kind = "set", path = "model.old_key", value = "$binding.key" },
+    { kind = "set", path = "model.binding_slot", value = "$binding.slot" },
+    { kind = "set", path = "model.binding_key", value = "$binding.key" },
+    { kind = "set", path = "model.editing", value = true },
+]
+[[nodes.children.children.children.children]]
+id = "remove"
+kind = "button"
+text = "解绑"
+on_activate = [{ kind = "command", name = "bindings.unbind", arguments = { slot = "$binding.slot", key = "$binding.key" } }]
+[[nodes.children.children]]
+id = "binding-editor"
+kind = "row"
+style = { row_gap = 12.0, column_gap = 12.0, align_items = "Center" }
+[[nodes.children.children.children]]
+id = "slot"
+kind = "select"
+max_visible = 8
+value = "$model.binding_slot"
+bind = "model.binding_slot"
+options = { op = "options", items = "$data.bindings.supported_slots", alias = "option", value = "$option.slot", label = "$option.display_name" }
+style = { width = 260.0 }
+[[nodes.children.children.children]]
+id = "key"
+kind = "select"
+max_visible = 8
+value = "$model.binding_key"
+bind = "model.binding_key"
+options = { op = "options", items = "$data.bindings.supported_keys", alias = "option", value = "$option.key", label = "$option.display_name" }
+style = { width = 220.0 }
+[[nodes.children.children.children]]
+id = "add"
+kind = "button"
+text = "添加绑定"
+visible = { op = "not", value = "$model.editing" }
+on_activate = [{ kind = "command", name = "bindings.bind", arguments = { slot = "$model.binding_slot", key = "$model.binding_key" } }]
+[[nodes.children.children.children]]
+id = "replace"
+kind = "button"
+text = "保存绑定"
+visible = "$model.editing"
+on_activate = [
+    { kind = "command", name = "bindings.replace", arguments = { old_binding = { slot = "$model.old_slot", key = "$model.old_key" }, binding = { slot = "$model.binding_slot", key = "$model.binding_key" } } },
+    { kind = "set", path = "model.editing", value = false },
+]
+[[nodes.children.children.children]]
+id = "cancel"
+kind = "button"
+text = "取消编辑"
+visible = "$model.editing"
+on_activate = [{ kind = "set", path = "model.editing", value = false }]
+[[nodes.children.children]]
+id = "slots-heading"
+kind = "text"
+text = "快捷槽与功能分配"
+style = { font_size = 24.0 }
+[[nodes.children.children]]
+id = "slots"
+kind = "repeat"
+items = "$data.bindings.supported_slots"
+alias = "slot"
+key = "$slot.slot"
+style = { row_gap = 8.0, column_gap = 8.0 }
+[[nodes.children.children.children]]
+id = "row"
+kind = "row"
+style = { row_gap = 12.0, column_gap = 12.0, align_items = "Center" }
+[[nodes.children.children.children.children]]
+id = "name"
+kind = "text"
+text = "${slot.slot} · ${slot.display_name} · ${slot.functions}"
+style = { flex_grow = 1.0 }
+[[nodes.children.children.children.children]]
+id = "select"
+kind = "button"
+text = "选择此槽"
+on_activate = [{ kind = "set", path = "model.slot_id", value = "$slot.slot" }, { kind = "set", path = "model.slot_name", value = "$slot.display_name" }]
+[[nodes.children.children.children.children]]
+id = "delete"
+kind = "button"
+text = "删除空槽"
+on_activate = [{ kind = "command", name = "slots.delete", arguments = { slot = "$slot.slot" } }]
+[[nodes.children.children]]
+id = "slot-editor"
+kind = "column"
+style = { row_gap = 8.0, column_gap = 8.0 }
+[[nodes.children.children.children]]
+id = "id-label"
+kind = "text"
+text = "槽标识（新建时填写，编辑时先选择已有槽）"
+[[nodes.children.children.children]]
+id = "id"
+kind = "text-input"
+value = "$model.slot_id"
+bind = "model.slot_id"
+[[nodes.children.children.children]]
+id = "name-label"
+kind = "text"
+text = "显示名称"
+[[nodes.children.children.children]]
+id = "name"
+kind = "text-input"
+value = "$model.slot_name"
+bind = "model.slot_name"
+[[nodes.children.children.children]]
+id = "actions"
+kind = "row"
+style = { row_gap = 12.0, column_gap = 12.0 }
+[[nodes.children.children.children.children]]
+id = "create"
+kind = "button"
+text = "创建槽"
+on_activate = [{ kind = "command", name = "slots.create", arguments = { slot = "$model.slot_id", display_name = "$model.slot_name" } }]
+[[nodes.children.children.children.children]]
+id = "rename"
+kind = "button"
+text = "重命名槽"
+on_activate = [{ kind = "command", name = "slots.rename", arguments = { slot = "$model.slot_id", display_name = "$model.slot_name" } }]
+[[nodes.children.children.children]]
+id = "function-label"
+kind = "text"
+text = "选择注册功能，执行分配或取消分配（不会自动创建绑定）"
+[[nodes.children.children.children]]
+id = "function"
+kind = "select"
+max_visible = 8
+value = "$model.function"
+bind = "model.function"
+options = { op = "options", items = "$data.bindings.supported_functions", alias = "option", value = "$option.function", label = "$option.display_name" }
+[[nodes.children.children.children]]
+id = "assignments"
+kind = "row"
+style = { row_gap = 12.0, column_gap = 12.0 }
+[[nodes.children.children.children.children]]
+id = "assign"
+kind = "button"
+text = "分配功能"
+on_activate = [{ kind = "command", name = "slots.assign", arguments = { slot = "$model.slot_id", function = "$model.function" } }]
+[[nodes.children.children.children.children]]
+id = "unassign"
+kind = "button"
+text = "取消分配"
+on_activate = [{ kind = "command", name = "slots.unassign", arguments = { slot = "$model.slot_id", function = "$model.function" } }]
+[[nodes.children]]
+id = "error"
+kind = "text"
+text = "$error"
+style = { color = [255, 155, 155, 255] }
+[[nodes.children]]
+id = "back"
+kind = "button"
+text = "返回"
+on_activate = [{ kind = "command", name = "ui.back", arguments = {} }]

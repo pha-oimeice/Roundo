@@ -1,31 +1,23 @@
-//! Hardware/presentation adapter. Scene policy and transitions live in `scene`.
+//! Window, camera and cursor projection for Bevy's native UI.
 
 use crate::scene::{ClientSceneProjection, ClientSceneSystemSet};
 use crate::targeting::ClientVoxelRaycastSettings;
 use bevy::{
-    prelude::{
-        Camera, Camera2d, Camera3d, ClearColorConfig, Color, Commands, Component, Entity,
-        IntoScheduleConfigs, Query, Res, ResMut, Resource, Startup, Update, With, Without,
-    },
-    window::{CursorGrabMode, CursorOptions, PrimaryWindow, Window},
+    prelude::*,
+    window::{CursorGrabMode, CursorOptions, PrimaryWindow},
 };
 use roundo_marionette::{ClientMarionetteInputSettings, ClientPlayerController};
 use roundo_presence::ClientPresenceSettings;
 
-/// Native-focus changes participate in the key even without logical UI changes.
-/// Camera binding is applied independently of these cursor/input edges.
 #[derive(Default, Resource)]
-struct AppliedHostProjection(Option<(Option<roundo_webui::UiInstanceId>, bool, bool)>);
-
-/// Clears the target while game rendering is disabled; no retained world pixels.
+struct AppliedHostProjection(Option<(Option<roundo_ui::UiInstanceId>, bool, bool)>);
 #[derive(Component)]
-struct UiClearCamera;
-
-pub struct ClientWebUiHostPlugin;
-impl bevy::prelude::Plugin for ClientWebUiHostPlugin {
-    fn build(&self, app: &mut bevy::prelude::App) {
+struct UiCamera;
+pub struct ClientUiHostPlugin;
+impl Plugin for ClientUiHostPlugin {
+    fn build(&self, app: &mut App) {
         app.init_resource::<AppliedHostProjection>()
-            .add_systems(Startup, spawn_ui_clear_camera)
+            .add_systems(Startup, spawn_ui_camera)
             .add_systems(
                 Update,
                 sync_runtime_settings
@@ -35,30 +27,29 @@ impl bevy::prelude::Plugin for ClientWebUiHostPlugin {
             .add_systems(
                 Update,
                 apply_host_projection
+                    .run_if(resource_exists::<roundo_ui::UiReady>)
                     .after(ClientSceneSystemSet::Project)
                     .before(roundo_marionette::MarionetteClientSet::Input),
             );
     }
 }
-
 fn apply_host_projection(
     projection: Res<ClientSceneProjection>,
     mut applied: ResMut<AppliedHostProjection>,
     mut controller: ResMut<ClientPlayerController>,
     mut windows: Query<(&mut Window, &mut CursorOptions), With<PrimaryWindow>>,
-    mut cameras: Query<(Entity, &mut Camera), (With<Camera3d>, Without<UiClearCamera>)>,
-    mut clear_cameras: Query<&mut Camera, With<UiClearCamera>>,
+    mut cameras: Query<(Entity, &mut Camera), (With<Camera3d>, Without<UiCamera>)>,
+    mut ui_camera: Query<&mut Camera, With<UiCamera>>,
 ) {
     for (entity, mut camera) in &mut cameras {
-        let active = projection.world_active && controller.is_bound_to(entity);
-        if camera.is_active != active {
-            camera.is_active = active;
-        }
+        camera.is_active = projection.world_active && controller.is_bound_to(entity);
     }
-    for mut clear_camera in &mut clear_cameras {
-        if clear_camera.is_active == projection.world_active {
-            clear_camera.is_active = !projection.world_active;
-        }
+    for mut camera in &mut ui_camera {
+        camera.clear_color = if projection.world_active {
+            ClearColorConfig::None
+        } else {
+            ClearColorConfig::Custom(Color::BLACK)
+        };
     }
     let key = (
         projection.focused,
@@ -77,26 +68,24 @@ fn apply_host_projection(
             CursorGrabMode::None
         };
         if projection.gameplay_input {
-            let center = bevy::math::Vec2::new(window.width() * 0.5, window.height() * 0.5);
+            let center = Vec2::new(window.width() * 0.5, window.height() * 0.5);
             window.set_cursor_position(Some(center));
         }
     }
     applied.0 = Some(key);
 }
-
-fn spawn_ui_clear_camera(mut commands: Commands) {
+fn spawn_ui_camera(mut commands: Commands) {
     commands.spawn((
-        UiClearCamera,
+        UiCamera,
+        bevy::ui::IsDefaultUiCamera,
         Camera2d,
         Camera {
-            is_active: true,
             order: 1,
             clear_color: ClearColorConfig::Custom(Color::BLACK),
-            ..Default::default()
+            ..default()
         },
     ));
 }
-
 fn sync_runtime_settings(
     config: Res<crate::server_list::ClientConfigStore>,
     mut input: ResMut<ClientMarionetteInputSettings>,

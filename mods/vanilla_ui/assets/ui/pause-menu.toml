@@ -1,0 +1,65 @@
+title = "暂停"
+sources = { controls = "client.control" }
+model = {}
+[shortcuts]
+"roundo.debug" = [{ kind = "command", name = "ui.open", arguments = { import = "debug" } }]
+
+[[nodes]]
+id = "page"
+kind = "column"
+style = { width = "100%", height = "100%", align_items = "Center", justify_content = "Center", row_gap = 12.0, column_gap = 12.0 }
+[[nodes.children]]
+id = "title"
+kind = "text"
+text = "已暂停操作"
+style = { font_size = 28.0 }
+[[nodes.children]]
+id = "resume"
+kind = "button"
+text = "继续"
+style = { width = 240.0 }
+on_activate = [{ kind = "command", name = "scene.resume", arguments = {} }]
+[[nodes.children]]
+id = "settings"
+kind = "button"
+text = "设置"
+style = { width = 240.0 }
+on_activate = [{ kind = "command", name = "ui.open", arguments = { import = "settings" } }]
+[[nodes.children]]
+id = "debug"
+kind = "button"
+text = "调试工具"
+style = { width = 240.0 }
+on_activate = [{ kind = "command", name = "ui.open", arguments = { import = "debug" } }]
+[[nodes.children]]
+id = "leave"
+kind = "button"
+text = "离开服务器"
+style = { width = 240.0 }
+on_activate = [{ kind = "command", name = "server.disconnect", arguments = {} }]
+[[nodes.children]]
+id = "controls"
+kind = "repeat"
+items = "$data.controls.controls"
+alias = "control"
+key = "$control.controller_id"
+style = { row_gap = 8.0, column_gap = 8.0 }
+[[nodes.children.children]]
+id = "row"
+kind = "row"
+style = { row_gap = 12.0, column_gap = 12.0 }
+[[nodes.children.children.children]]
+id = "status"
+kind = "text"
+text = "Controller ${control.controller_id}: ${control.state}"
+[[nodes.children.children.children]]
+id = "retry"
+kind = "button"
+text = "重试控制器"
+enabled = "$control.retryable"
+on_activate = [{ kind = "command", name = "controller.retry-acquire", arguments = { controller_id = "$control.controller_id" } }]
+[[nodes.children]]
+id = "error"
+kind = "text"
+text = "$error"
+style = { color = [255, 155, 155, 255] }

@@ -35,7 +35,7 @@ impl SubscriptionView {
 // An in-place component replacement can retain the same Entity and an unbound
 // incarnation. Explicit insertion invalidation closes that cache seam.
 pub(super) fn invalidate_installed_coordinate(
-    _: On<Insert, LocalCoordinate>,
+    _: On<Insert<LocalCoordinate>>,
     world: Option<ResMut<LocalCoordinateServerWorld>>,
 ) {
     if let Some(mut world) = world {

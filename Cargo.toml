@@ -7,7 +7,6 @@ members = [
     "src/rust/game/common/roundo_creature",
     "src/rust/game/common/roundo_marionette",
     "src/rust/game/common/roundo_local_coordinate",
-    "src/rust/game/common/roundo_lifecycle",
     "src/rust/game/common/roundo_life",
     "src/rust/game/common/roundo_inventory",
     "src/rust/game/common/roundo_items",
@@ -25,7 +24,7 @@ members = [
     "src/rust/game/common/roundo_presence",
     "src/rust/game/common/roundo_portal",
     "src/rust/game/common/roundo_player",
-    "src/rust/roundo_client/roundo_webui",
+    "src/rust/roundo_client/roundo_ui",
     "src/rust/game/common/roundo_mod_loader",
     "src/rust/roundo_proc_macros",
 ]
@@ -55,24 +54,17 @@ strip = "debuginfo"
 
 [workspace.dependencies]
 anyhow = "1.0"
-argh = "0.1"
-avian3d = "0.7"
-bevy = { version = "0.19.1", default-features = false, features = ["bevy_winit", "bevy_render", "bevy_pbr", "bevy_text", "bevy_audio", "tonemapping_luts", "zstd_rust"] }
-bevy_winit = "0.19.1"
-bevy_asset_loader = "0.27"
-# bevy_egui = "0.41"
-bevy_enhanced_camera = "0.5"
-bevy_enhanced_input = "0.26"
-# bevy-inspector-egui = "0.37"
-cornucopia = "1"
+avian3d = "0.8"
+bevy_quinnet = { version = "0.22.0", default-features = false }
+bytes = "1"
+bevy = { version = "0.20.1", default-features = false, features = ["bevy_scene", "bevy_state", "bevy_winit", "bevy_render", "bevy_pbr", "bevy_text", "bevy_audio", "bevy_ui_render", "bevy_feathers", "custom_cursor", "complex_script_segmentation", "tonemapping_luts", "zstd_rust", "x11"] }
 crossbeam = "0.8"
 env_logger = "0.11"
 log = "0.4"
+open = "5.4.5"
 postcard = { version = "1.1", features = ["use-std"] }
-quinn = { version = "0.11" }
 rand = "0.10"
 rand_chacha = "0.10"
-rustls = "0.23"
 rcgen = "0.14"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -80,17 +72,12 @@ schemars = "1"
 sha2 = "0.11"
 sqlx = { version = "0.9", features = ["derive", "json", "macros", "migrate", "postgres", "runtime-tokio", "time", "uuid",] }
 tokio = { version = "1", features = ["full"] }
-tokio-rustls = "0.26"
 toml = "1.1"
 toml_edit = { version = "0.25", features = ["serde"] }
-ttf-parser = "0.25"
 proc-macro2 = "1"
 quote = "1"
 syn = { version = "2", features = ["full"] }
-webview2-com = "0.38.2"
-webpki-roots = "1"
-wry = { version = "0.56" }
-windows = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_WindowsAndMessaging"] }
+url = "2"
 roundo_proc_macros = { path = "src/rust/roundo_proc_macros" }
 # ---
 roundo_dsa = {path = "src/rust/game/common/roundo_dsa" }
@@ -101,7 +88,6 @@ roundo_controller = { path = "src/rust/game/common/roundo_controller" }
 roundo_creature = { path = "src/rust/game/common/roundo_creature" }
 roundo_cli = { path = "src/rust/roundo_cli" }
 roundo_ecs_entry = { path = "src/rust/game/roundo_ecs_entry", default-features = false }
-roundo_lifecycle = { path = "src/rust/game/common/roundo_lifecycle" }
 roundo_life = { path = "src/rust/game/common/roundo_life" }
 roundo_inventory = { path = "src/rust/game/common/roundo_inventory" }
 roundo_items = { path = "src/rust/game/common/roundo_items" }
@@ -116,5 +102,5 @@ roundo_portal = { path = "src/rust/game/common/roundo_portal" }
 roundo_local_coordinate = { path = "src/rust/game/common/roundo_local_coordinate" }
 roundo_mod_loader = { path = "src/rust/game/common/roundo_mod_loader" }
 roundo_toolbox = { path = "src/rust/roundo_toolbox" }
-roundo_webui = { path = "src/rust/roundo_client/roundo_webui" }
+roundo_ui = { path = "src/rust/roundo_client/roundo_ui" }
 roundo_user_config = { path = "src/rust/roundo_user_config" }

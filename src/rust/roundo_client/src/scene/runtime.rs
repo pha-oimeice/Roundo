@@ -1,13 +1,11 @@
-//! Ordered Bevy adapter: facts/intents, document transactions, then host projection.
+//! Ordered native input, commands, scene navigation and host projection.
 
-use super::{ClientSceneManager, ClientSceneProjection, ClientUiIntent};
+use super::{ClientSceneProjection, ClientUiIntent};
 use crate::{commands::ClientCommandSystemSet, network::ClientNetworkManager};
-use bevy::{app::AppExit, prelude::*};
+use bevy::{ecs::message::MessageCursor, prelude::*};
 use roundo_marionette::MarionetteClientSet;
-use roundo_webui::{
-    RecoveryAction, RecoveryActionRequest, UiLifecycleManager, UiNavigationExecutor,
-    UiRootReplacement, WebUiSystemSet,
-};
+use roundo_scene::{Scene, SceneKind};
+use roundo_ui::{UiLifecycleManager, UiReady, UiSystemSet};
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq, SystemSet)]
 pub enum ClientSceneSystemSet {
@@ -15,120 +13,85 @@ pub enum ClientSceneSystemSet {
     Requests,
     Project,
 }
-
-/// Owns all client flow orchestration; the hardware host only applies a projection.
 pub struct ClientScenePlugin;
 impl Plugin for ClientScenePlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<ClientSceneManager>()
+        app.init_state::<Scene>()
+            .add_computed_state::<SceneKind>()
             .init_resource::<ClientSceneProjection>()
             .configure_sets(
                 Update,
                 (
-                    ClientSceneSystemSet::Prepare.before(ClientCommandSystemSet::ExecuteAndPublish),
+                    ClientSceneSystemSet::Prepare
+                        .after(UiSystemSet::Ingress)
+                        .before(ClientCommandSystemSet::ExecuteAndPublish),
                     ClientSceneSystemSet::Requests
                         .after(ClientCommandSystemSet::ExecuteAndPublish)
-                        .before(WebUiSystemSet::Platform),
+                        .before(UiSystemSet::Project),
                     ClientSceneSystemSet::Project
-                        .after(WebUiSystemSet::Platform)
+                        .after(UiSystemSet::Project)
                         .after(ClientSceneSystemSet::Requests)
                         .before(MarionetteClientSet::Input),
                 ),
             )
             .add_systems(
                 Update,
-                (apply_recovery_action, coordinate_scene)
-                    .chain()
-                    .in_set(ClientSceneSystemSet::Prepare),
+                coordinate_scene
+                    .in_set(ClientSceneSystemSet::Prepare)
+                    .run_if(resource_exists::<UiReady>),
             )
             .add_systems(
                 Update,
                 (coordinate_scene, input_intents)
                     .chain()
-                    .in_set(ClientSceneSystemSet::Requests),
+                    .in_set(ClientSceneSystemSet::Requests)
+                    .run_if(resource_exists::<UiReady>),
             )
-            .add_systems(Update, project_scene.in_set(ClientSceneSystemSet::Project));
+            .add_systems(
+                Update,
+                project_scene
+                    .in_set(ClientSceneSystemSet::Project)
+                    .run_if(resource_exists::<UiReady>),
+            );
     }
 }
-
-fn apply_recovery_action(
-    mut actions: MessageReader<RecoveryActionRequest>,
-    mut network: ResMut<ClientNetworkManager>,
-    mut ui: ResMut<UiLifecycleManager>,
-    mut app_exit: MessageWriter<AppExit>,
-) {
-    for request in actions.read() {
-        match request.0 {
-            RecoveryAction::Retry => {
-                if let Err(error) = ui.retry_recovery() {
-                    log::error!("cannot retry Scene root recovery: {error}");
-                }
-            }
-            RecoveryAction::Disconnect => {
-                network.disconnect();
-            }
-            RecoveryAction::Quit => {
-                app_exit.write(AppExit::Success);
-            }
-        }
+/// Also called before each queued command, so a disconnect in the preceding
+/// request revokes its old view sources before the next request is admitted.
+pub(crate) fn reconcile_scene(world: &mut World) -> Result<(), roundo_ui::UiLifecycleError> {
+    let status = world.resource::<ClientNetworkManager>().status().status;
+    super::synchronize(world, &status);
+    let target = *world.resource::<State<SceneKind>>().get();
+    UiLifecycleManager::with(world, |ui| ui.replace_root(target))
+}
+fn coordinate_scene(world: &mut World) {
+    if let Err(error) = reconcile_scene(world) {
+        log::error!("cannot instantiate native Scene root: {error}");
+        world.write_message(bevy::app::AppExit::error());
     }
 }
-
-fn coordinate_scene(
-    network: Res<ClientNetworkManager>,
-    mut scene: ResMut<ClientSceneManager>,
-    mut ui: ResMut<UiLifecycleManager>,
-    mut navigation: NonSendMut<UiNavigationExecutor>,
-) {
-    scene.synchronize(&network.status().status, &ui);
-    let target = scene.root_scene();
-    // Retain failure presentation while it still belongs to the desired Scene.
-    // A connection change can select another root, but cannot dismiss Recovery
-    // until that projection is accepted (or an existing complete root is reused).
-    if ui
-        .recovery_surface()
-        .is_some_and(|recovery| recovery.scene == target)
+fn input_intents(world: &mut World, mut cursor: Local<MessageCursor<crate::input::ClientEscape>>) {
+    if cursor
+        .read(world.resource::<Messages<crate::input::ClientEscape>>())
+        .count()
+        == 0
     {
         return;
     }
-    match navigation.replace_root(&mut ui, target) {
-        Ok(replacement) => {
-            ui.dismiss_recovery_surface();
-            if let UiRootReplacement::Completed(destroyed) = replacement {
-                log::info!(
-                    "Scene root projection committed without a page: {target:?}; destroyed={}",
-                    destroyed.len()
-                );
-            }
+    let status = world.resource::<ClientNetworkManager>().status().status;
+    super::synchronize(world, &status);
+    UiLifecycleManager::with(world, |ui| {
+        if let Err(error) = super::execute(ClientUiIntent::Escape, ui) {
+            log::warn!("host UI Escape rejected: {error}");
         }
-        Err(error) => log::error!("cannot stage Scene root {target:?}: {error}"),
-    }
+    });
+    super::apply_pending_transition(world);
 }
-
-fn input_intents(
-    mut escapes: MessageReader<crate::input::ClientEscape>,
-    network: Res<ClientNetworkManager>,
-    mut scene: ResMut<ClientSceneManager>,
-    mut ui: ResMut<UiLifecycleManager>,
-    mut navigation: NonSendMut<UiNavigationExecutor>,
-) {
-    if escapes.read().count() == 0 {
-        return;
-    }
-    let intent = ClientUiIntent::Escape;
-    if let Err(error) = scene.execute(intent, &network.status().status, &mut ui, &mut navigation) {
-        log::warn!("host UI intent {intent:?} rejected: {error}");
-    }
-}
-
-fn project_scene(
-    network: Res<ClientNetworkManager>,
-    mut scene: ResMut<ClientSceneManager>,
-    ui: Res<UiLifecycleManager>,
-    navigation: NonSend<UiNavigationExecutor>,
-    mut projection: ResMut<ClientSceneProjection>,
-) {
-    // Consume same-frame document commits/failures before input collection.
-    scene.synchronize(&network.status().status, &ui);
-    *projection = scene.projection(&ui, &navigation);
+fn project_scene(world: &mut World) {
+    coordinate_scene(world);
+    let focused = world
+        .query_filtered::<&Window, With<bevy::window::PrimaryWindow>>()
+        .single(world)
+        .is_ok_and(|w| w.focused);
+    let projection = UiLifecycleManager::with(world, |ui| super::projection(ui, focused));
+    *world.resource_mut::<ClientSceneProjection>() = projection;
 }
