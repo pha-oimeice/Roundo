@@ -1,7 +1,7 @@
 //! Quinnet listener and business-session routing facade.
 use super::registry::ConnectionRegistry;
 use super::*;
-use bevy_quinnet::{
+use roundo_quinnet::{
     server::{
         EndpointAddrConfiguration, QuinnetServer, QuinnetServerPlugin, ServerEndpointConfiguration,
         ServerEndpointConfigurationDefaultables,
@@ -153,6 +153,15 @@ fn run_server(
     let mut peers = HashMap::<u64, Peer>::new();
     run_polling_bridge(&stop, || {
         app.update();
+        for event in app.world_mut()
+            .resource_mut::<Messages<roundo_quinnet::server::ConnectionLostEvent>>()
+            .drain()
+        {
+            log_transport_end(
+                &format!("client_id={}", event.id),
+                &NetworkError::from_transport(event.reason),
+            );
+        }
         let mut server = app.world_mut().resource_mut::<QuinnetServer>();
         let endpoint = server.endpoint_mut();
         let current: HashSet<_> = endpoint.clients().into_iter().collect();
@@ -179,7 +188,11 @@ fn run_server(
             let close = match peer.pump(id, endpoint, &runtime, &registry, &hooks) {
                 Ok(close) => close,
                 Err(error) => {
-                    log::warn!("business peer rejected: client_id={id}, error={error}");
+                    if error.is_transport() {
+                        log_transport_end(&format!("client_id={id}"), &error);
+                    } else {
+                        log::warn!("business peer rejected: client_id={id}, error={error}");
+                    }
                     true
                 }
             };

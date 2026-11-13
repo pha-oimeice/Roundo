@@ -1,7 +1,7 @@
 //! Reconnecting business-session adapter hosted above Quinnet's byte transport.
 
 use super::*;
-use bevy_quinnet::client::connection::ConnectionFailedEvent;
+use roundo_quinnet::client::connection::ConnectionFailedEvent;
 use roundo_contracts::{GAME_PROTOCOL_VERSION, RESOURCE_PROTOCOL_VERSION};
 
 /// Nonblocking admission to independent business queues. Success means local
@@ -76,7 +76,7 @@ fn run_client(
             .resource_mut::<Messages<ConnectionFailedEvent>>()
             .drain()
             .find(|event| Some(event.id) == id)
-            .map(|event| NetworkError::from_display(event.err));
+            .map(|event| event.err);
         let step = (|| -> Result<(), NetworkError> {
             if id.is_none() {
                 if Instant::now() < retry_at {
@@ -99,17 +99,31 @@ fn run_client(
                 );
             }
             if let Some(error) = failure {
-                return Err(error);
+                let reason = id.and_then(|current| {
+                    app.world().resource::<QuinnetClient>()
+                        .get_connection_by_id(current)
+                        .and_then(|connection| connection.termination_reason())
+                });
+                return Err(match reason {
+                    Some(reason) => NetworkError::from_transport(reason),
+                    None => NetworkError::transport_message(error.to_string()),
+                });
             }
             let current = id.expect("opened connection");
             let mut client = app.world_mut().resource_mut::<QuinnetClient>();
             let connection = client
                 .get_connection_mut_by_id(current)
-                .ok_or_else(|| NetworkError::new("Quinnet connection disappeared"))?;
+                .ok_or_else(|| NetworkError::transport_message("Quinnet connection disappeared"))?;
+            if let Some(reason) = connection.termination_reason() {
+                return Err(NetworkError::from_transport(reason));
+            }
             match connection.state() {
                 ConnectionState::Connecting => return Ok(()),
                 ConnectionState::Disconnected => {
-                    return Err(NetworkError::new("Quinnet connection closed"));
+                    return Err(NetworkError::transport_end(
+                        connection.termination_reason(),
+                        "Quinnet connection closed without a transport termination cause",
+                    ));
                 }
                 ConnectionState::Connected => {}
             }
@@ -126,7 +140,10 @@ fn run_client(
                     Ok(payload) => payload,
                     Err(mpsc::error::TryRecvError::Empty) => break,
                     Err(mpsc::error::TryRecvError::Disconnected) => {
-                        return Err(NetworkError::new("Quinnet receive worker stopped"));
+                        return Err(NetworkError::transport_end(
+                            connection.termination_reason(),
+                            "Quinnet receive worker stopped without a transport termination cause",
+                        ));
                     }
                 };
                 if let Some(batch) = transport.receive(channel, bytes)? {
@@ -175,7 +192,11 @@ fn run_client(
             })
         })();
         if let Err(error) = step {
-            log::warn!("Quinnet client connection ended: {error}");
+            if error.is_transport() {
+                log_transport_end("client connection", &error);
+            } else {
+                log::warn!("Quinnet client connection ended: {error}");
+            }
             if let Some(current) = id.take() {
                 if let Err(close) = app
                     .world_mut()

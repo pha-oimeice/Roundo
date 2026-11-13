@@ -1,7 +1,7 @@
 //! Host-owned certificate files; Quinnet owns loading and TLS configuration.
 
 use crate::{NetworkError, ServerNetworkConfig};
-use bevy_quinnet::{
+use roundo_quinnet::{
     client::certificate::{
         CertStore, CertVerificationStatus, CertVerifierAction, CertVerifierBehaviour,
         CertificateVerificationMode, KnownHosts, TrustOnFirstUseConfig,

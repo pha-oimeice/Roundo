@@ -19,6 +19,7 @@ members = [
     "src/rust/roundo_user_config",
     "src/rust/game/common/roundo_dsa",
     "src/rust/roundo_networking",
+    "src/rust/roundo_quinnet",
     "src/rust/roundo_game_network_bridge",
     "src/rust/game/client/roundo_rendering",
     "src/rust/game/common/roundo_presence",
@@ -55,23 +56,33 @@ strip = "debuginfo"
 [workspace.dependencies]
 anyhow = "1.0"
 avian3d = "0.8"
-bevy_quinnet = { version = "0.22.0", default-features = false }
+base64 = "0.22.1"
+bincode = { version = "2.0.1", features = ["serde"] }
 bytes = "1"
 bevy = { version = "0.20.1", default-features = false, features = ["bevy_scene", "bevy_state", "bevy_winit", "bevy_render", "bevy_pbr", "bevy_text", "bevy_audio", "bevy_ui_render", "bevy_feathers", "custom_cursor", "complex_script_segmentation", "tonemapping_luts", "zstd_rust", "x11"] }
 crossbeam = "0.8"
 env_logger = "0.11"
+futures = "0.3.24"
 log = "0.4"
 open = "5.4.5"
 postcard = { version = "1.1", features = ["use-std"] }
 rand = "0.10"
 rand_chacha = "0.10"
+quinn = "0.11.5"
+quinn-proto = "0.11.8"
 rcgen = "0.14"
+ring = "0.17.7"
+rustls = { version = "0.23", default-features = false }
+rustls-pemfile = "2"
+rustls-platform-verifier = "0.7"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 schemars = "1"
 sha2 = "0.11"
 sqlx = { version = "0.9", features = ["derive", "json", "macros", "migrate", "postgres", "runtime-tokio", "time", "uuid",] }
+thiserror = "2.0.18"
 tokio = { version = "1", features = ["full"] }
+tokio-util = { version = "0.7.4", features = ["codec"] }
 toml = "1.1"
 toml_edit = { version = "0.25", features = ["serde"] }
 proc-macro2 = "1"
@@ -94,6 +105,7 @@ roundo_items = { path = "src/rust/game/common/roundo_items" }
 roundo_economy = { path = "src/rust/game/common/roundo_economy" }
 roundo_marionette = { path = "src/rust/game/common/roundo_marionette" }
 roundo_networking = {path = "src/rust/roundo_networking" }
+roundo_quinnet = { path = "src/rust/roundo_quinnet", default-features = false }
 roundo_game_network_bridge = { path = "src/rust/roundo_game_network_bridge", default-features = false }
 roundo_rendering = {path = "src/rust/game/client/roundo_rendering" }
 roundo_presence = { path = "src/rust/game/common/roundo_presence" }

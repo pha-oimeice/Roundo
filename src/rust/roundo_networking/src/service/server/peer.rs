@@ -1,6 +1,6 @@
 //! Business admission and callbacks after opaque-byte reconstruction.
 use super::*;
-use bevy_quinnet::server::endpoint::Endpoint;
+use roundo_quinnet::server::endpoint::Endpoint;
 use roundo_contracts::{
     GAME_PROTOCOL_VERSION, ProtocolErrorCode, RESOURCE_PROTOCOL_VERSION, SessionInfo,
 };
@@ -57,6 +57,11 @@ impl Peer {
         registry: &ConnectionRegistry,
         hooks: &Arc<dyn ServerHooks>,
     ) -> Result<bool, NetworkError> {
+        if let Some(reason) = endpoint.connection(client_id)
+            .and_then(|connection| connection.termination_reason())
+        {
+            return Err(NetworkError::from_transport(reason));
+        }
         if let Some(receiver) = self.resolution.as_mut() {
             match receiver.try_recv() {
                 Ok(result) => {
@@ -87,15 +92,18 @@ impl Peer {
             }
         }
         for _ in 0..2 {
-            let received = endpoint
+            let connection = endpoint
                 .connection_mut(client_id)
-                .ok_or_else(|| NetworkError::new("Quinnet peer disappeared"))?
-                .dequeue_undispatched_bytes_from_peer();
+                .ok_or_else(|| NetworkError::transport_message("Quinnet peer disappeared"))?;
+            let received = connection.dequeue_undispatched_bytes_from_peer();
             let (channel, bytes) = match received {
                 Ok(payload) => payload,
                 Err(mpsc::error::TryRecvError::Empty) => break,
                 Err(mpsc::error::TryRecvError::Disconnected) => {
-                    return Err(NetworkError::new("Quinnet peer receive worker stopped"));
+                    return Err(NetworkError::transport_end(
+                        connection.termination_reason(),
+                        "Quinnet peer receive worker stopped without a transport termination cause",
+                    ));
                 }
             };
             if let Some(batch) = self.transport.receive(channel, bytes)? {

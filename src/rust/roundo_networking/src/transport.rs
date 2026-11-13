@@ -1,4 +1,4 @@
-//! Opaque byte transfers over unmodified Quinnet. No game messages or priorities.
+//! Opaque byte transfers over roundo_quinnet. No game messages or priorities.
 //!
 //! One acknowledged transfer per direction bounds submitted application bytes to
 //! 64 KiB per connection, independently of producers' queue capacities. ACK means
@@ -6,7 +6,7 @@
 //! Quinnet owns framing, reliability, TLS and all QUIC scheduling/overhead.
 
 use crate::NetworkError;
-use bevy_quinnet::shared::channels::{ChannelConfig, SendChannelsConfiguration};
+use roundo_quinnet::shared::channels::{ChannelConfig, SendChannelsConfiguration};
 use bytes::Bytes;
 
 pub(crate) const MAX_TRANSFER_BYTES: usize = 64 * 1024;

@@ -5,7 +5,7 @@ edition.workspace = true
 
 [dependencies]
 bevy.workspace = true
-bevy_quinnet = { workspace = true, features = ["client", "server"] }
+roundo_quinnet = { workspace = true, features = ["client", "server"] }
 bytes.workspace = true
 log.workspace = true
 postcard.workspace = true

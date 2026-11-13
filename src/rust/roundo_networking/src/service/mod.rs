@@ -12,14 +12,14 @@ use crate::{
     transport::{self, ByteTransport},
 };
 use bevy::prelude::*;
-use bevy_quinnet::{
+use roundo_quinnet::{
     client::{
         ClientConnectionConfiguration, ClientConnectionConfigurationDefaultables, QuinnetClient,
         QuinnetClientPlugin,
         certificate::{CertStore, CertTrustUpdateEvent},
         connection::{ClientAddrConfiguration, ConnectionState},
     },
-    shared::error::{AsyncChannelError, ConnectionSendError},
+    shared::error::{AsyncChannelError, ConnectionSendError, TransportFailure},
 };
 use roundo_contracts::{
     ClientGameMessage, ClientMessage, ClientResourceMessage, ConnectionId,
@@ -48,17 +48,53 @@ use tokio::sync::mpsc;
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Clone, Debug)]
+enum NetworkErrorKind {
+    Other,
+    Transport(Option<TransportFailure>),
+}
+
+#[derive(Clone, Debug)]
 pub struct NetworkError {
     message: String,
+    kind: NetworkErrorKind,
 }
 impl NetworkError {
     pub(crate) fn new(message: impl Into<String>) -> Self {
         Self {
             message: message.into(),
+            kind: NetworkErrorKind::Other,
         }
     }
     pub(crate) fn from_display(error: impl Display) -> Self {
         Self::new(error.to_string())
+    }
+    pub(crate) fn transport_message(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            kind: NetworkErrorKind::Transport(None),
+        }
+    }
+    pub(crate) fn from_transport(reason: TransportFailure) -> Self {
+        Self {
+            message: reason.to_string(),
+            kind: NetworkErrorKind::Transport(Some(reason)),
+        }
+    }
+    pub(crate) fn transport_end(reason: Option<TransportFailure>, missing: &str) -> Self {
+        match reason {
+            Some(reason) => Self::from_transport(reason),
+            None => Self::transport_message(missing),
+        }
+    }
+    pub(crate) fn is_transport(&self) -> bool {
+        matches!(self.kind, NetworkErrorKind::Transport(_))
+    }
+    /// Returns the original transport cause when one was supplied by the transport.
+    pub fn transport_failure(&self) -> Option<&TransportFailure> {
+        match &self.kind {
+            NetworkErrorKind::Transport(reason) => reason.as_ref(),
+            NetworkErrorKind::Other => None,
+        }
     }
 }
 impl Display for NetworkError {
@@ -66,7 +102,25 @@ impl Display for NetworkError {
         formatter.write_str(&self.message)
     }
 }
-impl StdError for NetworkError {}
+impl StdError for NetworkError {
+    fn source(&self) -> Option<&(dyn StdError + 'static)> {
+        self.transport_failure().map(|reason| reason as &dyn StdError)
+    }
+}
+
+fn log_transport_end(peer: &str, error: &NetworkError) {
+    match error.transport_failure() {
+        Some(reason) if reason.is_local_close() => {
+            log::debug!("transport closed locally: {peer}, reason={error}");
+        }
+        Some(reason) if reason.is_peer_application_close() => {
+            // Preserve the peer's code/reason without claiming that its
+            // application operation succeeded or interpreting unknown codes.
+            log::info!("transport closed by peer application: {peer}, reason={error}");
+        }
+        _ => log::warn!("transport failure: {peer}, error={error}"),
+    }
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum CertificatePolicy {
@@ -268,25 +322,31 @@ fn update_trust(app: &mut App, trusted: &mut CertStore) {
     }
 }
 fn client_send_result(
-    result: Result<(), bevy_quinnet::client::ClientSendError>,
+    result: Result<(), roundo_quinnet::client::ClientSendError>,
 ) -> Result<bool, NetworkError> {
     match result {
         Ok(()) => Ok(true),
-        Err(bevy_quinnet::client::ClientSendError::ConnectionSendError(
+        Err(roundo_quinnet::client::ClientSendError::ConnectionSendError(
             ConnectionSendError::ChannelSendError(AsyncChannelError::FullQueue),
         )) => Ok(false),
-        Err(error) => Err(NetworkError::from_display(error)),
+        Err(roundo_quinnet::client::ClientSendError::ConnectionSendError(
+            ConnectionSendError::ConnectionTerminated(reason),
+        )) => Err(NetworkError::from_transport(reason)),
+        Err(error) => Err(NetworkError::transport_message(error.to_string())),
     }
 }
 fn server_send_result(
-    result: Result<(), bevy_quinnet::server::ServerSendError>,
+    result: Result<(), roundo_quinnet::server::ServerSendError>,
 ) -> Result<bool, NetworkError> {
     match result {
         Ok(()) => Ok(true),
-        Err(bevy_quinnet::server::ServerSendError::ConnectionSendError(
+        Err(roundo_quinnet::server::ServerSendError::ConnectionSendError(
             ConnectionSendError::ChannelSendError(AsyncChannelError::FullQueue),
         )) => Ok(false),
-        Err(error) => Err(NetworkError::from_display(error)),
+        Err(roundo_quinnet::server::ServerSendError::ConnectionSendError(
+            ConnectionSendError::ConnectionTerminated(reason),
+        )) => Err(NetworkError::from_transport(reason)),
+        Err(error) => Err(NetworkError::transport_message(error.to_string())),
     }
 }
 
@@ -318,11 +378,14 @@ pub fn probe_quic_endpoint(
             .world()
             .resource::<QuinnetClient>()
             .get_connection_by_id(id)
-            .map(|c| c.state());
-        if state == Some(ConnectionState::Connected) {
+            .map(|c| (c.state(), c.termination_reason()));
+        if matches!(state, Some((ConnectionState::Connected, _))) {
             result = Some(Ok(started.elapsed()));
-        } else if state == Some(ConnectionState::Disconnected) {
-            result = Some(Err(NetworkError::new("Quinnet probe connection failed")));
+        } else if let Some((ConnectionState::Disconnected, reason)) = state {
+            result = Some(Err(NetworkError::transport_end(
+                reason,
+                "Quinnet probe connection failed without a transport termination cause",
+            )));
         } else if started.elapsed() >= timeout {
             result = Some(Err(NetworkError::new("Quinnet probe timed out")));
         }
