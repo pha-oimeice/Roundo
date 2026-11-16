@@ -39,48 +39,6 @@ unix_scene_command!(UnixSceneResume, SceneResumeDefinition, "scene resume");
 unix_empty_command!(UnixAppQuit, "app.quit", "app quit", AcceptedOutput);
 unix_empty_command!(UnixUiBack, "ui.back", "ui back", EmptyOutput);
 unix_empty_command!(
-    UnixServerList,
-    "server.list",
-    "server list",
-    ServerListOutput
-);
-unix_empty_command!(
-    UnixServerRefresh,
-    "server.refresh",
-    "server refresh",
-    ServerRefreshOutput
-);
-unix_empty_command!(
-    UnixServerRetry,
-    "server.retry",
-    "server retry",
-    ServerStatusOutput
-);
-#[derive(Deserialize, Serialize, JsonSchema, roundo_cli::UnixCommand)]
-#[serde(deny_unknown_fields)]
-#[unix(path = "controller retry-acquire")]
-pub(super) struct UnixControllerRetryAcquire {
-    pub(super) controller_id: String,
-}
-impl CommandDefinition for UnixControllerRetryAcquire {
-    type Input = Self;
-    type Output = ControllerRetryAcquireOutput;
-    const NAME: &'static str = "controller.retry-acquire";
-    const DEV_LEVEL: u8 = 0;
-}
-unix_empty_command!(
-    UnixServerDisconnect,
-    "server.disconnect",
-    "server disconnect",
-    ServerStatusOutput
-);
-unix_empty_command!(
-    UnixServerStatus,
-    "server.status",
-    "server status",
-    ServerStatusOutput
-);
-unix_empty_command!(
     UnixSettingsShow,
     "settings.show",
     "settings show",
@@ -136,77 +94,6 @@ impl CommandDefinition for UnixDev {
     type Input = Self;
     type Output = DevOutput;
     const NAME: &'static str = "dev";
-    const DEV_LEVEL: u8 = 0;
-}
-
-#[derive(Deserialize, Serialize, JsonSchema, roundo_cli::UnixCommand)]
-#[serde(deny_unknown_fields)]
-#[unix(path = "server add")]
-pub(super) struct UnixServerAdd {
-    pub(super) name: String,
-    pub(super) address: String,
-}
-impl CommandDefinition for UnixServerAdd {
-    type Input = Self;
-    type Output = ServerIndexOutput;
-    const NAME: &'static str = "server.add";
-    const DEV_LEVEL: u8 = 0;
-}
-
-pub(super) struct UnixServerEdit;
-impl CommandDefinition for UnixServerEdit {
-    type Input = EmptyArguments;
-    type Output = ServerIndexOutput;
-    const NAME: &'static str = "server.edit";
-    const DEV_LEVEL: u8 = 0;
-}
-impl UnixCommand for UnixServerEdit {
-    const UNIX_PATH: &'static [&'static str] = &["server", "edit"];
-    fn parse_unix(arguments: &[String]) -> Result<serde_json::Value, UnixCommandParseError> {
-        if arguments.len() != 3 {
-            return Err(UnixCommandParseError::new(
-                "usage: server edit <index> <name> <address>",
-            ));
-        }
-        let index = arguments[0]
-            .parse::<usize>()
-            .map_err(|_| UnixCommandParseError::new("invalid argument 1"))?;
-        Ok(serde_json::json!({
-            "index": index,
-            "server": {
-                "name": arguments[1],
-                "address": arguments[2],
-            }
-        }))
-    }
-    fn usage() -> String {
-        "server edit <index> <name> <address>".into()
-    }
-}
-
-#[derive(Deserialize, Serialize, JsonSchema, roundo_cli::UnixCommand)]
-#[serde(deny_unknown_fields)]
-#[unix(path = "server delete")]
-pub(super) struct UnixServerDelete {
-    pub(super) index: usize,
-}
-impl CommandDefinition for UnixServerDelete {
-    type Input = Self;
-    type Output = EmptyOutput;
-    const NAME: &'static str = "server.delete";
-    const DEV_LEVEL: u8 = 0;
-}
-
-#[derive(Deserialize, Serialize, JsonSchema, roundo_cli::UnixCommand)]
-#[serde(deny_unknown_fields)]
-#[unix(path = "server connect")]
-pub(super) struct UnixServerConnect {
-    pub(super) index: usize,
-}
-impl CommandDefinition for UnixServerConnect {
-    type Input = Self;
-    type Output = ServerStatusOutput;
-    const NAME: &'static str = "server.connect";
     const DEV_LEVEL: u8 = 0;
 }
 
@@ -286,16 +173,6 @@ impl Default for ClientUnixAdapter {
         registry.register::<UnixCommandHelp>();
         registry.register::<UnixCommandSchema>();
         registry.register::<UnixDev>();
-        registry.register::<UnixServerList>();
-        registry.register::<UnixServerRefresh>();
-        registry.register::<UnixServerAdd>();
-        registry.register::<UnixServerEdit>();
-        registry.register::<UnixServerDelete>();
-        registry.register::<UnixServerConnect>();
-        registry.register::<UnixServerRetry>();
-        registry.register::<UnixControllerRetryAcquire>();
-        registry.register::<UnixServerDisconnect>();
-        registry.register::<UnixServerStatus>();
         registry.register::<UnixSettingsShow>();
         registry.register::<UnixSettingsSet>();
         registry.register::<UnixBindingsList>();

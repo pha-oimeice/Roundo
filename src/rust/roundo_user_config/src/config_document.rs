@@ -80,53 +80,6 @@ impl ConfigDocument {
         }
     }
 
-    /// An explicit positional edit avoids guessing list identities from names,
-    /// addresses or matching values. Untouched entries retain their own comments.
-    pub fn edit_server(
-        &mut self,
-        index: usize,
-        previous: Option<&crate::ServerEntry>,
-        next: Option<&crate::ServerEntry>,
-    ) -> Result<(), String> {
-        let list = self
-            .document
-            .get_mut("servers")
-            .ok_or_else(|| "missing servers array".to_string())?;
-        let mut entries = sequence_items(list)?;
-        match (previous, next) {
-            (None, Some(next)) if index == entries.len() => {
-                entries.push(Item::Table(
-                    toml_edit::ser::to_document(next)
-                        .map_err(|error| error.to_string())?
-                        .into_table(),
-                ));
-            }
-            (Some(previous), Some(next)) if index < entries.len() => {
-                let before = data(previous)?;
-                let after = data(next)?;
-                let template =
-                    toml_edit::ser::to_document(next).map_err(|error| error.to_string())?;
-                // Read the full raw entry, including unknown fields.
-                let mut wrapper = DocumentMut::new();
-                wrapper.insert("entry", entries[index].clone());
-                let original: Data =
-                    toml::from_str(&wrapper.to_string()).map_err(|error| error.to_string())?;
-                merge_item(
-                    &mut entries[index],
-                    &original["entry"],
-                    &before,
-                    &after,
-                    template.as_item(),
-                )?;
-            }
-            (Some(_), None) if index < entries.len() => {
-                entries.remove(index);
-            }
-            _ => return Err("server list edit does not match the stored array".into()),
-        }
-        replace_sequence(list, entries)
-    }
-
     /// Only annotations are added on reads. Values, including missing fields
     /// supplied by a reader's default, are never copied from the typed projection.
     pub fn save<T: ReadConfig>(mut self) -> Result<(), String> {

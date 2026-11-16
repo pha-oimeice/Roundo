@@ -87,7 +87,7 @@ fn spawn_ui_camera(mut commands: Commands) {
     ));
 }
 fn sync_runtime_settings(
-    config: Res<crate::server_list::ClientConfigStore>,
+    config: Res<crate::config_store::ClientConfigStore>,
     mut input: ResMut<ClientMarionetteInputSettings>,
     mut presence: ResMut<ClientPresenceSettings>,
     mut chunk_view_distance: ResMut<roundo_local_coordinate::ClientChunkViewDistance>,

@@ -2,8 +2,6 @@ title = "Roundo"
 sources = {}
 model = { intro = true }
 on_open = [{ kind = "wait", seconds = 2.4 }, { kind = "set", path = "model.intro", value = false }]
-[shortcuts]
-"roundo.debug" = [{ kind = "command", name = "ui.open", arguments = { import = "debug" } }]
 
 [[nodes]]
 id = "menu"
@@ -14,13 +12,6 @@ id = "title"
 kind = "text"
 text = "ROUNDO"
 style = { font_size = 72.0, color = [244, 247, 251, 255] }
-[[nodes.children]]
-id = "start"
-kind = "button"
-text = "开始"
-visible = { op = "not", value = "$model.intro" }
-style = { width = 260.0 }
-on_activate = [{ kind = "command", name = "ui.open", arguments = { import = "server-selection" } }]
 [[nodes.children]]
 id = "settings"
 kind = "button"

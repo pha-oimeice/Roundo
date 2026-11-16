@@ -1,39 +1,12 @@
 [package]
 name = "roundo_quinnet"
-version = "0.22.0"
-edition = "2021"
-description = "Roundo QUIC transport layer, forked from bevy_quinnet"
+version.workspace = true
+edition.workspace = true
+description = "QUIC endpoints and ordered byte-message infrastructure"
 license = "MIT OR Apache-2.0"
 publish = false
 
-[package.metadata.upstream]
-name = "bevy_quinnet"
-version = "0.22.0"
-repository = "https://github.com/Henauxg/bevy_quinnet"
-revision = "88ccd07589cc215b80b0a4873cd595bb915676bd"
-
-[features]
-# Match the project's existing transport features, including workspace builds.
-default = ["client", "server"]
-client = []
-server = []
-recv_channels = []
-bincode-messages = ["bincode", "serde"]
-
 [dependencies]
-base64.workspace = true
-bevy = { workspace = true, features = ["bevy_log"] }
-bincode = { workspace = true, optional = true }
-bytes.workspace = true
-futures.workspace = true
 quinn.workspace = true
-quinn-proto.workspace = true
-rcgen.workspace = true
-ring.workspace = true
-rustls.workspace = true
-rustls-pemfile.workspace = true
-rustls-platform-verifier.workspace = true
-serde = { workspace = true, optional = true }
 thiserror.workspace = true
 tokio.workspace = true
-tokio-util.workspace = true

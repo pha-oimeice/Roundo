@@ -1,6 +1,5 @@
-//! Derives for command parsing and structural wire-message metadata.
+//! Derives for command parsing.
 //!
-//! Wire derives generate names, classification, and envelope wrapping only.
 //! The command parser handles token classification and scalar `FromStr`
 //! conversion only. Shell expansion, quoting, and escaping remain the terminal
 //! tokenizer's responsibility.
@@ -8,30 +7,6 @@
 use proc_macro::TokenStream;
 use quote::quote;
 use syn::{DeriveInput, LitChar, LitStr, Type, parse_macro_input};
-
-mod wire;
-
-/// Generates diagnostic `kind()`, `ApplicationMessage::CLASS`, and envelope
-/// conversion for an application enum owned by `roundo_contracts`.
-/// Requires `#[wire(envelope = Envelope::Variant, class = TrafficClass::Variant)]`.
-/// Does not alter the enum, its Serde representation, or transport behavior.
-#[proc_macro_derive(WireMessage, attributes(wire))]
-pub fn derive_wire_message(input: TokenStream) -> TokenStream {
-    wire::message(parse_macro_input!(input as DeriveInput))
-        .unwrap_or_else(syn::Error::into_compile_error)
-        .into()
-}
-
-/// Generates `kind()`, `envelope_kind()`, and `stream()` for a contracts envelope.
-/// Every variant must explicitly declare `#[wire(application)]` (one unnamed
-/// payload with WireMessage metadata) or `#[wire(negotiation)]` (no application
-/// stream). No dispatch, validation, serialization, or I/O code is generated.
-#[proc_macro_derive(WireEnvelope, attributes(wire))]
-pub fn derive_wire_envelope(input: TokenStream) -> TokenStream {
-    wire::envelope(parse_macro_input!(input as DeriveInput))
-        .unwrap_or_else(syn::Error::into_compile_error)
-        .into()
-}
 
 // Recognizes the final path segment of simple Option<T>/Vec<T>-style field types.
 fn generic_inner<'a>(ty: &'a Type, container: &str) -> Option<&'a Type> {

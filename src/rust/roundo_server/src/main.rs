@@ -1,9 +1,5 @@
 mod commands;
 mod config;
-mod my_db;
-mod network;
-
-use crate::network::{DatabaseSessionProvider, ServerNetworkRuntime, network_config};
 use log::{debug, info};
 use roundo_cli::RoundoCliPlugin;
 use roundo_ecs_entry::{ServerEcsConfig, ServerEcsRuntime};
@@ -50,9 +46,8 @@ fn main() {
             roundo_mod_manager::ATOMIC_VOXEL_PROTOTYPE_TYPE,
         )
         .expect("Atomic Voxel Resource Type must be published");
-    let resource_fingerprint = roundo_contracts::ResourceCatalogFingerprint(voxels.fingerprint());
     std::sync::LazyLock::force(&config::SERVER_CONFIG);
-    let (mut app, ecs) = ServerEcsRuntime::new(
+    let (mut app, _ecs) = ServerEcsRuntime::new(
         voxels,
         ServerEcsConfig {
             tick_rate: config::SERVER_CONFIG.gameplay.tick_rate,
@@ -67,16 +62,7 @@ fn main() {
             .map_err(|error| format!("{error:#}"))?
             .ok_or_else(|| "未配置宿主预留的 item_ids 区间，不能创建物品".into())
     }));
-    let _network_runtime = ServerNetworkRuntime::start(
-        network_config(),
-        std::sync::Arc::new(DatabaseSessionProvider),
-        ecs.marionette,
-        ecs.presence,
-        ecs.local_coordinate,
-        ecs.player_control,
-        resource_fingerprint,
-    );
-    info!("Server started");
+    info!("Server ECS started without game networking");
     app.add_plugins((RoundoCliPlugin, commands::ServerCommandsPlugin))
         .run();
     debug!("Main thread terminated.");

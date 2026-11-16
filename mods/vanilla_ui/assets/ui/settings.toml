@@ -1,8 +1,6 @@
 title = "设置"
 sources = { settings = "client.settings", bindings = "client.bindings" }
 model = { binding_slot = "", binding_key = "", old_slot = "", old_key = "", editing = false, slot_id = "", slot_name = "", function = "" }
-[shortcuts]
-"roundo.debug" = [{ kind = "command", name = "ui.open", arguments = { import = "debug" } }]
 
 [[nodes]]
 id = "page"

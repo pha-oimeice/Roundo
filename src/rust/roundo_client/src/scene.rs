@@ -4,7 +4,6 @@ mod runtime;
 pub(crate) use runtime::reconcile_scene;
 pub use runtime::{ClientScenePlugin, ClientSceneSystemSet};
 
-use crate::network::ClientConnectionStatus;
 use bevy::{prelude::*, state::state::StateTransition};
 use roundo_scene::{GameplayState, Scene, SceneKind};
 use roundo_ui::{UiCommandSource, UiInstanceId, UiLifecycleError, UiLifecycleManager};
@@ -82,13 +81,9 @@ fn pause_entity(ui: &mut UiLifecycleManager) -> Option<Entity> {
     );
     entities.into_iter().next()
 }
-pub fn synchronize(world: &mut World, status: &ClientConnectionStatus) {
+pub fn synchronize(world: &mut World) {
     UiLifecycleManager::with(world, |ui| {
-        if *status != ClientConnectionStatus::Connected {
-            transition(ui, Scene::Menu);
-        } else if current(ui) == Scene::Menu
-            || (current(ui) == Scene::InGame(GameplayState::Paused) && pause_entity(ui).is_none())
-        {
+        if current(ui) == Scene::InGame(GameplayState::Paused) && pause_entity(ui).is_none() {
             transition(ui, Scene::InGame(GameplayState::Running));
         }
     });

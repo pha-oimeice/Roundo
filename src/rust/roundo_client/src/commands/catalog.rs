@@ -5,26 +5,6 @@ use super::*;
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub(super) struct EmptyArguments {}
-#[derive(Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub(super) struct ServerIndexArguments {
-    pub(super) index: usize,
-}
-#[derive(Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub(super) struct ControllerRetryAcquireArguments {
-    /// Non-empty ASCII decimal text preserves a `ControllerId` across UI and terminal input.
-    pub(super) controller_id: String,
-}
-#[derive(Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub(super) struct DebugArguments {
-    pub(super) operation: roundo_contracts::debug::DebugOperation,
-}
-#[derive(Serialize, JsonSchema)]
-pub(super) struct DebugAcceptedOutput {
-    pub(super) request_id: String,
-}
 
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -53,26 +33,6 @@ pub(super) struct CommandSchemaArguments {
 #[serde(deny_unknown_fields)]
 pub(super) struct DevArguments {
     pub(super) level: Option<u8>,
-}
-#[derive(Clone, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub(super) struct ServerEntryArguments {
-    pub(super) name: String,
-    pub(super) address: String,
-}
-impl From<ServerEntryArguments> for ServerEntry {
-    fn from(value: ServerEntryArguments) -> Self {
-        Self {
-            name: value.name,
-            address: value.address,
-        }
-    }
-}
-#[derive(Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub(super) struct ServerEditArguments {
-    pub(super) index: usize,
-    pub(super) server: ServerEntryArguments,
 }
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -341,63 +301,6 @@ pub(super) struct AcceptedOutput {
     pub(super) status: String,
 }
 #[derive(Serialize, JsonSchema)]
-pub(super) struct ServerEntryDisplay {
-    pub(super) name: String,
-    pub(super) address: String,
-}
-impl From<&ServerEntry> for ServerEntryDisplay {
-    fn from(server: &ServerEntry) -> Self {
-        Self {
-            name: server.name.clone(),
-            address: server.address.clone(),
-        }
-    }
-}
-#[derive(Serialize, JsonSchema)]
-#[serde(tag = "status", rename_all = "snake_case")]
-pub(super) enum ConnectionStatusOutput {
-    Disconnected,
-    Connecting,
-    Connected,
-    Reconnecting,
-    Error { message: String },
-}
-#[derive(Serialize, JsonSchema)]
-pub(super) struct ServerStatusOutput {
-    pub(super) status: ConnectionStatusOutput,
-    pub(super) server: Option<ServerEntryDisplay>,
-}
-#[derive(Serialize, JsonSchema)]
-pub(super) struct ServerRefreshOutput {
-    pub(super) accepted: bool,
-    pub(super) revision: u64,
-}
-#[derive(Serialize, JsonSchema)]
-pub(super) struct ServerIndexOutput {
-    pub(super) index: usize,
-}
-#[derive(Serialize, JsonSchema)]
-pub(super) struct ControllerRetryAcquireOutput {
-    /// Decimal text preserves the full `ControllerId` across JSON adapters.
-    pub(super) controller_id: String,
-    /// Decimal text preserves the full `u128` request correlation value.
-    pub(super) request_id: String,
-    pub(super) state: String,
-}
-/// One lifecycle-owned current-epoch Acquire projection for native UI.
-#[derive(Serialize)]
-pub(super) struct ClientControlStatusEntryOutput {
-    pub(super) controller_id: String,
-    pub(super) request_id: Option<String>,
-    pub(super) state: String,
-    pub(super) retryable: bool,
-}
-/// Read-only complete current-epoch control status collection for native UI.
-#[derive(Serialize)]
-pub(super) struct ClientControlStatusOutput {
-    pub(super) controls: Vec<ClientControlStatusEntryOutput>,
-}
-#[derive(Serialize, JsonSchema)]
 pub(super) struct SettingDisplay {
     pub(super) key: String,
     pub(super) value: f32,
@@ -459,61 +362,6 @@ pub(super) struct HudShowOutput {
 #[derive(Serialize, JsonSchema)]
 pub(super) struct UiOpenOutput {
     pub(super) resource: String,
-}
-
-pub(super) fn server_status_output(
-    snapshot: crate::network::ClientConnectionSnapshot,
-) -> ServerStatusOutput {
-    use crate::network::ClientConnectionStatus;
-    let status = match snapshot.status {
-        ClientConnectionStatus::Disconnected => ConnectionStatusOutput::Disconnected,
-        ClientConnectionStatus::Connecting => ConnectionStatusOutput::Connecting,
-        ClientConnectionStatus::Connected => ConnectionStatusOutput::Connected,
-        ClientConnectionStatus::Reconnecting => ConnectionStatusOutput::Reconnecting,
-        ClientConnectionStatus::Error { message } => ConnectionStatusOutput::Error { message },
-    };
-    ServerStatusOutput {
-        status,
-        server: snapshot.server.as_ref().map(ServerEntryDisplay::from),
-    }
-}
-
-pub(super) fn control_status_output(
-    statuses: impl IntoIterator<Item = roundo_game_network_bridge::ControlAcquireStatus>,
-) -> ClientControlStatusOutput {
-    let controls = statuses
-        .into_iter()
-        .map(|status| {
-            let state = match status.state {
-                roundo_game_network_bridge::ControlAcquireState::Idle => "idle",
-                roundo_game_network_bridge::ControlAcquireState::Pending => "pending",
-                roundo_game_network_bridge::ControlAcquireState::Preparing => "preparing",
-                roundo_game_network_bridge::ControlAcquireState::Active => "active",
-                roundo_game_network_bridge::ControlAcquireState::Failed => "failed",
-            };
-            ClientControlStatusEntryOutput {
-                controller_id: status.controller_id.0.to_string(),
-                request_id: status.request_id.map(|id| id.0.to_string()),
-                state: state.into(),
-                retryable: status.retryable(),
-            }
-        })
-        .collect();
-    ClientControlStatusOutput { controls }
-}
-
-pub(super) fn control_retry_error(
-    error: roundo_game_network_bridge::ControlRetryError,
-) -> roundo_cli::json_command::CommandError {
-    let code = match error {
-        roundo_game_network_bridge::ControlRetryError::StaleSession => "no_active_control_session",
-        roundo_game_network_bridge::ControlRetryError::NotFailed => "control_acquire_not_failed",
-        roundo_game_network_bridge::ControlRetryError::InProgress => "control_request_in_progress",
-        roundo_game_network_bridge::ControlRetryError::Active => "control_already_active",
-        roundo_game_network_bridge::ControlRetryError::Full => "control_request_capacity",
-        roundo_game_network_bridge::ControlRetryError::Initiator(_) => "control_request_failed",
-    };
-    roundo_cli::json_command::CommandError::new(code, format!("{error:?}"))
 }
 
 pub(super) fn settings_show_output(config: &ClientConfigStore) -> SettingsShowOutput {
@@ -699,13 +547,6 @@ definition!(
     0
 );
 definition!(
-    DebugRequestDefinition,
-    DebugArguments,
-    DebugAcceptedOutput,
-    "debug.request",
-    0
-);
-definition!(
     CommandSchemaDefinition,
     CommandSchemaArguments,
     CommandSchemaOutput,
@@ -725,55 +566,6 @@ definition!(
     SettingsSetArguments,
     EmptyOutput,
     "settings.set",
-    0
-);
-definition!(
-    ServerAddDefinition,
-    ServerEntryArguments,
-    ServerIndexOutput,
-    "server.add",
-    0
-);
-definition!(
-    ServerEditDefinition,
-    ServerEditArguments,
-    ServerIndexOutput,
-    "server.edit",
-    0
-);
-definition!(
-    ServerRefreshDefinition,
-    EmptyArguments,
-    ServerRefreshOutput,
-    "server.refresh",
-    0
-);
-definition!(
-    ServerRetryDefinition,
-    EmptyArguments,
-    ServerStatusOutput,
-    "server.retry",
-    0
-);
-definition!(
-    ControllerRetryAcquireDefinition,
-    ControllerRetryAcquireArguments,
-    ControllerRetryAcquireOutput,
-    "controller.retry-acquire",
-    0
-);
-definition!(
-    ServerDisconnectDefinition,
-    EmptyArguments,
-    ServerStatusOutput,
-    "server.disconnect",
-    0
-);
-definition!(
-    ServerStatusDefinition,
-    EmptyArguments,
-    ServerStatusOutput,
-    "server.status",
     0
 );
 definition!(
@@ -861,27 +653,6 @@ definition!(
     0
 );
 definition!(
-    ServerListDefinition,
-    EmptyArguments,
-    ServerListOutput,
-    "server.list",
-    0
-);
-definition!(
-    ServerDeleteDefinition,
-    ServerIndexArguments,
-    EmptyOutput,
-    "server.delete",
-    0
-);
-definition!(
-    ServerConnectDefinition,
-    ServerIndexArguments,
-    ServerStatusOutput,
-    "server.connect",
-    0
-);
-definition!(
     DiagnosticsPositionDefinition,
     EmptyArguments,
     PositionOutput,
@@ -920,17 +691,6 @@ pub(super) const CLIENT_COMMANDS: &[ClientCommandCatalogEntry] = &[
     ClientCommandCatalogEntry::of::<UiBackDefinition>(),
     ClientCommandCatalogEntry::of::<ScenePauseDefinition>(),
     ClientCommandCatalogEntry::of::<SceneResumeDefinition>(),
-    ClientCommandCatalogEntry::of::<DebugRequestDefinition>(),
-    ClientCommandCatalogEntry::of::<ServerListDefinition>(),
-    ClientCommandCatalogEntry::of::<ServerRefreshDefinition>(),
-    ClientCommandCatalogEntry::of::<ServerAddDefinition>(),
-    ClientCommandCatalogEntry::of::<ServerEditDefinition>(),
-    ClientCommandCatalogEntry::of::<ServerDeleteDefinition>(),
-    ClientCommandCatalogEntry::of::<ServerConnectDefinition>(),
-    ClientCommandCatalogEntry::of::<ServerRetryDefinition>(),
-    ClientCommandCatalogEntry::of::<ControllerRetryAcquireDefinition>(),
-    ClientCommandCatalogEntry::of::<ServerDisconnectDefinition>(),
-    ClientCommandCatalogEntry::of::<ServerStatusDefinition>(),
     ClientCommandCatalogEntry::of::<SettingsShowDefinition>(),
     ClientCommandCatalogEntry::of::<SettingsSetDefinition>(),
     ClientCommandCatalogEntry::of::<SlotsListDefinition>(),

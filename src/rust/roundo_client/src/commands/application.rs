@@ -12,7 +12,6 @@ use super::*;
 /// prevents handlers from retaining main-world references.
 pub(super) struct ClientCommandApplication<'a, 'w> {
     pub(super) config: &'a mut ClientConfigStore,
-    pub(super) network: &'a mut crate::network::ClientNetworkManager,
     pub(super) dev_level: &'a mut DevLevel,
     pub(super) camera_position: Option<[f32; 3]>,
     pub(super) ui: Option<&'a mut roundo_ui::UiLifecycleManager<'w>>,
@@ -44,7 +43,6 @@ impl ClientCommandApplication<'_, '_> {
         log::debug!("Executing client command `{command_name}`: {request}");
         let Self {
             config,
-            network,
             dev_level,
             camera_position,
             ui,
@@ -66,7 +64,6 @@ impl ClientCommandApplication<'_, '_> {
         }
 
         let config = RefCell::new(config);
-        let network = RefCell::new(network);
         let dev_level = RefCell::new(dev_level);
         let ui = RefCell::new(ui);
         let execute_scene_intent = |intent| {
@@ -82,97 +79,6 @@ impl ClientCommandApplication<'_, '_> {
         };
         let mut registry = roundo_cli::json_command::CommandRegistry::<CommandEffect>::default();
 
-        // Connection handlers delegate ownership and status transitions to the
-        // network manager; successful start is asynchronous, not peer admission.
-        registry.register_typed::<ServerConnectDefinition>(|input, _| {
-            let config = config.borrow();
-            let mut network = network.borrow_mut();
-            let server = config.server(input.index).map_err(server_list_error)?;
-            let connection = network.start_connection(server);
-            connection.map_err(|error| {
-                roundo_cli::json_command::CommandError::new("connection_failed", error)
-            })?;
-            Ok(server_status_output(network.status()))
-        });
-        registry.register_typed::<ServerRetryDefinition>(|_, _| {
-            let mut network = network.borrow_mut();
-            network.retry().map_err(|error| {
-                roundo_cli::json_command::CommandError::new("no_active_server", error)
-            })?;
-            Ok(server_status_output(network.status()))
-        });
-        registry.register_typed::<ControllerRetryAcquireDefinition>(|input, _| {
-            if input.controller_id.is_empty()
-                || !input
-                    .controller_id
-                    .bytes()
-                    .all(|byte| byte.is_ascii_digit())
-            {
-                return Err(roundo_cli::json_command::CommandError::new(
-                    "invalid_arguments",
-                    "controller_id must be a non-empty ASCII decimal integer",
-                ));
-            }
-            let controller_id = input.controller_id.parse::<u64>().map_err(|_| {
-                roundo_cli::json_command::CommandError::new(
-                    "invalid_arguments",
-                    "controller_id must be an unsigned decimal integer",
-                )
-            })?;
-            let network = network.borrow();
-            let request = network
-                .retry_failed_acquire(roundo_contracts::ControllerId(controller_id))
-                .map_err(control_retry_error)?;
-            Ok(ControllerRetryAcquireOutput {
-                controller_id: request.controller_id.0.to_string(),
-                request_id: request.id.0.to_string(),
-                state: "pending".into(),
-            })
-        });
-        registry.register_typed::<ServerDisconnectDefinition>(|_, _| {
-            let mut network = network.borrow_mut();
-            network.disconnect();
-            Ok(server_status_output(network.status()))
-        });
-        registry.register_typed::<ServerStatusDefinition>(|_, _| {
-            Ok(server_status_output(network.borrow().status()))
-        });
-        registry.register_typed::<ServerRefreshDefinition>(|_, _| {
-            Ok(ServerRefreshOutput {
-                accepted: true,
-                revision: config.borrow().refresh_servers(),
-            })
-        });
-        registry.register_typed::<ServerListDefinition>(|_, _| {
-            Ok(config
-                .borrow()
-                .server_list_snapshot(None)
-                .expect("unconditional snapshot")
-                .data)
-        });
-        // The model owns validation, in-memory changes, probe invalidation and
-        // persistence. Save errors still report failure without rolling back memory.
-        registry.register_typed::<ServerAddDefinition>(|input, _| {
-            let index = config
-                .borrow_mut()
-                .add_server(input.into())
-                .map_err(server_list_error)?;
-            Ok(ServerIndexOutput { index })
-        });
-        registry.register_typed::<ServerEditDefinition>(|input, _| {
-            config
-                .borrow_mut()
-                .edit_server(input.index, input.server.into())
-                .map_err(server_list_error)?;
-            Ok(ServerIndexOutput { index: input.index })
-        });
-        registry.register_typed::<ServerDeleteDefinition>(|input, _| {
-            config
-                .borrow_mut()
-                .delete_server(input.index)
-                .map_err(server_list_error)?;
-            Ok(EmptyOutput {})
-        });
         // Settings mutation follows the same write-through, non-rollback model:
         // normalize memory first, then attempt persistence.
         registry.register_typed::<SettingsShowDefinition>(|_, _| {
@@ -421,15 +327,6 @@ impl ClientCommandApplication<'_, '_> {
                 .map_err(map_ui_lifecycle_error)?;
             Ok(EmptyOutput {})
         });
-        registry.register_typed::<DebugRequestDefinition>(|input, _| {
-            network
-                .borrow()
-                .submit_debug(input.operation)
-                .map(|request_id| DebugAcceptedOutput { request_id })
-                .map_err(|error| {
-                    roundo_cli::json_command::CommandError::new("debug_not_submitted", error)
-                })
-        });
         registry.register_typed::<UiOpenDefinition>(|input, _| {
             let source = ui_source.ok_or_else(|| {
                 roundo_cli::json_command::CommandError::new(
@@ -501,18 +398,4 @@ fn scene_transition_error(
             error.to_string(),
         ),
     }
-}
-
-fn server_list_error(
-    error: crate::server_list::ServerListError,
-) -> roundo_cli::json_command::CommandError {
-    use crate::server_list::ServerListError;
-    let (code, message) = match error {
-        ServerListError::InvalidServer(message) => ("invalid_arguments", message.to_owned()),
-        ServerListError::IndexOutOfRange => {
-            ("index_out_of_range", "server index does not exist".into())
-        }
-        ServerListError::Save(message) => ("config_save_failed", message),
-    };
-    roundo_cli::json_command::CommandError::new(code, message)
 }

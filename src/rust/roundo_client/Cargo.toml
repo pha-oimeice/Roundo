@@ -19,8 +19,6 @@ roundo_ecs_entry = { workspace = true, features = ["client"] }
 roundo_local_coordinate.workspace = true
 roundo_marionette.workspace = true
 roundo_mod_manager.workspace = true
-roundo_networking.workspace = true
-roundo_game_network_bridge = { workspace = true, default-features = false, features = ["client"] }
 roundo_presence.workspace = true
 roundo_rendering.workspace = true
 roundo_toolbox.workspace = true

@@ -1,7 +1,7 @@
 //! Ordered native input, commands, scene navigation and host projection.
 
 use super::{ClientSceneProjection, ClientUiIntent};
-use crate::{commands::ClientCommandSystemSet, network::ClientNetworkManager};
+use crate::commands::ClientCommandSystemSet;
 use bevy::{ecs::message::MessageCursor, prelude::*};
 use roundo_marionette::MarionetteClientSet;
 use roundo_scene::{Scene, SceneKind};
@@ -55,11 +55,9 @@ impl Plugin for ClientScenePlugin {
             );
     }
 }
-/// Also called before each queued command, so a disconnect in the preceding
-/// request revokes its old view sources before the next request is admitted.
+/// Reconciles local Scene ownership before admitting queued UI commands.
 pub(crate) fn reconcile_scene(world: &mut World) -> Result<(), roundo_ui::UiLifecycleError> {
-    let status = world.resource::<ClientNetworkManager>().status().status;
-    super::synchronize(world, &status);
+    super::synchronize(world);
     let target = *world.resource::<State<SceneKind>>().get();
     UiLifecycleManager::with(world, |ui| ui.replace_root(target))
 }
@@ -77,8 +75,7 @@ fn input_intents(world: &mut World, mut cursor: Local<MessageCursor<crate::input
     {
         return;
     }
-    let status = world.resource::<ClientNetworkManager>().status().status;
-    super::synchronize(world, &status);
+    super::synchronize(world);
     UiLifecycleManager::with(world, |ui| {
         if let Err(error) = super::execute(ClientUiIntent::Escape, ui) {
             log::warn!("host UI Escape rejected: {error}");

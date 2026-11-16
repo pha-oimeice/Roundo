@@ -1,5 +1,0 @@
-ca_verification = false
-
-[endpoint]
-host = "127.0.0.1"
-quic_port = 12358

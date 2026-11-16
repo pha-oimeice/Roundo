@@ -77,7 +77,6 @@ pub(crate) struct UiInstance {
     pub model: Value,
     pub error: String,
     pub task: Option<Task>,
-    pub session: Option<Value>,
     observed: BTreeMap<String, Value>,
 }
 #[derive(Component)]
@@ -288,12 +287,6 @@ impl UiLifecycleManager<'_> {
             .ok_or_else(|| UiLifecycleError::Presentation("stacking identity exhausted".into()))?;
         let model = serde_json::to_value(&definition.page.model)
             .map_err(|e| UiLifecycleError::Registry(e.to_string()))?;
-        let session = definition
-            .page
-            .session_source
-            .as_ref()
-            .and_then(|alias| definition.page.sources.get(alias))
-            .map(|name| self.world.resource::<UiData>().snapshot(name)["epoch"].clone());
         let id = self
             .world
             .spawn((
@@ -306,7 +299,6 @@ impl UiLifecycleManager<'_> {
                     model,
                     error: String::new(),
                     task: None,
-                    session,
                     observed: BTreeMap::new(),
                 },
                 ChildOf(parent),
@@ -578,13 +570,6 @@ enum Waiting {
     Command {
         call: RequestCall<Value>,
         save: Option<String>,
-        debug_epoch: Option<Value>,
-    },
-    Debug {
-        request: String,
-        epoch: Value,
-        save: Option<String>,
-        deadline: Instant,
     },
     Timer(Instant),
 }
@@ -638,24 +623,6 @@ pub(crate) fn advance(world: &mut World) {
     for entity in instances {
         let name = world.get::<UiInstance>(entity).unwrap().definition.clone();
         let definition = std::sync::Arc::clone(&world.get::<UiInstance>(entity).unwrap().resource);
-        if let Some(alias) = &definition.page.session_source {
-            let epoch = world
-                .resource::<UiData>()
-                .snapshot(&definition.page.sources[alias])["epoch"]
-                .clone();
-            let changed = world.get::<UiInstance>(entity).unwrap().session.as_ref() != Some(&epoch);
-            if changed {
-                let mut instance = world.get_mut::<UiInstance>(entity).unwrap();
-                instance.model =
-                    serde_json::to_value(&definition.page.model).expect("serializable model");
-                instance.task = None;
-                instance.session = Some(epoch);
-                instance.observed.clear();
-                instance.error = "连接会话已改变；旧选择与草稿已清除。已接受操作的结果可能未知，请重新读取，勿自动重试。".into();
-                drop(instance);
-                crate::view::clear_widget_focus(world, entity);
-            }
-        }
         if world.get::<UiInstance>(entity).unwrap().task.is_none() {
             for (alias, actions) in &definition.page.on_data {
                 let snapshot = world
@@ -717,17 +684,9 @@ fn advance_task(
                 return Ok(false);
             }
             Waiting::Timer(_) => {}
-            Waiting::Command {
-                call,
-                save,
-                debug_epoch,
-            } => match call.poll() {
+            Waiting::Command { call, save } => match call.poll() {
                 ResponsePoll::Pending => {
-                    task.waiting = Some(Waiting::Command {
-                        call,
-                        save,
-                        debug_epoch,
-                    });
+                    task.waiting = Some(Waiting::Command { call, save });
                     return Ok(false);
                 }
                 ResponsePoll::Disconnected => {
@@ -741,29 +700,6 @@ fn advance_task(
                             "{}: {}",
                             response["error"]["code"], response["error"]["message"]
                         ));
-                    }
-                    if let Some(epoch) = debug_epoch {
-                        if world.resource::<UiData>().snapshot("client.debug")["epoch"] != epoch {
-                            return Err("调试连接会话已改变，操作结果未知。".into());
-                        }
-                        let request = response["data"]["request_id"]
-                            .as_str()
-                            .ok_or("debug acceptance omitted request_id")?
-                            .to_owned();
-                        task.waiting = Some(Waiting::Debug {
-                            request,
-                            epoch,
-                            save,
-                            deadline: Instant::now()
-                                + Duration::from_secs_f32(
-                                    world
-                                        .resource::<UiRuntime>()
-                                        .registry
-                                        .theme
-                                        .debug_receipt_timeout_secs,
-                                ),
-                        });
-                        return Ok(false);
                     }
                     task.completed_steps += 1;
                     task.result = response["data"].clone();
@@ -779,56 +715,6 @@ fn advance_task(
                     }
                 }
             },
-            Waiting::Debug {
-                request,
-                epoch,
-                save,
-                deadline,
-            } => {
-                let snapshot = world.resource::<UiData>().snapshot("client.debug");
-                if snapshot["epoch"] != epoch {
-                    return Err("调试连接会话已改变；操作结果未知，请重新读取。".into());
-                }
-                let record = snapshot["requests"]
-                    .as_array()
-                    .ok_or("debug snapshot omitted requests")?
-                    .iter()
-                    .find(|r| r["request_id"] == request);
-                let result = record.map(|r| &r["result"]).filter(|r| !r.is_null());
-                if let Some(result) = result {
-                    if let Some(error) = result.get("Err") {
-                        return Err(format!("{}: {}", error["code"], error["message"]));
-                    }
-                    task.completed_steps += 1;
-                    task.result = result
-                        .get("Ok")
-                        .ok_or("invalid native debug receipt")?
-                        .clone();
-                    if let Some(path) = save {
-                        set_model(
-                            &mut world
-                                .get_mut::<UiInstance>(entity)
-                                .ok_or("view ended")?
-                                .model,
-                            &path,
-                            task.result.clone(),
-                        )?;
-                    }
-                } else {
-                    if Instant::now() >= deadline {
-                        return Err(
-                            "诊断完成回执未送达；操作可能已执行。请刷新核实，勿自动重试。".into(),
-                        );
-                    }
-                    task.waiting = Some(Waiting::Debug {
-                        request,
-                        epoch,
-                        save,
-                        deadline,
-                    });
-                    return Ok(false);
-                }
-            }
         }
     }
     while let Some(action) = task.actions.pop_front() {
@@ -877,28 +763,7 @@ fn advance_task(
                         UiCommandSource::Native(UiInstanceId(entity)),
                     )
                     .map_err(|e| format!("command not queued: {e:?}"))?;
-                task.waiting = Some(Waiting::Command {
-                    call,
-                    save,
-                    debug_epoch: None,
-                });
-                return Ok(false);
-            }
-            Action::Debug { operation, save } => {
-                if definition.page.session_source.is_none() {
-                    return Err("debug action requires a session_source".into());
-                }
-                let epoch = world.resource::<UiData>().snapshot("client.debug")["epoch"].clone();
-                if epoch.is_null() {
-                    return Err("尚未连接到可执行调试操作的会话。".into());
-                }
-                let operation = context.eval(&operation)?;
-                let call = world.resource::<UiRuntime>().io.submit(json!({"version":1,"command":"debug.request","arguments":{"operation":operation}}), UiCommandSource::Native(UiInstanceId(entity))).map_err(|e| format!("debug command not queued: {e:?}"))?;
-                task.waiting = Some(Waiting::Command {
-                    call,
-                    save,
-                    debug_epoch: Some(epoch),
-                });
+                task.waiting = Some(Waiting::Command { call, save });
                 return Ok(false);
             }
         }

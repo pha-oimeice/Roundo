@@ -1,19 +1,14 @@
-//! Versioned wire contracts shared by game domains and network transports.
+//! Shared game-domain data and IPC contracts.
 //!
-//! This crate owns serialized identities, DTOs, logical stream identities, and
-//! protocol versions. It intentionally contains no socket, runtime, TLS, or ECS
-//! implementation so domain modules can depend on contracts without depending
-//! on a particular transport.
-
-// Derives use the same absolute contracts path inside and outside this crate.
-extern crate self as roundo_contracts;
+//! These values are consumed by local domain modules. Application network
+//! envelopes, session negotiation and traffic lanes are deliberately absent.
+//! There is no socket, runtime, TLS, or ECS implementation here.
 
 mod attributes;
 pub mod debug;
 pub mod inventory;
 pub use attributes::{AttributeId, InvalidAttributeId};
 
-use roundo_proc_macros::{WireEnvelope, WireMessage};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 /// Controller handoff DTOs; authority changes require the server's gate and settlement.
@@ -37,39 +32,6 @@ macro_rules! identifier {
         #[repr(transparent)]
         pub struct $name(pub u64);
     };
-}
-
-/// Exact game application version required during session setup.
-/// Version 29 uses priority-batched byte transport and one readiness message.
-pub const GAME_PROTOCOL_VERSION: u16 = 29;
-/// Exact resource application version required during session setup.
-/// Version 6 shares the priority-batched byte transport with game messages.
-pub const RESOURCE_PROTOCOL_VERSION: u16 = 6;
-
-/// Application-side priority lane, unrelated to Quinnet channel or QUIC stream IDs.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
-#[repr(u8)]
-pub enum TrafficClass {
-    Game = 0,
-    Resource = 1,
-}
-
-impl TrafficClass {
-    pub const ALL: [Self; 2] = [Self::Game, Self::Resource];
-
-    pub const fn from_wire(value: u8) -> Option<Self> {
-        match value {
-            0 => Some(Self::Game),
-            1 => Some(Self::Resource),
-            _ => None,
-        }
-    }
-}
-
-/// Business classification for admission and batching, not transport scheduling.
-/// Negotiation envelopes deliberately do not implement this trait.
-pub trait ApplicationMessage {
-    const CLASS: TrafficClass;
 }
 
 identifier!(ConnectionId);
@@ -124,19 +86,6 @@ pub struct VirtualChunkEnvironmentOverride {
     pub kinetic_friction: f32,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
-pub struct UserId(pub i32);
-
-#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
-pub struct SessionId(pub i32);
-
-/// Server-confirmed pairing of a user identity and game-session identity.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
-pub struct UserSession {
-    pub user_id: UserId,
-    pub session_id: SessionId,
-}
-
 /// A Player's authorization level for one Controller.
 ///
 /// The value is a contract-level capability description only. Controller
@@ -147,57 +96,6 @@ pub enum ControllerAccessLevel {
     None,
     Read,
     ReadWrite,
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub enum ProtocolErrorCode {
-    SessionRejected,
-    UnexpectedMessage,
-    UnsupportedProtocolVersion,
-    IncompatibleResources,
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct SessionInfo {
-    pub user_session: UserSession,
-}
-
-/// Digest of the immutable Mod resources whose compact identities cross the
-/// network. Session establishment rejects peers with a different digest.
-#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, Hash, PartialEq, Serialize)]
-pub struct ResourceCatalogFingerprint(pub [u8; 32]);
-
-/// Client-to-server business messages, reconstructed before session dispatch.
-/// Negotiation is ordered on the game lane; application lanes have independent FIFO order.
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize, WireEnvelope)]
-pub enum ClientMessage {
-    #[wire(negotiation)]
-    JoinPublicSession {
-        resource_fingerprint: ResourceCatalogFingerprint,
-    },
-    #[wire(negotiation)]
-    Ready {
-        game_protocol_version: u16,
-        resource_protocol_version: u16,
-    },
-    #[wire(application)]
-    Game(ClientGameMessage),
-    #[wire(application)]
-    Resource(ClientResourceMessage),
-}
-
-/// Server-to-client business messages, reconstructed before session dispatch.
-/// `SessionEstablished` and `Error` are negotiation messages on the game lane.
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize, WireEnvelope)]
-pub enum ServerMessage {
-    #[wire(negotiation)]
-    SessionEstablished { info: SessionInfo },
-    #[wire(negotiation)]
-    Error { code: ProtocolErrorCode },
-    #[wire(application)]
-    Game(ServerGameMessage),
-    #[wire(application)]
-    Resource(ServerResourceMessage),
 }
 
 /// Sequenced controller action; each action domain validates its own sequence.
@@ -468,116 +366,4 @@ pub enum DirectedControllerInput {
     SetGaze(ControllerCommand<SetGazeIntent>),
     Movement3D(ControllerCommand<Movement3DAction>),
     Gaze(ControllerCommand<GazeIntent>),
-}
-
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize, WireMessage)]
-#[wire(envelope = ClientMessage::Game, class = TrafficClass::Game)]
-pub enum ClientGameMessage {
-    Inventory(inventory::InventoryRequest),
-    Debug(debug::DebugRequest),
-    RequestPlayerControllerAccess,
-    AcquireController {
-        controller_id: ControllerId,
-    },
-    ReleaseController {
-        controller_id: ControllerId,
-    },
-    SubmitControllerInput {
-        controller_id: ControllerId,
-        input: DirectedControllerInput,
-    },
-    /// Marks the frozen producer's ordered prefix; does not prove settlement.
-    DrainBarrier(control_handoff::DrainBarrier),
-    /// Requests a ticketed transition; enqueueing does not grant control.
-    ControlRequest(control_handoff::ControlRequest),
-    Ready(control_handoff::Ready),
-    /// Legacy connection-addressed input; not proof of a Controller binding.
-    /// Bound Controller input uses `SubmitControllerInput`.
-    UsePlayerController {
-        command: PlayerControllerCommand,
-    },
-}
-
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize, WireMessage)]
-#[wire(envelope = ClientMessage::Resource, class = TrafficClass::Resource)]
-pub enum ClientResourceMessage {
-    SetChunkViewDistance { chunks: u16 },
-}
-
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize, WireMessage)]
-#[wire(envelope = ServerMessage::Game, class = TrafficClass::Game)]
-pub enum ServerGameMessage {
-    Inventory(inventory::InventoryReply),
-    Debug(debug::DebugReply),
-    PlayerControllerAccessSnapshot {
-        snapshot: PlayerControllerAccessSnapshot,
-    },
-    ControllerOperationRejected {
-        operation: PlayerControllerOperation,
-        error: ControllerOperationError,
-    },
-    ControllerAcquired {
-        controller_id: ControllerId,
-    },
-    ControllerReleased {
-        controller_id: ControllerId,
-    },
-    CreatureMotionSnapshot {
-        snapshot: CreatureMotionSnapshot,
-    },
-    PlayerState {
-        state: PlayerState,
-    },
-    PresenceSnapshot {
-        snapshot: PresenceSnapshot,
-    },
-    /// Requests producer freeze; sending is not proof of cleanup or settlement.
-    Freeze(control_handoff::Freeze),
-    /// Acquire-only invitation; neither a terminal nor a grant.
-    ControlPreparing(control_handoff::ControlPreparing),
-    ControlTerminal(control_handoff::ControlTerminal),
-}
-
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize, WireMessage)]
-#[wire(envelope = ServerMessage::Resource, class = TrafficClass::Resource)]
-pub enum ServerResourceMessage {
-    RenderingAnchorSpawned {
-        anchor: RenderingAnchorState,
-    },
-    RenderingAnchorUpdated {
-        anchor: RenderingAnchorState,
-    },
-    RenderingAnchorDespawned {
-        anchor_id: ChunkLoadingAnchorId,
-    },
-    PredictionAnchorSpawned {
-        anchor: PredictionAnchorState,
-    },
-    PredictionAnchorUpdated {
-        anchor: PredictionAnchorState,
-    },
-    PredictionAnchorDespawned {
-        anchor_id: PredictionAnchorId,
-    },
-    VirtualChunkEnvironmentOverrides {
-        overrides: Vec<VirtualChunkEnvironmentOverride>,
-    },
-    LocalCoordinateSpawned {
-        local_coordinate_id: LocalCoordinateId,
-    },
-    LocalCoordinateDespawned {
-        local_coordinate_id: LocalCoordinateId,
-    },
-    LocalCoordinateChunkVersions {
-        chunks: Vec<ChunkVersion>,
-    },
-    LocalCoordinateChunk {
-        chunk: ChunkVersion,
-        edge_length: u16,
-        svo: SerializedPayload,
-    },
-    LocalCoordinateChunkUnloaded {
-        local_coordinate_id: LocalCoordinateId,
-        coordinate: [i64; 3],
-    },
 }

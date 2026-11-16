@@ -8,7 +8,7 @@ use catalog::*;
 use client_data::*;
 use terminal::*;
 
-use crate::server_list::{ClientConfigStore, ServerListOutput};
+use crate::config_store::ClientConfigStore;
 
 use bevy::{
     app::AppExit,
@@ -24,17 +24,12 @@ use roundo_toolbox::request_response_pipe::{
     CommandTransport, ContextualJsonRequestResponseIo, JsonSubmitError, RequestCall,
     RequestResponsePipe, ResponsePoll,
 };
-use roundo_user_config::{
-    ClientInputBindingConfig, ClientInputKey, ClientInputSlotConfig, ServerEntry,
-};
+use roundo_user_config::{ClientInputBindingConfig, ClientInputKey, ClientInputSlotConfig};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::{cell::RefCell, collections::VecDeque};
 
 const MAX_JSON_COMMANDS_PER_UPDATE: usize = 64;
-const SERVER_LIST_DATA: &str = "client.servers";
-const SERVER_STATUS_DATA: &str = "client.connection";
-const CONTROL_STATUS_DATA: &str = "client.control";
 const SETTINGS_DATA: &str = "client.settings";
 const BINDINGS_DATA: &str = "client.bindings";
 const HUD_DATA: &str = "client.hud";
@@ -259,35 +254,27 @@ fn process_json_commands(world: &mut World) {
             .map(|transform| transform.translation.to_array());
         let quit = {
             world.resource_scope(|world, mut config: Mut<ClientConfigStore>| {
-                world.resource_scope(
-                    |world, mut network: Mut<crate::network::ClientNetworkManager>| {
-                        world.resource_scope(|world, mut dev_level: Mut<DevLevel>| {
-                            world.resource_scope(|world, hud: Mut<HudCache>| {
-                                world.resource_scope(
-                                    |world, input_registry: Mut<InputFunctionRegistry>| {
-                                        let installed =
-                                            roundo_ui::UiLifecycleManager::is_installed(world);
-                                        let mut ui = roundo_ui::UiLifecycleManager { world };
-                                        application::ClientCommandApplication {
-                                            config: &mut config,
-                                            network: &mut network,
-                                            dev_level: &mut dev_level,
-                                            camera_position,
-                                            ui: installed.then_some(&mut ui),
-                                            hud: &hud,
-                                            input_registry: &input_registry,
-                                        }
-                                        .execute(
-                                            transport.command,
-                                            command_transport_source(transport.context),
-                                            reply,
-                                        )
-                                    },
-                                )
-                            })
+                world.resource_scope(|world, mut dev_level: Mut<DevLevel>| {
+                    world.resource_scope(|world, hud: Mut<HudCache>| {
+                        world.resource_scope(|world, input_registry: Mut<InputFunctionRegistry>| {
+                            let installed = roundo_ui::UiLifecycleManager::is_installed(world);
+                            let mut ui = roundo_ui::UiLifecycleManager { world };
+                            application::ClientCommandApplication {
+                                config: &mut config,
+                                dev_level: &mut dev_level,
+                                camera_position,
+                                ui: installed.then_some(&mut ui),
+                                hud: &hud,
+                                input_registry: &input_registry,
+                            }
+                            .execute(
+                                transport.command,
+                                command_transport_source(transport.context),
+                                reply,
+                            )
                         })
-                    },
-                )
+                    })
+                })
             })
         };
         crate::scene::apply_pending_transition(world);
@@ -346,7 +333,7 @@ pub(crate) fn validate_ui_registry(
 ) -> Result<(), String> {
     use roundo_mod_manager::ui::schema::{Action, NodeDef};
     assets.with(|manager| registry.validate_manager(manager))?;
-    fn actions(actions: &[Action], session: bool) -> Result<(), String> {
+    fn actions(actions: &[Action]) -> Result<(), String> {
         for action in actions {
             match action {
                 Action::Command { name, .. }
@@ -354,19 +341,16 @@ pub(crate) fn validate_ui_registry(
                 {
                     return Err(format!("unknown native UI command `{name}`"));
                 }
-                Action::Debug { .. } if !session => {
-                    return Err("debug action requires session_source".into());
-                }
                 _ => {}
             }
         }
         Ok(())
     }
-    fn nodes(definitions: &[NodeDef], session: bool) -> Result<(), String> {
+    fn nodes(definitions: &[NodeDef]) -> Result<(), String> {
         for node in definitions {
-            actions(&node.on_activate, session)?;
-            actions(&node.on_change, session)?;
-            nodes(&node.children, session)?;
+            actions(&node.on_activate)?;
+            actions(&node.on_change)?;
+            nodes(&node.children)?;
         }
         Ok(())
     }
@@ -381,25 +365,13 @@ pub(crate) fn validate_ui_registry(
                         _ => return Err(format!("{name} is not a UI prototype")),
                     };
                     for source in page.sources.values() {
-                        if ![
-                            SERVER_LIST_DATA,
-                            SERVER_STATUS_DATA,
-                            CONTROL_STATUS_DATA,
-                            SETTINGS_DATA,
-                            BINDINGS_DATA,
-                            HUD_DATA,
-                            "client.inventory",
-                            "client.debug",
-                        ]
-                        .contains(&source.as_str())
-                        {
+                        if ![SETTINGS_DATA, BINDINGS_DATA, HUD_DATA].contains(&source.as_str()) {
                             return Err(format!("{}: unknown Client Data source `{source}`", name));
                         }
                     }
-                    let session = page.session_source.is_some();
-                    actions(&page.on_open, session)?;
+                    actions(&page.on_open)?;
                     for watcher in page.on_data.values() {
-                        actions(watcher, session)?;
+                        actions(watcher)?;
                     }
                     for (function, shortcut) in &page.shortcuts {
                         if inputs.function(function).is_none() {
@@ -408,9 +380,9 @@ pub(crate) fn validate_ui_registry(
                                 name
                             ));
                         }
-                        actions(shortcut, session)?;
+                        actions(shortcut)?;
                     }
-                    nodes(&page.nodes, session)?;
+                    nodes(&page.nodes)?;
                     Ok(())
                 })
                 .map_err(|error| error.to_string())?

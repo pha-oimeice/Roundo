@@ -1,9 +1,6 @@
 title = "HUD"
-sources = { hud = "client.hud", controls = "client.control", bindings = "client.bindings" }
+sources = { hud = "client.hud" }
 model = {}
-[shortcuts]
-"roundo.inventory" = [{ kind = "command", name = "ui.open", arguments = { import = "inventory" } }]
-"roundo.debug" = [{ kind = "command", name = "ui.open", arguments = { import = "debug" } }]
 
 [[nodes]]
 id = "hud"
@@ -26,31 +23,6 @@ text = { op = "json", value = "$data.hud.target" }
 visible = { op = "ne", left = "$data.hud.target", right = { op = "null" } }
 style = { position_type = "Absolute", right = 12.0, bottom = 12.0, font_size = 14.0, color = [255, 255, 255, 255] }
 [[nodes.children]]
-id = "hints"
-kind = "column"
-style = { position_type = "Absolute", left = 12.0, bottom = 12.0, row_gap = 8.0, column_gap = 8.0 }
-[[nodes.children.children]]
-id = "inventory"
-kind = "text"
-text = { op = "shortcuts", bindings = "$data.bindings", function = "roundo.inventory" }
-style = { color = [204, 221, 235, 255] }
-[[nodes.children.children]]
-id = "hint-label"
-kind = "text"
-text = "物品栏 · 快捷键可在设置中修改"
-style = { color = [204, 221, 235, 255] }
-[[nodes.children.children]]
-id = "controls"
-kind = "repeat"
-items = "$data.controls.controls"
-alias = "control"
-key = "$control.controller_id"
-[[nodes.children.children.children]]
-id = "control"
-kind = "text"
-text = "Controller ${control.controller_id}: ${control.state}（可在暂停菜单中重试失败的控制器）"
-style = { font_size = 14.0, color = [255, 255, 255, 255] }
-[[nodes.children.children]]
 id = "error"
 kind = "text"
 text = "$error"

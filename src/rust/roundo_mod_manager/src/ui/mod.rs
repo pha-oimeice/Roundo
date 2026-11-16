@@ -59,7 +59,6 @@ pub enum Palette {
 pub struct Theme {
     pub palette: Palette,
     pub font_size: f32,
-    pub debug_receipt_timeout_secs: f32,
 }
 
 /// Asset metadata. Name/owner/type are in its catalogue key, not duplicated here.
@@ -172,7 +171,6 @@ struct ThemeDeclaration {
     palette: Palette,
     font: String,
     font_size: f32,
-    debug_receipt_timeout_secs: f32,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -204,13 +202,9 @@ pub(crate) fn prepare(
             .expect("loader-owned configuration");
         let manifest: RegistryFile = config.decode()?;
         if let Some(theme) = manifest.theme {
-            if !theme.font_size.is_finite()
-                || theme.font_size <= 0.0
-                || !theme.debug_receipt_timeout_secs.is_finite()
-                || theme.debug_receipt_timeout_secs <= 0.0
-            {
+            if !theme.font_size.is_finite() || theme.font_size <= 0.0 {
                 return Err(format!(
-                    "{}: font size and receipt timeout must be positive finite numbers",
+                    "{}: font size must be a positive finite number",
                     config.path.display()
                 ));
             }
@@ -222,7 +216,6 @@ pub(crate) fn prepare(
                     Arc::new(Theme {
                         palette: theme.palette,
                         font_size: theme.font_size,
-                        debug_receipt_timeout_secs: theme.debug_receipt_timeout_secs,
                     }),
                     font,
                 ),

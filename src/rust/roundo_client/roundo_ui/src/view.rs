@@ -188,16 +188,6 @@ pub(crate) fn invalidate_values(world: &mut World, instance: Entity) {
         }
     }
 }
-pub(crate) fn clear_widget_focus(world: &mut World, instance: Entity) {
-    if world
-        .resource::<InputFocus>()
-        .get()
-        .is_some_and(|e| owner(world, e) == Some(instance))
-    {
-        world.resource_mut::<InputFocus>().clear();
-    }
-}
-
 pub(crate) fn ingress(world: &mut World) {
     for edit in std::mem::take(&mut world.resource_mut::<UiEvents>().0) {
         let Some((entity, element)) = element_at(world, edit.entity) else {

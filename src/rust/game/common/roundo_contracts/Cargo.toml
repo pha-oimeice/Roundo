@@ -4,7 +4,6 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
-roundo_proc_macros.workspace = true
 postcard.workspace = true
 schemars.workspace = true
 serde.workspace = true

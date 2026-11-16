@@ -1,2 +1,0 @@
-url = "postgres://postgres:12345678@localhost/roundo"
-pool_size = 10

@@ -11,8 +11,6 @@ pub struct Page {
     pub title: String,
     pub model: BTreeMap<String, Value>,
     pub sources: BTreeMap<String, String>,
-    /// A declared source whose `epoch` invalidates drafts and outstanding actions.
-    pub session_source: Option<String>,
     #[serde(default)]
     pub on_open: Vec<Action>,
     /// Coalesced after a declared source changes; never interrupts an action.
@@ -103,11 +101,6 @@ pub enum Action {
         arguments: Value,
         save: Option<String>,
     },
-    /// Waits for the exact current-epoch native debug receipt, not command admission.
-    Debug {
-        operation: Value,
-        save: Option<String>,
-    },
     Require {
         condition: Value,
         message: String,
@@ -121,11 +114,6 @@ impl Page {
     pub(crate) fn validate(&self) -> Result<(), String> {
         if self.title.trim().is_empty() {
             return Err("page title is empty".into());
-        }
-        if let Some(source) = &self.session_source {
-            if self.sources.get(source).map(String::as_str) != Some("client.debug") {
-                return Err("session_source must alias client.debug".into());
-            }
         }
         for name in self.sources.keys() {
             if !identifier(name) {
@@ -354,10 +342,6 @@ fn validate_action_expressions(
             }
             Action::Command {
                 arguments, save, ..
-            }
-            | Action::Debug {
-                operation: arguments,
-                save,
             } => {
                 if let Some(path) = save {
                     validate_write(path, model)?;
@@ -382,9 +366,6 @@ fn validate_actions(actions: &[Action]) -> Result<(), String> {
         match action {
             Action::Set { path, .. } => validate_model_path(path)?,
             Action::Command {
-                save: Some(path), ..
-            }
-            | Action::Debug {
                 save: Some(path), ..
             } => validate_model_path(path)?,
             Action::Wait { seconds } if !seconds.is_finite() || *seconds < 0.0 => {

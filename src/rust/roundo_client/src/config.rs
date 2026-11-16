@@ -2,7 +2,7 @@
 
 use roundo_marionette::{ClientMarionetteInputSettings, InputFunctionRegistry};
 use roundo_presence::ClientPresenceSettings;
-use roundo_user_config::{ClientConfig, ClientNetworkConfig, ClientSettingsConfig, CommonConfig};
+use roundo_user_config::{ClientConfig, ClientSettingsConfig, CommonConfig};
 use std::{
     path::PathBuf,
     sync::{LazyLock, RwLock},
@@ -14,9 +14,6 @@ static CLIENT_CONFIG: LazyLock<RwLock<ClientConfig>> = LazyLock::new(|| RwLock::
 
 pub fn load_config() -> ClientConfig {
     roundo_user_config::load_client_config()
-}
-pub fn network_config() -> ClientNetworkConfig {
-    read_config().network.clone()
 }
 pub fn mod_path() -> PathBuf {
     COMMON_CONFIG.resolved_mod_path()

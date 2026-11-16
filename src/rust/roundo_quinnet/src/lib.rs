@@ -1,15 +1,15 @@
-#![warn(missing_docs)]
-
-//! Roundo's QUIC transport layer: connections, channels, TLS and byte framing.
+//! QUIC endpoints and ordered, size-bounded byte messages. No game or ECS types.
 //!
-//! Forked from bevy_quinnet 0.22.0: <https://github.com/Henauxg/bevy_quinnet>.
-//! Game protocols and business sessions belong to the calling layer.
+//! Callers own the Tokio runtime and TLS configuration. Each connection lazily
+//! opens one unidirectional stream per direction; messages use a big-endian u32
+//! length prefix. No identities are assigned: `peer_addr` is the current remote
+//! socket address, not an authentication credential or a persistent identity.
 
-/// Client features
-#[cfg(feature = "client")]
-pub mod client;
-/// Server features
-#[cfg(feature = "server")]
-pub mod server;
-/// Shared features between client & server
-pub mod shared;
+mod connection;
+mod endpoint;
+mod error;
+
+pub use connection::{Connection, MessageLimit};
+pub use endpoint::{Client, Server};
+pub use error::Error;
+pub use quinn::{ClientConfig, ConnectionError, ServerConfig, TransportConfig};

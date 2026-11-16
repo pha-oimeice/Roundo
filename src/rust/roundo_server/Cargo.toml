@@ -14,19 +14,16 @@ env_logger.workspace = true
 log.workspace = true
 roundo_cli.workspace = true
 roundo_contracts.workspace = true
-roundo_game_network_bridge = { workspace = true, default-features = false, features = ["server"] }
 roundo_ecs_entry = { workspace = true, features = ["server"] }
 roundo_local_coordinate.workspace = true
 roundo_items.workspace = true
 roundo_mod_manager.workspace = true
-roundo_networking.workspace = true
 roundo_presence.workspace = true
 roundo_toolbox.workspace = true
 roundo_user_config.workspace = true
 schemars.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-sqlx.workspace = true
 
 [features]
 dev = ["roundo_ecs_entry/dev"]

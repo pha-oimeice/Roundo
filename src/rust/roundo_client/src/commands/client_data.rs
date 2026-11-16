@@ -7,7 +7,6 @@ use std::collections::BTreeMap;
 #[derive(Resource, Default)]
 pub(super) struct ClientDataSyncState {
     published_generations: BTreeMap<&'static str, u64>,
-    server_list_revision: Option<u64>,
     hud_elapsed_secs: f32,
 }
 
@@ -33,30 +32,6 @@ impl ClientDataSyncState {
     ) -> bool {
         let generation = sink.data_subscription_generation();
         self.published_generations.get(resource) != Some(&generation)
-    }
-}
-
-/// Processes only the exact source revision whose snapshot is accepted or unchanged.
-/// An unaccepted subscription snapshot remains eligible on the next host update.
-pub(super) fn sync_server_list_data(
-    config: &ClientConfigStore,
-    sync: &mut ClientDataSyncState,
-    sink: &mut roundo_ui::UiData,
-) {
-    if !sink.has_data_subscribers(SERVER_LIST_DATA) {
-        return;
-    }
-    let since = if sync.needs_subscription_snapshot(sink, SERVER_LIST_DATA) {
-        None
-    } else {
-        sync.server_list_revision
-    };
-    let Some(snapshot) = config.server_list_snapshot(since) else {
-        return;
-    };
-    let data = serde_json::to_value(snapshot.data).expect("server list snapshot serializes");
-    if sync.publish_snapshot(sink, SERVER_LIST_DATA, data) {
-        sync.server_list_revision = Some(snapshot.revision);
     }
 }
 
@@ -91,9 +66,7 @@ pub(super) fn update_hud_cache(
 pub(super) fn sync_subscribed_client_data(
     time: Res<Time>,
     config: Res<ClientConfigStore>,
-    network: Res<crate::network::ClientNetworkManager>,
     hud: Res<HudCache>,
-    access: Res<roundo_marionette::ClientPlayerControllerAccess>,
     input_registry: Res<InputFunctionRegistry>,
     mut sync: ResMut<ClientDataSyncState>,
     mut data: Option<ResMut<roundo_ui::UiData>>,
@@ -101,20 +74,9 @@ pub(super) fn sync_subscribed_client_data(
     let Some(data) = data.as_deref_mut() else {
         return;
     };
-    let subscribed = data.has_data_subscribers("client.inventory");
-    let inventory = network.inventory_view(
-        subscribed
-            .then(|| access.active_movement_binding())
-            .flatten(),
-    );
-    if subscribed {
-        let snapshot = serde_json::to_value(inventory).expect("inventory snapshot serializes");
-        sync.publish_snapshot(data, "client.inventory", snapshot);
-    }
     sync_client_data_update(
         time.delta_secs(),
         &config,
-        &network,
         &hud,
         &input_registry,
         &mut sync,
@@ -125,29 +87,11 @@ pub(super) fn sync_subscribed_client_data(
 fn sync_client_data_update(
     delta_secs: f32,
     config: &ClientConfigStore,
-    network: &crate::network::ClientNetworkManager,
     hud: &HudCache,
     input_registry: &InputFunctionRegistry,
     sync: &mut ClientDataSyncState,
     sink: &mut roundo_ui::UiData,
 ) {
-    sync_server_list_data(config, sync, sink);
-    if sink.has_data_subscribers(SERVER_STATUS_DATA) {
-        let snapshot = serde_json::to_value(server_status_output(network.status()))
-            .expect("server status snapshot serializes");
-        sync.publish_snapshot(sink, SERVER_STATUS_DATA, snapshot);
-    }
-    if sink.has_data_subscribers("client.debug") {
-        let snapshot =
-            serde_json::to_value(network.debug_status()).expect("diagnostic status serializes");
-        sync.publish_snapshot(sink, "client.debug", snapshot);
-    }
-    if sink.has_data_subscribers(CONTROL_STATUS_DATA) {
-        let snapshot =
-            serde_json::to_value(control_status_output(network.control_acquire_statuses()))
-                .expect("control status snapshot serializes");
-        sync.publish_snapshot(sink, CONTROL_STATUS_DATA, snapshot);
-    }
     if sink.has_data_subscribers(SETTINGS_DATA) {
         let snapshot = serde_json::to_value(settings_show_output(config))
             .expect("settings snapshot serializes");

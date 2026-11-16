@@ -1,9 +1,8 @@
-//! Persistent client, server, network, database, and gameplay configuration.
+//! Persistent client settings, server gameplay, and shared resource configuration.
 
 mod client_settings;
 mod config_directory;
 mod config_document;
-mod my_impls;
 mod process_config;
 
 pub use client_settings::*;
@@ -50,36 +49,6 @@ impl CommonConfig {
             get_exe_root_path().join(configured)
         }
     }
-}
-
-/// Client endpoint and certificate-verification settings.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct ClientNetworkConfig {
-    pub endpoint: EndpointConfig,
-    pub ca_verification: bool,
-}
-
-/// Server endpoint and certificate-generation settings.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct ServerNetworkConfig {
-    pub endpoint: EndpointConfig,
-    pub certificate_path: String,
-    pub server_alternative_names: Vec<String>,
-    pub generate_self_signed_certificate: bool,
-}
-
-/// Host and QUIC port of one network endpoint.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct EndpointConfig {
-    pub host: String,
-    pub quic_port: u16,
-}
-
-/// PostgreSQL connection and pool-size settings.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct DatabaseConfig {
-    pub url: String,
-    pub pool_size: u32,
 }
 
 /// Server simulation frequency and presence radius.

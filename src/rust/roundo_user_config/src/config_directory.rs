@@ -4,9 +4,8 @@
 use crate::config_document::{ConfigDocument, ReadConfig};
 use crate::{
     ClientCameraSettingsConfig, ClientConfig, ClientControlSettingsConfig,
-    ClientInputBindingConfig, ClientInputSlotConfig, ClientNetworkConfig, ClientSettingsConfig,
-    ClientWorldSettingsConfig, CommonConfig, DatabaseConfig, GameplayConfig, ItemIdentityConfig,
-    ServerConfig, ServerEntry, ServerNetworkConfig,
+    ClientInputBindingConfig, ClientInputSlotConfig, ClientSettingsConfig,
+    ClientWorldSettingsConfig, CommonConfig, GameplayConfig, ItemIdentityConfig, ServerConfig,
 };
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, path::PathBuf};
@@ -24,11 +23,6 @@ struct ProcessConfig {
 }
 
 #[derive(Serialize, Deserialize)]
-struct ServerListConfig {
-    servers: Vec<ServerEntry>,
-}
-
-#[derive(Serialize, Deserialize)]
 struct InputConfig {
     input_slots: BTreeMap<String, ClientInputSlotConfig>,
     input_bindings: Vec<ClientInputBindingConfig>,
@@ -37,12 +31,8 @@ struct InputConfig {
 // Reader-owned declarations. No current field is deprecated; a future reader
 // must opt in by overriding DEPRECATED_FIELDS while still consuming that field.
 impl ReadConfig for ProcessConfig {}
-impl ReadConfig for ServerListConfig {}
 impl ReadConfig for InputConfig {}
 impl ReadConfig for CommonConfig {}
-impl ReadConfig for ClientNetworkConfig {}
-impl ReadConfig for ServerNetworkConfig {}
-impl ReadConfig for DatabaseConfig {}
 impl ReadConfig for GameplayConfig {}
 impl ReadConfig for ItemIdentityConfig {}
 impl ReadConfig for ClientControlSettingsConfig {}
@@ -65,8 +55,6 @@ impl ConfigDirectory {
 
     pub fn load_client(&self) -> Result<ClientConfig, String> {
         let process: ProcessConfig = self.read("client/process.toml")?;
-        let network: ClientNetworkConfig = self.read("client/network.toml")?;
-        let servers: ServerListConfig = self.read("client/servers.toml")?;
         let controls = self.read("client/controls.toml")?;
         let camera = self.read("client/camera.toml")?;
         let world = self.read("client/world.toml")?;
@@ -81,8 +69,6 @@ impl ConfigDirectory {
         settings.normalize();
         Ok(ClientConfig {
             dev_mode: process.dev_mode,
-            network,
-            servers: servers.servers,
             settings,
         })
     }
@@ -91,8 +77,6 @@ impl ConfigDirectory {
         let process: ProcessConfig = self.read("server/process.toml")?;
         Ok(ServerConfig {
             dev_mode: process.dev_mode,
-            network: self.read("server/network.toml")?,
-            database: self.read("server/database.toml")?,
             gameplay: self.read("server/gameplay.toml")?,
             item_ids: self.load_item_identity()?,
         })
@@ -106,34 +90,6 @@ impl ConfigDirectory {
     /// before reading the checkpoint until after this durable replacement.
     pub fn save_item_identity(&self, config: &ItemIdentityConfig) -> Result<(), String> {
         self.write("server/item-ids.toml", config, None)
-    }
-
-    /// Adds, edits or removes one server by its explicit index. `previous` is
-    /// required for edits/removals so external changes cannot select another row.
-    /// An addition uses `previous = None` and the current array length as index.
-    pub fn save_client_server(
-        &self,
-        index: usize,
-        previous: Option<&ServerEntry>,
-        next: Option<&ServerEntry>,
-    ) -> Result<(), String> {
-        let path = self.root.join("client/servers.toml");
-        let mut document = ConfigDocument::open(path.clone())?;
-        let stored: ServerListConfig = document.read()?;
-        let matches = match previous {
-            Some(previous) => stored.servers.get(index) == Some(previous),
-            None => index == stored.servers.len(),
-        };
-        if !matches {
-            return Err(format!(
-                "server list changed in {}; reload before saving",
-                path.display()
-            ));
-        }
-        document
-            .edit_server(index, previous, next)
-            .map_err(|error| format!("cannot edit configuration {}: {error}", path.display()))?;
-        document.save::<ServerListConfig>()
     }
 
     /// Writes only the explicitly edited setting. Other values may have been

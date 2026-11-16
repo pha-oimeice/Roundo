@@ -84,7 +84,7 @@ fn collect_frame(
     keys: Res<ButtonInput<KeyCode>>,
     buttons: Res<ButtonInput<MouseButton>>,
     motion: Res<AccumulatedMouseMotion>,
-    config: Res<crate::server_list::ClientConfigStore>,
+    config: Res<crate::config_store::ClientConfigStore>,
     registry: Res<InputFunctionRegistry>,
     mut captured: ResMut<CapturedInput>,
     mut escape: MessageWriter<ClientEscape>,
@@ -172,7 +172,7 @@ fn collect_frame(
 fn forward_gameplay_input(
     captured: Res<CapturedInput>,
     projection: Res<crate::scene::ClientSceneProjection>,
-    config: Res<crate::server_list::ClientConfigStore>,
+    config: Res<crate::config_store::ClientConfigStore>,
     registry: Res<InputFunctionRegistry>,
     mut previous: Local<BTreeSet<String>>,
     mut frames: MessageWriter<ClientFunctionFrame>,

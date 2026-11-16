@@ -36,14 +36,6 @@ functions = ["roundo.look"]
 display_name = "Spawn Test Creature"
 functions = ["roundo.spawn-test-creature"]
 
-[input_slots.inventory]
-display_name = "物品栏界面"
-functions = ["roundo.inventory"]
-
-[input_slots.debug]
-display_name = "调试界面"
-functions = ["roundo.debug"]
-
 [[input_bindings]]
 slot = "look"
 key = "mouse_motion"
@@ -51,14 +43,6 @@ key = "mouse_motion"
 [[input_bindings]]
 slot = "spawn-test-creature"
 key = "digit1"
-
-[[input_bindings]]
-slot = "inventory"
-key = "key_i"
-
-[[input_bindings]]
-slot = "debug"
-key = "backquote"
 
 [[input_bindings]]
 slot = "roundo.move-up"
