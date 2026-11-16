@@ -2,7 +2,7 @@ use crate::local_coordinate::attributes::LocalCoordinateTransform;
 use bevy::prelude::{Component, Entity, IVec3, Message, Vec3};
 use roundo_contracts::LocalCoordinateId;
 use roundo_dsa::data_structure::tree::{BreadthFirstLosslessSvo, FixedDepthOctree};
-use roundo_mod_loader::ResourceName;
+use roundo_mod_manager::ResourceName;
 use roundo_toolbox::{CRUDRequest, macros::identifier};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};

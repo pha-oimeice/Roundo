@@ -13,6 +13,7 @@ members = [
     "src/rust/game/common/roundo_economy",
     "src/rust/game/roundo_ecs_entry",
     "src/rust/roundo_toolbox",
+    "src/rust/roundo_mod_manager",
     "src/rust/roundo_server",
     "src/rust/roundo_client",
     "src/rust/roundo_cli",
@@ -26,7 +27,6 @@ members = [
     "src/rust/game/common/roundo_portal",
     "src/rust/game/common/roundo_player",
     "src/rust/roundo_client/roundo_ui",
-    "src/rust/game/common/roundo_mod_loader",
     "src/rust/roundo_proc_macros",
 ]
 resolver = "3"
@@ -65,6 +65,7 @@ env_logger = "0.11"
 futures = "0.3.24"
 log = "0.4"
 open = "5.4.5"
+openusd = { git = "https://github.com/mxpv/openusd", rev = "900ea31591348e3fbf416d4661d703aa8700771b" }
 postcard = { version = "1.1", features = ["use-std"] }
 rand = "0.10"
 rand_chacha = "0.10"
@@ -112,7 +113,7 @@ roundo_presence = { path = "src/rust/game/common/roundo_presence" }
 roundo_player = { path = "src/rust/game/common/roundo_player" }
 roundo_portal = { path = "src/rust/game/common/roundo_portal" }
 roundo_local_coordinate = { path = "src/rust/game/common/roundo_local_coordinate" }
-roundo_mod_loader = { path = "src/rust/game/common/roundo_mod_loader" }
+roundo_mod_manager = { path = "src/rust/roundo_mod_manager" }
 roundo_toolbox = { path = "src/rust/roundo_toolbox" }
 roundo_ui = { path = "src/rust/roundo_client/roundo_ui" }
 roundo_user_config = { path = "src/rust/roundo_user_config" }

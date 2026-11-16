@@ -3,7 +3,7 @@
 use crate::{ItemDataError, ItemInstanceId};
 use roundo_dsa::data_structure::resource_access::{AccessError, ModifyAccess, ReadAccess, Shared};
 use roundo_inventory::{InventoryError, ItemId};
-use roundo_mod_loader::ResourceName;
+use roundo_mod_manager::ResourceName;
 use std::{error::Error, fmt};
 
 /// Installation refuses to replace either half of an existing runtime.

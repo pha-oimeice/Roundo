@@ -1,12 +1,12 @@
 //! Immutable Mod-owned item definitions; loading does not create item instances.
 
 use crate::DeclaredItemData;
-use roundo_mod_loader::{LoadedMods, ModId, ResourceName};
+use roundo_mod_manager::{ModId, ModTypeInput, ResourceName};
 use serde::Deserialize;
 use std::{
     collections::BTreeMap,
     error::Error,
-    fmt, fs, io,
+    fmt,
     path::{Path, PathBuf},
 };
 
@@ -34,6 +34,8 @@ pub struct ItemDefinitions {
     entries: BTreeMap<ResourceName, toml::Table>,
 }
 
+impl roundo_mod_manager::ModPrototype for ItemDefinitions {}
+
 impl ItemDefinitions {
     /// Creates an explicitly empty definition directory without filesystem access.
     pub fn empty() -> Self {
@@ -42,41 +44,18 @@ impl ItemDefinitions {
         }
     }
 
-    /// Loads each discovered Mod's optional `game_data/item/registry.toml`.
-    ///
-    /// Only a metadata `NotFound` means no definitions. A present non-file or
-    /// any other metadata/read error is fatal. The candidate directory is
-    /// returned only after every Mod succeeds; this performs no Mod discovery,
-    /// override arbitration, runtime installation or identity issuance.
-    pub fn load(mods: &LoadedMods) -> Result<Self, ItemDefinitionLoadError> {
+    /// Receives ModLoader-parsed item configuration and validates item prototypes.
+    /// This performs no filesystem access, runtime publication or identity issuance.
+    pub fn from_mod_configs(input: &ModTypeInput) -> Result<Self, ItemDefinitionLoadError> {
         let mut definitions = Self::empty();
-        for loaded in mods.iter() {
-            let path = loaded.root.join("game_data/item/registry.toml");
-            let io_error = |error| ItemDefinitionLoadError {
-                owner: loaded.id.clone(),
-                path: path.clone(),
-                kind: ItemDefinitionLoadErrorKind::Io(error),
-            };
-            match fs::metadata(&path) {
-                Ok(metadata) if metadata.is_file() => {}
-                Ok(_) => {
-                    return Err(io_error(io::Error::new(
-                        io::ErrorKind::InvalidInput,
-                        "item registry is not a regular file",
-                    )));
-                }
-                Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
-                Err(error) => return Err(io_error(error)),
-            }
-            // Even NotFound here is fatal: the metadata check found a file.
-            let source = fs::read_to_string(&path).map_err(io_error)?;
-            let candidate = Self::from_registry(&loaded.id, &path, &source)?;
+        for config in input.configs() {
+            let candidate = Self::from_registry(&config.owner, &config.path, config.value.clone())?;
             definitions.entries.extend(candidate.entries);
         }
         Ok(definitions)
     }
 
-    /// Parses one registry from memory. `path` is diagnostic context, not read.
+    /// Decodes one loader-parsed registry table. `path` is diagnostic context, not read.
     ///
     /// Version/name/data are required, except the declaration list may be
     /// omitted. Both structural levels deny unknown fields; business data does
@@ -85,14 +64,15 @@ impl ItemDefinitions {
     pub fn from_registry(
         owner: &ModId,
         path: impl AsRef<Path>,
-        source: &str,
+        source: toml::Table,
     ) -> Result<Self, ItemDefinitionLoadError> {
         let error = |kind| ItemDefinitionLoadError {
             owner: owner.clone(),
             path: path.as_ref().to_path_buf(),
             kind,
         };
-        let registry: RegistryFile = toml::from_str(source)
+        let registry: RegistryFile = source
+            .try_into()
             .map_err(|parse| error(ItemDefinitionLoadErrorKind::Parse(parse)))?;
         if registry.schema_version != 1 {
             return Err(error(
@@ -189,9 +169,7 @@ pub struct ItemDefinitionLoadError {
 /// The precise cause of a definition load failure.
 #[derive(Debug)]
 pub enum ItemDefinitionLoadErrorKind {
-    /// Metadata/read failure, including a present non-file or invalid UTF-8.
-    Io(io::Error),
-    /// TOML syntax/structure failure retaining the parser's original location.
+    /// Typed schema decoding failed. TOML syntax/I/O failures belong to ModLoader.
     Parse(toml::de::Error),
     /// Only schema version 1 is understood.
     UnsupportedSchemaVersion { found: u32 },
@@ -209,7 +187,6 @@ impl fmt::Display for ItemDefinitionLoadError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(formatter, "{} ({}): ", self.owner, self.path.display())?;
         match &self.kind {
-            ItemDefinitionLoadErrorKind::Io(error) => write!(formatter, "{error}"),
             ItemDefinitionLoadErrorKind::Parse(error) => write!(formatter, "{error}"),
             ItemDefinitionLoadErrorKind::UnsupportedSchemaVersion { found } => {
                 write!(formatter, "unsupported schema_version {found} (expected 1)")
@@ -235,7 +212,6 @@ impl fmt::Display for ItemDefinitionLoadError {
 impl Error for ItemDefinitionLoadError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match &self.kind {
-            ItemDefinitionLoadErrorKind::Io(error) => Some(error),
             ItemDefinitionLoadErrorKind::Parse(error) => Some(error),
             _ => None,
         }

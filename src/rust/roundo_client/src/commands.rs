@@ -340,10 +340,12 @@ fn map_ui_lifecycle_error(
 
 /// Validate resource references against the actual client-owned producers/catalog.
 pub(crate) fn validate_ui_registry(
-    registry: &roundo_ui::UiRegistry,
+    registry: &roundo_mod_manager::ui::UiCatalogue,
+    assets: &roundo_mod_manager::AssetAccess,
     inputs: &InputFunctionRegistry,
 ) -> Result<(), String> {
-    use roundo_ui::schema::{Action, NodeDef};
+    use roundo_mod_manager::ui::schema::{Action, NodeDef};
+    assets.with(|manager| registry.validate_manager(manager))?;
     fn actions(actions: &[Action], session: bool) -> Result<(), String> {
         for action in actions {
             match action {
@@ -368,42 +370,51 @@ pub(crate) fn validate_ui_registry(
         }
         Ok(())
     }
-    for resource in registry.resources() {
-        let page = &resource.page;
-        for source in page.sources.values() {
-            if ![
-                SERVER_LIST_DATA,
-                SERVER_STATUS_DATA,
-                CONTROL_STATUS_DATA,
-                SETTINGS_DATA,
-                BINDINGS_DATA,
-                HUD_DATA,
-                "client.inventory",
-                "client.debug",
-            ]
-            .contains(&source.as_str())
-            {
-                return Err(format!(
-                    "{}: unknown Client Data source `{source}`",
-                    resource.name
-                ));
-            }
-        }
-        let session = page.session_source.is_some();
-        actions(&page.on_open, session)?;
-        for watcher in page.on_data.values() {
-            actions(watcher, session)?;
-        }
-        for (function, shortcut) in &page.shortcuts {
-            if inputs.function(function).is_none() {
-                return Err(format!(
-                    "{}: shortcut references unknown input function `{function}`",
-                    resource.name
-                ));
-            }
-            actions(shortcut, session)?;
-        }
-        nodes(&page.nodes, session)?;
+    for name in registry.names() {
+        let key = registry.key(name).expect("UI catalogue identity");
+        assets.with(|assets| -> Result<(), String> {
+            let handle = assets.load(key).map_err(|error| error.to_string())?;
+            assets
+                .read(&handle, |prototype| -> Result<(), String> {
+                    let page = match prototype {
+                        roundo_mod_manager::AssetPrototype::Ui(ui) => &ui.page,
+                        _ => return Err(format!("{name} is not a UI prototype")),
+                    };
+                    for source in page.sources.values() {
+                        if ![
+                            SERVER_LIST_DATA,
+                            SERVER_STATUS_DATA,
+                            CONTROL_STATUS_DATA,
+                            SETTINGS_DATA,
+                            BINDINGS_DATA,
+                            HUD_DATA,
+                            "client.inventory",
+                            "client.debug",
+                        ]
+                        .contains(&source.as_str())
+                        {
+                            return Err(format!("{}: unknown Client Data source `{source}`", name));
+                        }
+                    }
+                    let session = page.session_source.is_some();
+                    actions(&page.on_open, session)?;
+                    for watcher in page.on_data.values() {
+                        actions(watcher, session)?;
+                    }
+                    for (function, shortcut) in &page.shortcuts {
+                        if inputs.function(function).is_none() {
+                            return Err(format!(
+                                "{}: shortcut references unknown input function `{function}`",
+                                name
+                            ));
+                        }
+                        actions(shortcut, session)?;
+                    }
+                    nodes(&page.nodes, session)?;
+                    Ok(())
+                })
+                .map_err(|error| error.to_string())?
+        })?;
     }
     Ok(())
 }

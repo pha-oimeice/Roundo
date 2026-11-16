@@ -13,7 +13,7 @@ use roundo_dsa::data_structure::resource_access::{
     AccessError, Owner, ResourceAccessManager, Shared,
 };
 use roundo_inventory::{Inventories, InventoryError, ItemId};
-use roundo_mod_loader::ResourceName;
+use roundo_mod_manager::ResourceName;
 use std::collections::HashMap;
 
 #[derive(Resource)]

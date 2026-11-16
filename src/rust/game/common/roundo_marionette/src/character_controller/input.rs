@@ -2,13 +2,13 @@
 //! and physical bindings are separate, user-owned configuration resources.
 
 use bevy::prelude::{Message, Resource, Vec2};
-use roundo_mod_loader::{
-    LoadedMods, ResourceCandidate, ResourceName, resolve_candidates, valid_resource_local_name,
+use roundo_mod_manager::{
+    ModTypeInput, ResourceCandidate, ResourceName, resolve_candidates, valid_resource_local_name,
 };
 use serde::Deserialize;
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fmt, fs,
+    fmt,
 };
 
 pub const MOVE_UP_FUNCTION: &str = "roundo.move-up";
@@ -36,25 +36,19 @@ pub struct InputFunctionRegistry {
     functions: BTreeMap<String, ResourceName>,
 }
 
+impl roundo_mod_manager::ModPrototype for InputFunctionRegistry {}
+
 impl InputFunctionRegistry {
-    pub fn load(mods: &LoadedMods) -> Result<Self, InputFunctionRegistryError> {
+    pub fn from_mod_configs(input: &ModTypeInput) -> Result<Self, InputFunctionRegistryError> {
+        let mods = input.mods();
         let mut definitions = BTreeMap::new();
         let mut candidates: BTreeMap<String, Vec<ResourceCandidate<ResourceName>>> =
             BTreeMap::new();
-        for loaded in mods.iter() {
-            let path = loaded.root.join("assets/input/registry.toml");
-            if !path.is_file() {
-                continue;
-            }
-            let source = fs::read_to_string(&path).map_err(|error| {
-                InputFunctionRegistryError(format!("cannot read {}: {error}", path.display()))
-            })?;
-            let registry: RegistryFile = toml::from_str(&source).map_err(|error| {
-                InputFunctionRegistryError(format!(
-                    "invalid function registry {}: {error}",
-                    path.display()
-                ))
-            })?;
+        for config in input.configs() {
+            let loaded = mods
+                .mod_by_id(&config.owner)
+                .expect("loader-owned configuration");
+            let registry: RegistryFile = config.decode().map_err(InputFunctionRegistryError)?;
             let mut local_names = BTreeSet::new();
             for declaration in &registry.resources {
                 if !valid_resource_local_name(&declaration.name)

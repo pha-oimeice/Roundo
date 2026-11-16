@@ -6,9 +6,7 @@ edition.workspace = true
 [dependencies]
 bevy.workspace = true
 log.workspace = true
-roundo_mod_loader.workspace = true
+roundo_mod_manager.workspace = true
 roundo_scene.workspace = true
 roundo_toolbox.workspace = true
-serde.workspace = true
 serde_json.workspace = true
-toml.workspace = true

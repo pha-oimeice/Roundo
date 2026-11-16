@@ -8,15 +8,15 @@ use crate::local_coordinate::data::{
     AtomicVoxelId, EMPTY_VOXEL_ID, GlobalAtomicVoxelData, SOLID_VOXEL_ID,
 };
 use bevy::prelude::Resource;
-use roundo_mod_loader::{
-    LoadedMods, ModId, ResourceCandidate, ResourceName, ResourceReferenceError, resolve_candidates,
-    valid_resource_local_name,
+use roundo_mod_manager::{
+    ModId, ModTypeInput, ResourceCandidate, ResourceName, ResourceReferenceError,
+    resolve_candidates, valid_resource_local_name,
 };
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fmt, fs,
+    fmt,
     path::PathBuf,
 };
 
@@ -37,34 +37,34 @@ pub struct AtomicVoxelRegistry {
     fingerprint: [u8; 32],
 }
 
+impl roundo_mod_manager::ModPrototype for AtomicVoxelRegistry {}
+
 impl AtomicVoxelRegistry {
-    /// Loads `assets/voxel/registry.toml` from every discovered Mod.
+    /// Receives loader-parsed voxel declarations; this module performs no I/O.
     ///
     /// Candidate slots are resolved by override priority and then canonical Mod
     /// ID. The returned registry is published only after every declaration,
     /// reference, compact ID, required slot, and placement constraint validates.
-    /// This performs synchronous filesystem I/O.
+    /// Source discovery and TOML syntax parsing belong to ModLoader.
     ///
     /// # Errors
     ///
-    /// Returns [`AtomicVoxelRegistryError`] for an unreadable or malformed file,
+    /// Returns [`AtomicVoxelRegistryError`] for an invalid typed declaration,
     /// invalid or duplicate identity, unresolved reference, invalid slot, or a
     /// missing/invalid required slot. No partial registry is returned.
-    pub fn load(mods: &LoadedMods) -> Result<Self, AtomicVoxelRegistryError> {
+    pub fn from_mod_configs(input: &ModTypeInput) -> Result<Self, AtomicVoxelRegistryError> {
+        let mods = input.mods();
         let mut definitions: BTreeMap<AtomicVoxelId, GlobalAtomicVoxelData> = BTreeMap::new();
         let mut ids_by_name: BTreeMap<ResourceName, AtomicVoxelId> = BTreeMap::new();
         let mut candidates: BTreeMap<String, Vec<ResourceCandidate<ResourceName>>> =
             BTreeMap::new();
 
-        for loaded in mods.iter() {
-            let path = loaded.root.join("assets/voxel/registry.toml");
-            if !path.is_file() {
-                continue;
-            }
-            let source = fs::read_to_string(&path)
-                .map_err(|error| AtomicVoxelRegistryError::Io(path.clone(), error))?;
-            let registry: RegistryFile = toml::from_str(&source).map_err(|error| {
-                AtomicVoxelRegistryError::InvalidRegistry(path.clone(), error.to_string())
+        for config in input.configs() {
+            let loaded = mods
+                .mod_by_id(&config.owner)
+                .expect("loader-owned configuration");
+            let registry: RegistryFile = config.decode().map_err(|error| {
+                AtomicVoxelRegistryError::InvalidRegistry(config.path.clone(), error)
             })?;
             let mut local_names = BTreeSet::new();
             for declaration in &registry.resources {
@@ -152,7 +152,7 @@ impl AtomicVoxelRegistry {
     ///
     /// It contains one placeable `vanilla.base.stone` voxel under both required
     /// slots. Production composition roots replace this fallback with
-    /// [`Self::load`].
+    /// [`Self::from_mod_configs`].
     pub fn builtin() -> Self {
         let name = ResourceName::new(
             ModId::new("vanilla", "base").expect("built-in Mod ID is valid"),
@@ -276,7 +276,6 @@ fn fingerprint(
 /// Failure encountered before an atomic voxel registry can be published.
 #[derive(Debug)]
 pub enum AtomicVoxelRegistryError {
-    Io(PathBuf, std::io::Error),
     InvalidRegistry(PathBuf, String),
     InvalidLocalName {
         owner: ModId,
@@ -301,7 +300,6 @@ pub enum AtomicVoxelRegistryError {
 impl fmt::Display for AtomicVoxelRegistryError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Io(path, error) => write!(f, "cannot read {}: {error}", path.display()),
             Self::InvalidRegistry(path, error) => {
                 write!(f, "invalid voxel registry {}: {error}", path.display())
             }

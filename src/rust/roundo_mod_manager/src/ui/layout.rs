@@ -28,7 +28,7 @@ fn registry() -> &'static TypeRegistry {
 /// Each field is replaced, not reflect-merged: shrinking track lists must remove
 /// old tracks, and changing a partial rectangle must not retain the previous one.
 /// Unknown fields, wrong types and non-finite lengths are errors.
-pub(crate) fn resolve(base: &Node, fields: &Value) -> Result<Node, String> {
+pub fn resolve(base: &Node, fields: &Value) -> Result<Node, String> {
     let fields = fields
         .as_object()
         .ok_or("native layout must be an object")?;

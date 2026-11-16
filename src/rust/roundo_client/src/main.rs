@@ -31,48 +31,50 @@ fn main() -> bevy::app::AppExit {
     debug!("Hello Roundo Client!");
     let settings = config::settings();
     let mods_root = config::mod_path();
-    let mut resources = roundo_mod_loader::ResourceTypeCatalog::new()
-        .register(
-            roundo_mod_loader::ATOMIC_VOXEL_RESOURCE_TYPE,
-            &[],
-            roundo_local_coordinate::AtomicVoxelRegistry::load,
-        )
-        .register(
-            roundo_mod_loader::UI_RESOURCE_TYPE,
-            &[],
-            roundo_ui::UiRegistry::load,
-        )
-        .register(
-            roundo_mod_loader::INPUT_RESOURCE_TYPE,
-            &[],
-            roundo_marionette::InputFunctionRegistry::load,
-        )
-        .load(
-            &mods_root,
-            &[
-                roundo_mod_loader::ATOMIC_VOXEL_RESOURCE_TYPE,
-                roundo_mod_loader::UI_RESOURCE_TYPE,
-                roundo_mod_loader::INPUT_RESOURCE_TYPE,
-            ],
-        )
-        .unwrap_or_else(|error| {
-            panic!(
-                "cannot load Mod Resource Types from {}: {error}",
-                mods_root.display()
+    let mut resources =
+        roundo_mod_manager::ModLoader::new(roundo_mod_manager::AssetLimits::default())
+            .register_prototype(
+                roundo_mod_manager::ATOMIC_VOXEL_PROTOTYPE_TYPE,
+                &[],
+                roundo_local_coordinate::AtomicVoxelRegistry::from_mod_configs,
             )
-        });
+            .with_ui()
+            .register_prototype(
+                roundo_mod_manager::INPUT_PROTOTYPE_TYPE,
+                &[],
+                roundo_marionette::InputFunctionRegistry::from_mod_configs,
+            )
+            .initialize(
+                &mods_root,
+                &[
+                    roundo_mod_manager::ATOMIC_VOXEL_PROTOTYPE_TYPE,
+                    roundo_mod_manager::UI_PROTOTYPE_TYPE,
+                    roundo_mod_manager::INPUT_PROTOTYPE_TYPE,
+                ],
+            )
+            .unwrap_or_else(|error| {
+                panic!(
+                    "cannot load Mod Resource Types from {}: {error}",
+                    mods_root.display()
+                )
+            });
     let voxels = resources
-        .take::<roundo_local_coordinate::AtomicVoxelRegistry>(
-            roundo_mod_loader::ATOMIC_VOXEL_RESOURCE_TYPE,
+        .take_prototype::<roundo_local_coordinate::AtomicVoxelRegistry>(
+            roundo_mod_manager::ATOMIC_VOXEL_PROTOTYPE_TYPE,
         )
         .expect("Atomic Voxel Resource Type must be published");
-    let ui_registry = resources
-        .take::<roundo_ui::UiRegistry>(roundo_mod_loader::UI_RESOURCE_TYPE)
-        .expect("native UI Resource Type must be published");
+    let assets = resources.assets();
+    let ui_catalogue = resources
+        .take_prototype::<roundo_mod_manager::ui::UiCatalogue>(
+            roundo_mod_manager::UI_PROTOTYPE_TYPE,
+        )
+        .expect("native UI prototypes must be published");
     let input_registry = resources
-        .take::<roundo_marionette::InputFunctionRegistry>(roundo_mod_loader::INPUT_RESOURCE_TYPE)
-        .expect("Input Resource Type must be published");
-    commands::validate_ui_registry(&ui_registry, &input_registry)
+        .take_prototype::<roundo_marionette::InputFunctionRegistry>(
+            roundo_mod_manager::INPUT_PROTOTYPE_TYPE,
+        )
+        .expect("Input prototypes must be published");
+    commands::validate_ui_registry(&ui_catalogue, &assets, &input_registry)
         .unwrap_or_else(|error| panic!("invalid native UI command/data binding: {error}"));
     config::validate_input_configuration(&settings, &input_registry)
         .unwrap_or_else(|error| panic!("invalid configured input binding: {error}"));
@@ -107,7 +109,7 @@ fn main() -> bevy::app::AppExit {
             RoundoCliPlugin,
             commands::ClientCommandsPlugin,
             targeting::ClientVoxelTargetingPlugin,
-            roundo_ui::RoundoUiPlugin::new(ui_registry, command_io),
+            roundo_ui::RoundoUiPlugin::new(ui_catalogue, assets, command_io),
             input::ClientInputPlugin,
             scene::ClientScenePlugin,
             ui_host::ClientUiHostPlugin,

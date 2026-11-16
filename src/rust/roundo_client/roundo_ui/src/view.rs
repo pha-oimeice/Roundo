@@ -325,19 +325,12 @@ pub(crate) fn project(world: &mut World) {
         if !state.visible {
             continue;
         }
-        let definition = world
-            .resource::<UiRuntime>()
-            .registry
-            .resource(&state.definition)
-            .unwrap()
-            .clone();
+        let name = state.definition.clone();
+        let definition = Arc::clone(&state.resource);
         if let Err(error) = reconcile(world, instance, view, &definition) {
             // A broken schema/data contract must not leave an apparently working
             // interactive surface accepting arbitrary operations.
-            log::error!(
-                "native UI projection failed for {}: {error}",
-                definition.name
-            );
+            log::error!("native UI projection failed for {}: {error}", name);
             world.write_message(bevy::app::AppExit::error());
         }
     }

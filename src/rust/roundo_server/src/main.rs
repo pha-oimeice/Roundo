@@ -28,22 +28,26 @@ fn main() {
     // Load the one installation-wide configuration shared with the client.
     std::sync::LazyLock::force(&config::COMMON_CONFIG);
     let mods_root = config::COMMON_CONFIG.resolved_mod_path();
-    let mut resources = roundo_mod_loader::ResourceTypeCatalog::new()
-        .register(
-            roundo_mod_loader::ATOMIC_VOXEL_RESOURCE_TYPE,
-            &[],
-            roundo_local_coordinate::AtomicVoxelRegistry::load,
-        )
-        .load(&mods_root, &[roundo_mod_loader::ATOMIC_VOXEL_RESOURCE_TYPE])
-        .unwrap_or_else(|error| {
-            panic!(
-                "cannot load Mod Resource Types from {}: {error}",
-                mods_root.display()
+    let mut resources =
+        roundo_mod_manager::ModLoader::new(roundo_mod_manager::AssetLimits::default())
+            .register_prototype(
+                roundo_mod_manager::ATOMIC_VOXEL_PROTOTYPE_TYPE,
+                &[],
+                roundo_local_coordinate::AtomicVoxelRegistry::from_mod_configs,
             )
-        });
+            .initialize(
+                &mods_root,
+                &[roundo_mod_manager::ATOMIC_VOXEL_PROTOTYPE_TYPE],
+            )
+            .unwrap_or_else(|error| {
+                panic!(
+                    "cannot load Mod Resource Types from {}: {error}",
+                    mods_root.display()
+                )
+            });
     let voxels = resources
-        .take::<roundo_local_coordinate::AtomicVoxelRegistry>(
-            roundo_mod_loader::ATOMIC_VOXEL_RESOURCE_TYPE,
+        .take_prototype::<roundo_local_coordinate::AtomicVoxelRegistry>(
+            roundo_mod_manager::ATOMIC_VOXEL_PROTOTYPE_TYPE,
         )
         .expect("Atomic Voxel Resource Type must be published");
     let resource_fingerprint = roundo_contracts::ResourceCatalogFingerprint(voxels.fingerprint());

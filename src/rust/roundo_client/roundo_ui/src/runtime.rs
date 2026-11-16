@@ -69,6 +69,8 @@ impl std::error::Error for UiLifecycleError {}
 #[derive(Component)]
 pub(crate) struct UiInstance {
     pub definition: String,
+    // Materialized instance data, never registered with ModManager.
+    pub resource: std::sync::Arc<UiResource>,
     pub root_ui: bool,
     pub visible: bool,
     pub z: i32,
@@ -132,7 +134,7 @@ impl UiLifecycleManager<'_> {
     pub fn with<R>(world: &mut World, f: impl FnOnce(&mut UiLifecycleManager<'_>) -> R) -> R {
         f(&mut UiLifecycleManager { world })
     }
-    pub fn registry(&self) -> &UiRegistry {
+    pub(crate) fn registry(&self) -> &UiRegistry {
         &self.world.resource::<UiRuntime>().registry
     }
     pub fn root_entity(&self) -> Entity {
@@ -236,8 +238,8 @@ impl UiLifecycleManager<'_> {
     }
     pub fn resolve_slot(&self, slot: &str) -> Result<UiOpenTarget, UiLifecycleError> {
         self.registry()
-            .slot(slot)
-            .map(|r| UiOpenTarget(r.name.clone()))
+            .slot_name(slot)
+            .map(|name| UiOpenTarget(name.to_owned()))
             .ok_or_else(|| UiLifecycleError::Registry(format!("unknown slot {slot}")))
     }
     pub fn navigate(
@@ -273,11 +275,11 @@ impl UiLifecycleManager<'_> {
         name: &str,
         root_ui: bool,
     ) -> Result<UiInstanceId, UiLifecycleError> {
-        let definition = self
-            .registry()
-            .resource(name)
-            .ok_or_else(|| UiLifecycleError::Registry(name.into()))?
-            .clone();
+        let definition = std::sync::Arc::new(
+            self.registry()
+                .materialize(name)
+                .map_err(UiLifecycleError::Registry)?,
+        );
         let z = self
             .world
             .resource::<UiRuntime>()
@@ -297,6 +299,7 @@ impl UiLifecycleManager<'_> {
             .spawn((
                 UiInstance {
                     definition: name.into(),
+                    resource: std::sync::Arc::clone(&definition),
                     root_ui,
                     visible: true,
                     z,
@@ -418,14 +421,7 @@ impl UiLifecycleManager<'_> {
         let Some(instance) = self.world.get::<UiInstance>(target.0) else {
             return;
         };
-        let actions = self
-            .registry()
-            .resource(&instance.definition)
-            .unwrap()
-            .page
-            .shortcuts
-            .get(function)
-            .cloned();
+        let actions = instance.resource.page.shortcuts.get(function).cloned();
         if let Some(actions) = actions {
             start_task(self.world, target.0, actions, BTreeMap::new(), Value::Null);
         }
@@ -521,9 +517,10 @@ impl UiLifecycleManager<'_> {
         let mut counts = BTreeMap::new();
         for e in &instances {
             for source in self
-                .registry()
-                .resource(&self.world.get::<UiInstance>(*e).unwrap().definition)
+                .world
+                .get::<UiInstance>(*e)
                 .unwrap()
+                .resource
                 .page
                 .sources
                 .values()
@@ -640,12 +637,7 @@ pub(crate) fn advance(world: &mut World) {
         .collect::<Vec<_>>();
     for entity in instances {
         let name = world.get::<UiInstance>(entity).unwrap().definition.clone();
-        let definition = world
-            .resource::<UiRuntime>()
-            .registry
-            .resource(&name)
-            .unwrap()
-            .clone();
+        let definition = std::sync::Arc::clone(&world.get::<UiInstance>(entity).unwrap().resource);
         if let Some(alias) = &definition.page.session_source {
             let epoch = world
                 .resource::<UiData>()

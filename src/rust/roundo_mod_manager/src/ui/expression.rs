@@ -4,7 +4,7 @@
 use serde_json::{Map, Value, json};
 use std::collections::BTreeMap;
 
-pub(crate) struct Context<'a> {
+pub struct Context<'a> {
     pub model: &'a Value,
     pub data: &'a Value,
     pub locals: &'a BTreeMap<String, Value>,
@@ -360,7 +360,7 @@ pub(crate) fn validate(
                 let mut roots = roots.clone();
                 if matches!(op, "options" | "any") && key != "items" {
                     let alias = o["alias"].as_str().ok_or("options alias must be text")?;
-                    if !crate::schema::identifier(alias) || !roots.insert(alias.into()) {
+                    if !super::schema::identifier(alias) || !roots.insert(alias.into()) {
                         return Err(format!("invalid/shadowed options alias {alias}"));
                     }
                 }
@@ -392,21 +392,21 @@ fn validate_path(path: &str, roots: &std::collections::BTreeSet<String>) -> Resu
     Ok(())
 }
 
-pub(crate) fn text(value: &Value) -> String {
+pub fn text(value: &Value) -> String {
     match value {
         Value::Null => String::new(),
         Value::String(s) => s.clone(),
         value => value.to_string(),
     }
 }
-pub(crate) fn boolean(value: &Value) -> Result<bool, String> {
+pub fn boolean(value: &Value) -> Result<bool, String> {
     match value {
         Value::Null => Ok(false),
         Value::Bool(b) => Ok(*b),
         _ => Err("expected boolean UI expression".into()),
     }
 }
-pub(crate) fn set_model(model: &mut Value, path: &str, value: Value) -> Result<(), String> {
+pub fn set_model(model: &mut Value, path: &str, value: Value) -> Result<(), String> {
     super::schema::validate_model_path(path)?;
     let mut segments = path[6..].split('.').peekable();
     let mut target = model;

@@ -276,7 +276,7 @@ fn validate_nodes(nodes: &[NodeDef]) -> Result<(), String> {
             ));
         }
         if let Some(style) = &node.style {
-            crate::layout::validate(&style.node)
+            super::layout::validate(&style.node)
                 .map_err(|error| format!("{}: {error}", node.id))?;
             if style
                 .font_size
@@ -312,11 +312,11 @@ fn validate_expressions(
         .into_iter()
         .flatten()
         {
-            crate::expression::validate(expr, roots)?;
+            super::expression::validate(expr, roots)?;
         }
         if let Some(style) = &node.style {
             for value in style.node.values() {
-                crate::expression::validate(value, roots)?;
+                super::expression::validate(value, roots)?;
             }
         }
         if let Some(bind) = &node.bind {
@@ -331,7 +331,7 @@ fn validate_expressions(
                 return Err(format!("repeat alias shadows expression root {alias}"));
             }
             roots.insert("index".into());
-            crate::expression::validate(node.key.as_ref().unwrap(), &roots)?;
+            super::expression::validate(node.key.as_ref().unwrap(), &roots)?;
         }
         validate_expressions(&node.children, &roots, model)?;
     }
@@ -339,7 +339,7 @@ fn validate_expressions(
 }
 fn validate_write(path: &str, model: &Value) -> Result<(), String> {
     let mut model = model.clone();
-    crate::expression::set_model(&mut model, path, Value::Null)
+    super::expression::set_model(&mut model, path, Value::Null)
 }
 fn validate_action_expressions(
     actions: &[Action],
@@ -350,7 +350,7 @@ fn validate_action_expressions(
         match action {
             Action::Set { path, value } => {
                 validate_write(path, model)?;
-                crate::expression::validate(value, roots)?;
+                super::expression::validate(value, roots)?;
             }
             Action::Command {
                 arguments, save, ..
@@ -362,9 +362,9 @@ fn validate_action_expressions(
                 if let Some(path) = save {
                     validate_write(path, model)?;
                 }
-                crate::expression::validate(arguments, roots)?;
+                super::expression::validate(arguments, roots)?;
             }
-            Action::Require { condition, .. } => crate::expression::validate(condition, roots)?,
+            Action::Require { condition, .. } => super::expression::validate(condition, roots)?,
             Action::Wait { .. } => {}
         }
     }

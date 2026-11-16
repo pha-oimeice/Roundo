@@ -1,16 +1,8 @@
 //! Deterministic discovery and validation of Mods installed below `mods/`.
 //!
-//! This crate deliberately knows nothing about a particular asset type. Asset
+//! This discovery/identity module does not interpret asset payloads. Asset
 //! importers use [`LoadedMods`] for validated ownership/dependency information
 //! and [`resolve_candidates`] for the common override rule.
-
-mod resource_types;
-
-pub use resource_types::{
-    ATOMIC_VOXEL_RESOURCE_TYPE, INPUT_RESOURCE_TYPE, ITEM_RESOURCE_TYPE, LoadedResourceTypes,
-    ResourceTypeCatalog, ResourceTypeId, ResourceTypeLoadError, ResourceTypeLoadErrors,
-    UI_RESOURCE_TYPE,
-};
 
 use serde::Deserialize;
 use std::{
@@ -95,7 +87,7 @@ impl fmt::Display for ResourceName {
 #[derive(Clone, Debug)]
 pub struct LoadedMod {
     pub id: ModId,
-    pub root: PathBuf,
+    pub(crate) root: PathBuf,
     pub dependencies: BTreeSet<ModId>,
     pub override_priority: i32,
 }
@@ -111,7 +103,7 @@ impl LoadedMods {
     /// contains a regular `manifest.toml` file; other directories are ignored.
     /// Once a manifest is present, malformed manifests remain fatal rather than
     /// silently selecting a partial Mod set.
-    pub fn discover(root: impl AsRef<Path>) -> Result<Self, LoadError> {
+    pub(crate) fn discover(root: impl AsRef<Path>) -> Result<Self, LoadError> {
         let root = root.as_ref();
         let mut raw = BTreeMap::new();
         if !root.exists() {
@@ -134,8 +126,14 @@ impl LoadedMods {
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
                 Err(error) => return Err(LoadError::Io(manifest_path, error)),
             }
-            let text = fs::read_to_string(&manifest_path)
+            let bytes = crate::source::read_file(&manifest_path)
                 .map_err(|e| LoadError::Io(manifest_path.clone(), e))?;
+            let text = String::from_utf8(bytes).map_err(|error| {
+                LoadError::Io(
+                    manifest_path.clone(),
+                    std::io::Error::new(std::io::ErrorKind::InvalidData, error),
+                )
+            })?;
             let manifest: ModManifest = toml::from_str(&text)
                 .map_err(|e| LoadError::Manifest(manifest_path, e.to_string()))?;
             let id = ModId::new(&manifest.general.author, &manifest.general.mod_name)?;

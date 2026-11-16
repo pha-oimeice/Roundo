@@ -1,16 +1,15 @@
 //! Mod-driven TOML views rendered exclusively by Bevy native UI and Feather widgets.
 //! Business commands remain client-owned; no browser, scripting engine or remote ECS endpoint.
 
-mod expression;
-mod layout;
+use roundo_mod_manager::AssetAccess;
+use roundo_mod_manager::ui::{UiCatalogue, expression, layout, schema};
 mod registry;
 mod runtime;
-pub mod schema;
 mod view;
 
-pub use registry::{
-    ClientInteractionMode, IN_GAME_ROOT_SLOT, MENU_ROOT_SLOT, UiRegistry, UiResource,
-};
+use registry::UiRegistry;
+pub use registry::UiResource;
+pub use roundo_mod_manager::ui::{ClientInteractionMode, IN_GAME_ROOT_SLOT, MENU_ROOT_SLOT};
 pub use runtime::{
     UiCommandIo, UiCommandSource, UiData, UiInstanceId, UiLifecycleError, UiLifecycleManager,
     UiOpenTarget,
@@ -36,9 +35,9 @@ pub struct RoundoUiPlugin {
     command_io: UiCommandIo,
 }
 impl RoundoUiPlugin {
-    pub fn new(registry: UiRegistry, command_io: UiCommandIo) -> Self {
+    pub fn new(catalogue: UiCatalogue, assets: AssetAccess, command_io: UiCommandIo) -> Self {
         Self {
-            registry,
+            registry: UiRegistry::new(catalogue, assets),
             command_io,
         }
     }
@@ -54,7 +53,9 @@ impl Plugin for RoundoUiPlugin {
         let font = app
             .world_mut()
             .resource_mut::<Assets<Font>>()
-            .add(Font::from_bytes(self.registry.font.clone()));
+            .add(Font::from_bytes(
+                self.registry.font().expect("load native UI font prototype"),
+            ));
         let root = app
             .world_mut()
             .spawn_scene(roundo_scene::scene_root(roundo_scene::SceneKind::Menu))
