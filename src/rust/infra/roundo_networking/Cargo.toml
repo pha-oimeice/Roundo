@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+roundo_networking_derive.workspace = true
 roundo_quinnet.workspace = true
 postcard.workspace = true
 serde.workspace = true

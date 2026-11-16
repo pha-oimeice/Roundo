@@ -4,8 +4,17 @@
 //! Both endpoints must agree on their send/receive Rust schemas. The host owns
 //! the Tokio runtime, TLS policy, message limit, and all application semantics.
 
+extern crate self as roundo_networking;
+
 use serde::{Serialize, de::DeserializeOwned};
 use std::{marker::PhantomData, net::SocketAddr};
+
+pub use roundo_networking_derive::NetworkData;
+
+// Generated implementations resolve Serde through this crate, so consumers do
+// not need a direct Serde dependency just to derive NetworkData.
+#[doc(hidden)]
+pub use serde as __serde;
 
 pub use roundo_quinnet::{
     ClientConfig, ConnectionError, MessageLimit, ServerConfig, TransportConfig,
