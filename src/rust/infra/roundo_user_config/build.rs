@@ -4,9 +4,9 @@
 use std::{fs, io, path::Path};
 
 fn main() {
-    println!("cargo:rerun-if-changed=../../../config");
+    println!("cargo:rerun-if-changed=../../../../config");
     let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let source = manifest.join("../../../config");
+    let source = manifest.join("../../../../config");
     let output = std::env::var_os("OUT_DIR").expect("OUT_DIR is unavailable");
     let profile = Path::new(&output)
         .ancestors()
