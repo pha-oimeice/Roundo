@@ -3,6 +3,7 @@ pub mod bridge_runtime;
 pub mod fs;
 pub mod macros;
 pub mod request_response_pipe;
+pub mod id_generator;
 mod templates;
 mod traits;
 

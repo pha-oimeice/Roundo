@@ -12,7 +12,7 @@ pub use roundo_quinnet::{
 };
 
 #[derive(Debug, thiserror::Error)]
-pub enum Error {
+pub enum TransportationLayerError {
     #[error(transparent)]
     Transport(#[from] roundo_quinnet::Error),
     #[error("message codec failed: {0}")]
@@ -27,11 +27,11 @@ pub enum Error {
 pub struct Client(roundo_quinnet::Client);
 
 impl Client {
-    pub fn bind(address: SocketAddr, config: ClientConfig) -> Result<Self, Error> {
+    pub fn bind(address: SocketAddr, config: ClientConfig) -> Result<Self, TransportationLayerError> {
         Ok(Self(roundo_quinnet::Client::bind(address, config)?))
     }
 
-    pub fn local_addr(&self) -> Result<SocketAddr, Error> {
+    pub fn local_addr(&self) -> Result<SocketAddr, TransportationLayerError> {
         Ok(self.0.local_addr()?)
     }
 
@@ -40,7 +40,7 @@ impl Client {
         address: SocketAddr,
         server_name: &str,
         limit: MessageLimit,
-    ) -> Result<Connection<Send, Receive>, Error> {
+    ) -> Result<Connection<Send, Receive>, TransportationLayerError> {
         Ok(Connection::new(
             self.0.connect(address, server_name, limit).await?,
         ))
@@ -57,18 +57,18 @@ impl Client {
 pub struct Server(roundo_quinnet::Server);
 
 impl Server {
-    pub fn bind(address: SocketAddr, config: ServerConfig) -> Result<Self, Error> {
+    pub fn bind(address: SocketAddr, config: ServerConfig) -> Result<Self, TransportationLayerError> {
         Ok(Self(roundo_quinnet::Server::bind(address, config)?))
     }
 
-    pub fn local_addr(&self) -> Result<SocketAddr, Error> {
+    pub fn local_addr(&self) -> Result<SocketAddr, TransportationLayerError> {
         Ok(self.0.local_addr()?)
     }
 
     pub async fn accept<Send, Receive>(
         &self,
         limit: MessageLimit,
-    ) -> Result<Option<Connection<Send, Receive>>, Error> {
+    ) -> Result<Option<Connection<Send, Receive>>, TransportationLayerError> {
         Ok(self.0.accept(limit).await?.map(Connection::new))
     }
 
@@ -132,13 +132,13 @@ impl<Send, Receive> Connection<Send, Receive> {
         self.transport.peer_addr()
     }
 
-    pub fn local_addr(&self) -> Result<SocketAddr, Error> {
+    pub fn local_addr(&self) -> Result<SocketAddr, TransportationLayerError> {
         Ok(self.transport.local_addr()?)
     }
 
     /// Serializes by reference, without an intermediate business DTO. Success
     /// means QUIC submission, not remote deserialization or application commit.
-    pub async fn send(&self, message: &Send) -> Result<(), Error>
+    pub async fn send(&self, message: &Send) -> Result<(), TransportationLayerError>
     where
         Send: Serialize,
     {
@@ -155,18 +155,18 @@ impl<Send, Receive> Connection<Send, Receive> {
     /// Decodes one complete message. Codec failures and trailing bytes close
     /// the connection rather than being treated as missing application data.
     /// Cancellation while awaiting bytes is safe; the transport retains progress.
-    pub async fn receive(&self) -> Result<Receive, Error>
+    pub async fn receive(&self) -> Result<Receive, TransportationLayerError>
     where
         Receive: DeserializeOwned,
     {
         let bytes = self.transport.receive().await?;
         let result = postcard::take_from_bytes(&bytes)
-            .map_err(Error::Codec)
+            .map_err(TransportationLayerError::Codec)
             .and_then(|(message, rest)| {
                 if rest.is_empty() {
                     Ok(message)
                 } else {
-                    Err(Error::TrailingBytes)
+                    Err(TransportationLayerError::TrailingBytes)
                 }
             });
         if result.is_err() {

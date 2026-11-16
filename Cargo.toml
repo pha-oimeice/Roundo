@@ -59,6 +59,7 @@ bevy = { version = "0.20.1", default-features = false, features = ["bevy_scene",
 crossbeam = "0.8"
 env_logger = "0.11"
 log = "0.4"
+num-traits = "0.2"
 open = "5.4.5"
 openusd = { git = "https://github.com/mxpv/openusd", rev = "900ea31591348e3fbf416d4661d703aa8700771b" }
 postcard = { version = "1.1", features = ["use-std"] }
