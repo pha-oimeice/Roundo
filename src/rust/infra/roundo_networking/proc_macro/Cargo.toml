@@ -1,5 +1,5 @@
 [package]
-name = "roundo_networking_derive"
+name = "roundo_networking_proc_macro"
 version.workspace = true
 edition.workspace = true
 

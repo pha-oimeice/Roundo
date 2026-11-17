@@ -20,7 +20,7 @@ members = [
     "src/rust/infra/roundo_user_config",
     "src/rust/infra/roundo_dsa",
     "src/rust/infra/roundo_networking",
-    "src/rust/infra/roundo_networking/roundo_networking_derive",
+    "src/rust/infra/roundo_networking/proc_macro",
     "src/rust/infra/roundo_quinnet",
     "src/rust/game/client/roundo_rendering",
     "src/rust/game/common/roundo_presence",
@@ -72,7 +72,7 @@ serde_json = "1"
 schemars = "1"
 sha2 = "0.11"
 thiserror = "2.0.18"
-tokio = { version = "1", features = ["sync"] }
+tokio = { version = "1", features = ["sync", "rt"] }
 toml = "1.1"
 toml_edit = { version = "0.25", features = ["serde"] }
 proc-macro2 = "1"
@@ -93,7 +93,7 @@ roundo_inventory = { path = "src/rust/game/common/roundo_inventory" }
 roundo_items = { path = "src/rust/game/common/roundo_items" }
 roundo_economy = { path = "src/rust/game/common/roundo_economy" }
 roundo_marionette = { path = "src/rust/game/common/roundo_marionette" }
-roundo_networking_derive = { path = "src/rust/infra/roundo_networking/roundo_networking_derive" }
+roundo_networking_proc_macro = { path = "src/rust/infra/roundo_networking/proc_macro" }
 roundo_quinnet = { path = "src/rust/infra/roundo_quinnet" }
 roundo_rendering = {path = "src/rust/game/client/roundo_rendering" }
 roundo_presence = { path = "src/rust/game/common/roundo_presence" }

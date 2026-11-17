@@ -1,4 +1,4 @@
-//! Serde implementations for structs and enums sent through `roundo_networking`.
+//! DataTransferObject derive for structs and enums sent through `roundo_networking`.
 
 use proc_macro::TokenStream;
 use proc_macro2::Span;
@@ -8,7 +8,8 @@ use syn::{
     visit_mut::{self, VisitMut},
 };
 
-/// Implements Serde `Serialize` and `Deserialize` for a struct or enum without
+/// Implements the `DataTransferObject` marker and Serde `Serialize` and `Deserialize`
+/// for a struct or enum without
 /// requiring a direct Serde dependency. Do not also derive those traits on the
 /// same type.
 ///
@@ -21,8 +22,8 @@ use syn::{
 /// Unions are rejected. Enum variants use Serde's externally tagged encoding;
 /// Postcard transmits their declaration-order index followed by their fields,
 /// not their Rust discriminant values. Peers must agree on variant order.
-#[proc_macro_derive(NetworkData)]
-pub fn derive_network_data(input: TokenStream) -> TokenStream {
+#[proc_macro_derive(DataTransferObject)]
+pub fn derive_data_transfer_object(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
     match expand(input) {
         Ok(tokens) => tokens.into(),
@@ -34,12 +35,12 @@ fn expand(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
     if matches!(input.data, syn::Data::Union(_)) {
         return Err(syn::Error::new_spanned(
             &input.ident,
-            "NetworkData requires a struct or enum; unions are not supported",
+            "DataTransferObject requires a struct or enum; unions are not supported",
         ));
     }
 
     let name = &input.ident;
-    let helper = format_ident!("__NetworkDataFor{}", name);
+    let helper = format_ident!("__DataTransferObjectFor{}", name);
     let remote = LitStr::new(&name.to_string(), name.span());
     let (_, ty_generics, _) = input.generics.split_for_impl();
     let mut definition = input.clone();
@@ -60,7 +61,7 @@ fn expand(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
         )]),
     ];
     // Attributes belonging to unrelated derives must not be copied to the
-    // private Serde mirror. NetworkData has no field or variant options.
+    // private Serde mirror. DataTransferObject has no field or variant options.
     match &mut definition.data {
         syn::Data::Struct(data) => {
             for field in &mut data.fields {
@@ -81,9 +82,9 @@ fn expand(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
         syn::Data::Union(_) => unreachable!("unions are rejected before generating the mirror"),
     }
 
-    let serializer = fresh_ident(&input.generics, "__NetworkDataSerializer");
-    let deserializer = fresh_ident(&input.generics, "__NetworkDataDeserializer");
-    let de_name = fresh_ident(&input.generics, "__network_data_de");
+    let serializer = fresh_ident(&input.generics, "__DataTransferObjectSerializer");
+    let deserializer = fresh_ident(&input.generics, "__DataTransferObjectDeserializer");
+    let de_name = fresh_ident(&input.generics, "__data_transfer_object_de");
     let de = Lifetime::new(&format!("'{de_name}"), Span::call_site());
 
     let mut serialize_generics = input.generics.clone();
@@ -127,6 +128,11 @@ fn expand(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
                     #helper::serialize(self, serializer)
                 }
             }
+
+            #[automatically_derived]
+            impl #ser_impl ::roundo_networking::DataTransferObject
+                for #name #ty_generics #ser_where
+            {}
 
             #[automatically_derived]
             impl #de_impl ::roundo_networking::__serde::Deserialize<#de>

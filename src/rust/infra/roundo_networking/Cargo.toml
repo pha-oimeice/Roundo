@@ -4,8 +4,12 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
-roundo_networking_derive.workspace = true
-roundo_quinnet.workspace = true
+bevy.workspace = true
+crossbeam.workspace = true
 postcard.workspace = true
+roundo_networking_proc_macro.workspace = true
+roundo_quinnet.workspace = true
+roundo_toolbox.workspace = true
 serde.workspace = true
 thiserror.workspace = true
+tokio.workspace = true

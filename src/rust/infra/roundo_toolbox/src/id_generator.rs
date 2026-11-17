@@ -1,31 +1,39 @@
+//! Integer identity allocation with an explicit starting value.
+
 use num_traits::PrimInt;
 
-struct IdGenerator<T: Id> {
-    id_gc: Vec<T>,
-    next_id: T,
-}
-
-/// Integer-valued IDs with a type-defined successor operation.
+/// Allocates recycled identities first, then monotonically increasing integers.
 ///
-/// `PrimInt` supplies total ordering, integer arithmetic, `one()` and checked
-/// arithmetic. `Default` is a type constraint, not a generator starting value.
-trait Id: PrimInt + Default {
-    /// Computes a successor using the implementation's explicit overflow policy.
-    /// No default increment or wrapping behavior is provided here.
-    fn get_next(current_value: Self) -> Self;
+/// The caller owns the rules for recycling: the generator cannot determine
+/// whether external references to an identity are still alive. No starting
+/// value, wrapping policy, or automatic recycling is inferred.
+#[derive(Debug)]
+pub struct IdGenerator<T: PrimInt> {
+    recycled: Vec<T>,
+    next_id: Option<T>,
 }
 
-impl<T: Id> IdGenerator<T> {
-    pub fn get_next(&mut self) -> T {
-        if let Some(temp) = self.id_gc.pop() {
-            return temp;
+impl<T: PrimInt> IdGenerator<T> {
+    pub fn new(first: T) -> Self {
+        Self {
+            recycled: Vec::new(),
+            next_id: Some(first),
         }
-        let temp = self.next_id;
-        self.next_id = Id::get_next(temp);
-
-        temp
     }
+
+    /// Returns `None` after the integer range and recycled pool are exhausted.
+    pub fn get_next(&mut self) -> Option<T> {
+        if let Some(value) = self.recycled.pop() {
+            return Some(value);
+        }
+        let value = self.next_id?;
+        self.next_id = value.checked_add(&T::one());
+        Some(value)
+    }
+
+    /// Makes an identity available again. Call only after retiring every use of
+    /// the previous allocation; duplicate recycling can issue duplicate IDs.
     pub fn recycle(&mut self, value: T) {
-        self.id_gc.push(value);
+        self.recycled.push(value);
     }
 }
