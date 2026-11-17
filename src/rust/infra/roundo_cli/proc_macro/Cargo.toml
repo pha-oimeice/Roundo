@@ -1,5 +1,5 @@
 [package]
-name = "roundo_proc_macros"
+name = "roundo_cli_proc_macro"
 version.workspace = true
 edition.workspace = true
 

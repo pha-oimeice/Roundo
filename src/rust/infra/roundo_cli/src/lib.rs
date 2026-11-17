@@ -18,7 +18,7 @@ pub use json_command::{
     CommandDefinition, CommandEnvelope, CommandError, CommandRegistry, CommandResult, UnixCommand,
     UnixCommandParseError, UnixCommandRegistry,
 };
-pub use roundo_proc_macros::UnixCommand;
+pub use roundo_cli_proc_macro::UnixCommand;
 
 const MAX_COMMANDS_PER_UPDATE: usize = 32;
 

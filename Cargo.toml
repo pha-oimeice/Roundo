@@ -27,7 +27,7 @@ members = [
     "src/rust/game/common/roundo_portal",
     "src/rust/game/common/roundo_player",
     "src/rust/roundo_client/roundo_ui",
-    "src/rust/infra/roundo_proc_macros",
+    "src/rust/infra/roundo_cli/proc_macro",
 ]
 resolver = "3"
 
@@ -78,7 +78,7 @@ toml_edit = { version = "0.25", features = ["serde"] }
 proc-macro2 = "1"
 quote = "1"
 syn = { version = "2", features = ["full", "visit-mut"] }
-roundo_proc_macros = { path = "src/rust/infra/roundo_proc_macros" }
+roundo_cli_proc_macro = { path = "src/rust/infra/roundo_cli/proc_macro" }
 # ---
 roundo_dsa = {path = "src/rust/infra/roundo_dsa" }
 roundo_block_interaction = { path = "src/rust/game/common/roundo_block_interaction" }

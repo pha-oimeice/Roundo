@@ -8,4 +8,4 @@ bevy.workspace = true
 schemars.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-roundo_proc_macros.workspace = true
+roundo_cli_proc_macro.workspace = true
