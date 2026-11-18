@@ -12,9 +12,8 @@
 //! first ID. Attach an already handshaken SyncConnection to Network; endpoint,
 //! TLS, runtime and transport message-limit configuration remain host-owned.
 //!
-//! Plugin systems participate in FixedUpdate without forcing an order between
-//! reception, business systems and flushing. NetworkSystems labels and public
-//! system functions let the host express that order later. FixedFirst only
+//! In FixedUpdate, Receive runs before Flush. The host can order business
+//! systems relative to either set using NetworkSystems. FixedFirst only
 //! counts the enclosing Bevy fixed cycles; it is not another network clock.
 //! sync_* encodes before returning and never waits for network I/O. Each call
 //! supplies Option<Deadline>: None omits the time-based trigger, while Some
@@ -27,7 +26,7 @@ use crate::{BatchPolicy, Network};
 use bevy::prelude::{App, FixedFirst, FixedUpdate, IntoScheduleConfigs, Plugin, ResMut, SystemSet};
 use tokio::runtime::Handle;
 
-/// Ordering labels only: no before/after relationship is imposed by the Plugin.
+/// FixedUpdate system sets, ordered by NetworkPlugin as Receive then Flush.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, SystemSet)]
 pub enum NetworkSystems {
     Receive,
@@ -70,6 +69,10 @@ impl Plugin for NetworkPlugin {
         network.policy = self.policy;
         app.insert_resource(network)
             .add_systems(FixedFirst, advance_network_fixed_tick)
+            .configure_sets(
+                FixedUpdate,
+                NetworkSystems::Receive.before(NetworkSystems::Flush),
+            )
             .add_systems(
                 FixedUpdate,
                 (
