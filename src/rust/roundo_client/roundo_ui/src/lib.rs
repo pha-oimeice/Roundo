@@ -9,7 +9,7 @@ mod view;
 
 use registry::UiRegistry;
 pub use registry::UiResource;
-pub use roundo_mod_manager::ui::{ClientInteractionMode, IN_GAME_ROOT_SLOT, MENU_ROOT_SLOT};
+pub use roundo_mod_manager::ui::{ClientInteractionMode, MENU_ROOT_SLOT};
 pub use runtime::{
     UiCommandIo, UiCommandSource, UiData, UiInstanceId, UiLifecycleError, UiLifecycleManager,
     UiOpenTarget,
@@ -29,6 +29,9 @@ pub enum UiSystemSet {
 }
 #[derive(Resource)]
 pub struct UiReady;
+
+#[derive(Component, Clone, Copy)]
+struct UiRoot;
 
 pub struct RoundoUiPlugin {
     registry: UiRegistry,
@@ -58,8 +61,8 @@ impl Plugin for RoundoUiPlugin {
             ));
         let root = app
             .world_mut()
-            .spawn_scene(roundo_scene::scene_root(roundo_scene::SceneKind::Menu))
-            .expect("native scene root")
+            .spawn_scene(bsn! { ~{UiRoot} })
+            .expect("native UI root")
             .id();
         app.insert_resource(UiRuntime {
             registry: self.registry.clone(),
@@ -83,7 +86,7 @@ impl Plugin for RoundoUiPlugin {
     }
 }
 fn initialize(world: &mut World) {
-    UiLifecycleManager::with(world, |ui| ui.replace_root(roundo_scene::SceneKind::Menu))
+    UiLifecycleManager::with(world, |ui| ui.mount_menu())
         .unwrap_or_else(|error| panic!("cannot instantiate native menu: {error}"));
     for mut window in world
         .query_filtered::<&mut Window, With<bevy::window::PrimaryWindow>>()

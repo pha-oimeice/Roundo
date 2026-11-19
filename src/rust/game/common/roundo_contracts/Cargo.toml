@@ -1,9 +1,0 @@
-[package]
-name = "roundo_contracts"
-version.workspace = true
-edition.workspace = true
-
-[dependencies]
-postcard.workspace = true
-schemars.workspace = true
-serde.workspace = true

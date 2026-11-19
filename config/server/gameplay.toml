@@ -1,2 +1,3 @@
 tick_rate = 20
+# Required by the shared configuration loader; not used by the standalone runtime.
 presence_radius = 128.0

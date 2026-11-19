@@ -23,14 +23,6 @@ name = "move-backward"
 display_name = "Move Backward"
 
 [[resource]]
-name = "spirit-camera"
-display_name = "Spirit Camera"
-
-[[resource]]
-name = "spawn-test-creature"
-display_name = "Spawn Test Creature"
-
-[[resource]]
 name = "look"
 display_name = "视角"
 
@@ -41,6 +33,4 @@ display_name = "视角"
 "roundo.move-right" = "move-right"
 "roundo.move-forward" = "move-forward"
 "roundo.move-backward" = "move-backward"
-"roundo.spirit-camera" = "spirit-camera"
 "roundo.look" = "look"
-"roundo.spawn-test-creature" = "spawn-test-creature"

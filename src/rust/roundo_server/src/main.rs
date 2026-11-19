@@ -47,22 +47,21 @@ fn main() {
         )
         .expect("Atomic Voxel Resource Type must be published");
     std::sync::LazyLock::force(&config::SERVER_CONFIG);
-    let (mut app, _ecs) = ServerEcsRuntime::new(
+    let mut app = ServerEcsRuntime::new(
         voxels,
         ServerEcsConfig {
             tick_rate: config::SERVER_CONFIG.gameplay.tick_rate,
-            presence_radius: config::SERVER_CONFIG.gameplay.presence_radius,
         },
     )
-    .into_parts();
+    .into_app();
     // Install explicit diagnostic issuance only. Startup creates no item and
     // does not reserve or advance the persistent identity cursor.
-    app.insert_resource(roundo_ecs_entry::DebugItemIssuer::new(|| {
+    app.insert_resource(roundo_ecs_entry::debug::DebugItemIssuer::new(|| {
         config::reserve_item_identity()
             .map_err(|error| format!("{error:#}"))?
             .ok_or_else(|| "未配置宿主预留的 item_ids 区间，不能创建物品".into())
     }));
-    info!("Server ECS started without game networking");
+    info!("Standalone server ECS started");
     app.add_plugins((RoundoCliPlugin, commands::ServerCommandsPlugin))
         .run();
     debug!("Main thread terminated.");

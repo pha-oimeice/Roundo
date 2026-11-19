@@ -1,7 +1,7 @@
-//! Composes one fixed-tick authoritative ECS server and its bound IPC endpoints.
+//! Composes one fixed-tick authoritative ECS server as an independent World.
 
 use crate::{
-    authoritative_creature::AuthoritativeCreaturePlugin, player_control::PlayerControlServerPlugin,
+    authoritative_creature::AuthoritativeCreaturePlugin, player_control::LocalAiControlPlugin,
 };
 use avian3d::PhysicsPlugins;
 use bevy::{
@@ -13,69 +13,39 @@ use bevy::{
 };
 use roundo_inventory::InventoryPlugin;
 use roundo_local_coordinate::{
-    AtomicVoxelRegistry, LocalCoordinateServerIpc, LocalCoordinateServerPlugin,
-    PhysicsDemandBudget, VoxelEditBudget, WorldInteractionRuntimeBudgets,
+    AtomicVoxelRegistry, LocalCoordinateServerPlugin, PhysicsDemandBudget, VoxelEditBudget,
+    WorldInteractionRuntimeBudgets,
 };
-use roundo_marionette::{MarionetteServerPlugin, ServerMarionetteIpc};
+use roundo_marionette::MarionetteServerPlugin;
 use roundo_portal::RoundoPortalPlugin;
-use roundo_presence::{PresenceServerIpc, PresenceServerSettings, RoundoPresenceServerPlugin};
 
 const DEFAULT_TICK_RATE: u32 = 20;
-const DEFAULT_PRESENCE_RADIUS: f32 = 128.0;
 
 /// Process-supplied settings captured when one server ECS App is assembled.
 #[derive(Clone, Copy, Debug)]
 pub struct ServerEcsConfig {
     /// FixedUpdate frequency in hertz; zero is normalized to one.
     pub tick_rate: u32,
-    /// Presence distance in world units; Presence normalizes non-finite/non-positive values.
-    pub presence_radius: f32,
 }
 
 impl Default for ServerEcsConfig {
     fn default() -> Self {
         Self {
             tick_rate: DEFAULT_TICK_RATE,
-            presence_radius: DEFAULT_PRESENCE_RADIUS,
         }
     }
 }
 
-/// Network-facing endpoints bound to one concrete server ECS App.
-#[derive(Clone)]
-pub struct ServerEcsEndpoints {
-    /// Controller command endpoint connected to this runtime's Marionette plugin.
-    pub marionette: ServerMarionetteIpc,
-    /// Player lifecycle/snapshot endpoint connected to this runtime's Presence plugin.
-    pub presence: PresenceServerIpc,
-    /// Resource-stream endpoint connected to this runtime's Local Coordinate plugin.
-    pub local_coordinate: LocalCoordinateServerIpc,
-    /// Player identity, Access, and Controller-Control endpoint.
-    pub player_control: crate::PlayerControlServerIpc,
-}
-
-/// One fully assembled authoritative App and exactly its plugin endpoints.
+/// One fully assembled authoritative App.
 pub struct ServerEcsRuntime {
     app: App,
-    endpoints: ServerEcsEndpoints,
 }
 
 impl ServerEcsRuntime {
     pub fn new(voxels: AtomicVoxelRegistry, config: ServerEcsConfig) -> Self {
-        let presence = RoundoPresenceServerPlugin::new();
-        let marionette = MarionetteServerPlugin::new();
-        let local_coordinate = LocalCoordinateServerPlugin::new();
-        let player_control = PlayerControlServerPlugin::new();
-        let endpoints = ServerEcsEndpoints {
-            marionette: marionette.ipc(),
-            presence: presence.ipc(),
-            local_coordinate: local_coordinate.ipc(),
-            player_control: player_control.ipc(),
-        };
         let mut app = App::new();
         app.insert_resource(voxels)
-            .insert_resource(Time::<Fixed>::from_hz(f64::from(config.tick_rate.max(1))))
-            .insert_resource(PresenceServerSettings::new(config.presence_radius));
+            .insert_resource(Time::<Fixed>::from_hz(f64::from(config.tick_rate.max(1))));
         app.add_plugins((
             MinimalPlugins,
             AssetPlugin::default(),
@@ -83,13 +53,12 @@ impl ServerEcsRuntime {
             PhysicsPlugins::default()
                 .with_collision_hooks::<crate::physics::StaticOnlyCollisionHooks>(),
             RoundoPortalPlugin,
-            marionette,
-            player_control,
-            presence,
-            local_coordinate,
-            AuthoritativeCreaturePlugin::new(endpoints.local_coordinate.clone()),
+            MarionetteServerPlugin,
+            LocalAiControlPlugin,
+            LocalCoordinateServerPlugin::default(),
+            AuthoritativeCreaturePlugin,
             // Install finite rules only. No caller-owned instances are composed
-            // or activated here, nor by Connected/Access/old bootstrap.
+            // or activated here.
             crate::MinimalLifeApplicationPlugin::new(
                 64,
                 WorldInteractionRuntimeBudgets::new(
@@ -125,7 +94,7 @@ impl ServerEcsRuntime {
         attributes
             .install(&mut app)
             .expect("server attribute registry installs once");
-        Self { app, endpoints }
+        Self { app }
     }
 
     /// Register or retire a trusted server-local producer on this runtime.
@@ -143,7 +112,7 @@ impl ServerEcsRuntime {
     }
 
     /// Trusted local AI transition; request admission is synchronous, result is
-    /// polled after the next fixed tick. No AI identity crosses the network wire.
+    /// polled after the next fixed tick.
     pub fn request_ai_acquire(
         &mut self,
         ai: roundo_controller::AiControllerId,
@@ -152,13 +121,7 @@ impl ServerEcsRuntime {
         roundo_controller::authority_gate::RequestId,
         roundo_controller::authority_gate::GateError,
     > {
-        crate::player_control::local_ai_request(
-            self.app.world_mut(),
-            &self.endpoints.player_control,
-            ai,
-            controller,
-            false,
-        )
+        crate::player_control::local_ai_request(self.app.world_mut(), ai, controller, false)
     }
 
     pub fn request_ai_release(
@@ -169,28 +132,16 @@ impl ServerEcsRuntime {
         roundo_controller::authority_gate::RequestId,
         roundo_controller::authority_gate::GateError,
     > {
-        crate::player_control::local_ai_request(
-            self.app.world_mut(),
-            &self.endpoints.player_control,
-            ai,
-            controller,
-            true,
-        )
+        crate::player_control::local_ai_request(self.app.world_mut(), ai, controller, true)
     }
 
     pub fn submit_ai(
         &mut self,
         ai: roundo_controller::AiControllerId,
         controller: roundo_contracts::ControllerId,
-        input: roundo_contracts::DirectedControllerInput,
+        input: crate::LocalAiInput,
     ) -> Result<(), roundo_controller::authority_gate::GateError> {
-        crate::player_control::local_ai_submit(
-            self.app.world_mut(),
-            &self.endpoints.player_control,
-            ai,
-            controller,
-            input,
-        )
+        crate::player_control::local_ai_submit(self.app.world_mut(), ai, controller, input)
     }
 
     pub fn take_ai_result(
@@ -203,19 +154,24 @@ impl ServerEcsRuntime {
             .take(request)
     }
 
-    /// Separates the App from endpoints that address exactly its plugin instances.
-    ///
-    /// Dropping the App disconnects these channels; later runtimes create new queues.
-    pub fn into_parts(self) -> (App, ServerEcsEndpoints) {
-        (self.app, self.endpoints)
+    /// Explicitly composes a development Creature for a World-local Player.
+    pub fn ensure_local_test_player(
+        &mut self,
+        key: roundo_player::PlayerKey,
+    ) -> roundo_contracts::PlayerId {
+        let world = self.app.world_mut();
+        let player = roundo_player::find_or_create_player(world, key);
+        crate::authoritative_creature::ensure_test_life_for_player(world, player);
+        player
+    }
+
+    pub fn into_app(self) -> App {
+        self.app
     }
 }
 
-/// Builds an App when external IPC access is not required.
 pub fn create_ecs_server_app(voxels: AtomicVoxelRegistry) -> App {
-    ServerEcsRuntime::new(voxels, ServerEcsConfig::default())
-        .into_parts()
-        .0
+    ServerEcsRuntime::new(voxels, ServerEcsConfig::default()).into_app()
 }
 
 /// Builds and runs a server backed by the built-in voxel registry.

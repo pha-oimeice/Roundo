@@ -7,7 +7,6 @@ use crate::{
     schema::Action,
 };
 use bevy::{input_focus::InputFocus, prelude::*};
-use roundo_scene::{SceneKind, SceneRoot, scene_root};
 use roundo_toolbox::request_response_pipe::{
     ContextualJsonRequestResponseIo, RequestCall, ResponsePoll,
 };
@@ -23,12 +22,9 @@ pub type UiCommandIo = ContextualJsonRequestResponseIo<UiCommandSource, Value>;
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Hash)]
 pub struct UiInstanceId(Entity);
 impl UiInstanceId {
-    /// Names an ECS instance; liveness and scene ownership are checked separately.
+    /// Names an ECS instance; callers must still verify it belongs to the live UI tree.
     pub fn from_entity(entity: Entity) -> Self {
         Self(entity)
-    }
-    pub fn entity(self) -> Entity {
-        self.0
     }
 }
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -59,7 +55,7 @@ impl fmt::Display for UiLifecycleError {
             Self::UiInstanceLimit => write!(f, "UI instance limit reached"),
             Self::UnknownImport(e) => write!(f, "unknown UI import `{e}`"),
             Self::StaleUiInstance => write!(f, "UI instance is no longer live"),
-            Self::CannotCloseUiRoot => write!(f, "cannot close the UI scene root"),
+            Self::CannotCloseUiRoot => write!(f, "cannot close the root UI"),
             Self::Presentation(e) => write!(f, "native UI presentation failed: {e}"),
         }
     }
@@ -139,12 +135,6 @@ impl UiLifecycleManager<'_> {
     pub fn root_entity(&self) -> Entity {
         self.world.resource::<UiRuntime>().root
     }
-    pub fn root_scene(&self) -> SceneKind {
-        self.world
-            .get::<SceneRoot>(self.root_entity())
-            .expect("live scene root")
-            .kind
-    }
     fn belongs(&self, mut entity: Entity) -> bool {
         while let Some(parent) = self.world.get::<ChildOf>(entity) {
             entity = parent.parent();
@@ -197,28 +187,6 @@ impl UiLifecycleManager<'_> {
                 .map(UiInstanceId)
         })
     }
-    pub fn blocks_gameplay_input(&self) -> bool {
-        self.instances().into_iter().any(|e| {
-            self.registry()
-                .resource(&self.world.get::<UiInstance>(e).unwrap().definition)
-                .unwrap()
-                .interaction_mode
-                == ClientInteractionMode::Ui
-        })
-    }
-    pub fn world_visible(&self) -> bool {
-        self.instances()
-            .into_iter()
-            .filter(|e| self.world.get::<UiInstance>(*e).unwrap().visible)
-            .max_by_key(|e| self.world.get::<UiInstance>(*e).unwrap().z)
-            .is_some_and(|e| {
-                self.registry()
-                    .resource(&self.world.get::<UiInstance>(e).unwrap().definition)
-                    .unwrap()
-                    .world_visibility
-                    == UiWorldVisibility::Visible
-            })
-    }
     pub fn resolve_import(
         &self,
         source: UiInstanceId,
@@ -234,12 +202,6 @@ impl UiLifecycleManager<'_> {
             .cloned()
             .map(UiOpenTarget)
             .ok_or_else(|| UiLifecycleError::UnknownImport(handle.into()))
-    }
-    pub fn resolve_slot(&self, slot: &str) -> Result<UiOpenTarget, UiLifecycleError> {
-        self.registry()
-            .slot_name(slot)
-            .map(|name| UiOpenTarget(name.to_owned()))
-            .ok_or_else(|| UiLifecycleError::Registry(format!("unknown slot {slot}")))
     }
     pub fn navigate(
         &mut self,
@@ -324,32 +286,13 @@ impl UiLifecycleManager<'_> {
         }
         Ok(UiInstanceId(id))
     }
-    pub fn replace_root(&mut self, scene: SceneKind) -> Result<(), UiLifecycleError> {
-        if self.root_scene() == scene
-            && self
-                .instances()
-                .iter()
-                .any(|e| self.world.get::<UiInstance>(*e).unwrap().root_ui)
-        {
-            return Ok(());
-        }
-        let slot = match scene {
-            SceneKind::Menu => MENU_ROOT_SLOT,
-            SceneKind::InGame => IN_GAME_ROOT_SLOT,
-        };
-        let target = self.resolve_slot(slot)?;
-        let staging = self
-            .world
-            .spawn_scene(scene_root(scene))
-            .map_err(|e| UiLifecycleError::Presentation(e.to_string()))?
-            .id();
-        if let Err(error) = self.spawn(staging, target.resource(), true) {
-            self.world.despawn(staging);
-            return Err(error);
-        }
-        let previous = self.root_entity();
-        self.world.resource_mut::<UiRuntime>().root = staging;
-        self.world.despawn(previous);
+    pub(crate) fn mount_menu(&mut self) -> Result<(), UiLifecycleError> {
+        let resource = self
+            .registry()
+            .slot_name(MENU_ROOT_SLOT)
+            .ok_or_else(|| UiLifecycleError::Registry(format!("missing slot {MENU_ROOT_SLOT}")))?
+            .to_owned();
+        self.spawn(self.root_entity(), &resource, true)?;
         self.recompute();
         Ok(())
     }

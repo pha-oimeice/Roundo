@@ -1,7 +1,6 @@
 //! Client-owned shortcut resources, references and configuration loading.
 
 use roundo_marionette::{ClientMarionetteInputSettings, InputFunctionRegistry};
-use roundo_presence::ClientPresenceSettings;
 use roundo_user_config::{ClientConfig, ClientSettingsConfig, CommonConfig};
 use std::{
     path::PathBuf,
@@ -10,7 +9,8 @@ use std::{
 
 static COMMON_CONFIG: LazyLock<CommonConfig> =
     LazyLock::new(roundo_user_config::load_common_config);
-static CLIENT_CONFIG: LazyLock<RwLock<ClientConfig>> = LazyLock::new(|| RwLock::new(load_config()));
+static CLIENT_CONFIG: LazyLock<RwLock<ClientConfig>> =
+    LazyLock::new(|| RwLock::new(load_config()));
 
 pub fn load_config() -> ClientConfig {
     roundo_user_config::load_client_config()
@@ -21,14 +21,12 @@ pub fn mod_path() -> PathBuf {
 pub fn settings() -> ClientSettingsConfig {
     read_config().settings.clone()
 }
-pub fn runtime_presence_settings(settings: &ClientSettingsConfig) -> ClientPresenceSettings {
-    ClientPresenceSettings::new(settings.world.joinable_world_radius)
-}
-pub fn runtime_input_settings(settings: &ClientSettingsConfig) -> ClientMarionetteInputSettings {
+pub fn runtime_input_settings(
+    settings: &ClientSettingsConfig,
+) -> ClientMarionetteInputSettings {
     ClientMarionetteInputSettings {
         mouse_sensitivity: settings.controls.mouse_sensitivity,
         camera_move_speed: settings.camera.move_speed,
-        player_movement_prediction: settings.controls.player_movement_prediction,
     }
 }
 

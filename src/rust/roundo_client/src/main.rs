@@ -1,12 +1,11 @@
 use log::debug;
 use roundo_cli::RoundoCliPlugin;
-use roundo_ecs_entry::ClientEcsRuntime;
+use roundo_ecs_entry::create_ecs_client_app;
 
 mod commands;
 mod config;
 mod config_store;
 mod input;
-mod scene;
 mod targeting;
 mod ui_host;
 
@@ -77,7 +76,7 @@ fn main() -> bevy::app::AppExit {
         .unwrap_or_else(|error| panic!("invalid native UI command/data binding: {error}"));
     config::validate_input_configuration(&settings, &input_registry)
         .unwrap_or_else(|error| panic!("invalid configured input binding: {error}"));
-    let (mut app, _ecs) = ClientEcsRuntime::new(voxels).into_parts();
+    let mut app = create_ecs_client_app(voxels);
     // Both native UI and terminal adapters submit to this shared bounded queue; the
     // client-owned command plugin executes it on Bevy's main world.
     let command_pipe = commands::ClientCommandPipe::bounded(256);
@@ -85,14 +84,10 @@ fn main() -> bevy::app::AppExit {
     app.insert_resource(command_pipe)
         .insert_resource(config::runtime_input_settings(&settings))
         .insert_resource(input_registry)
-        .insert_resource(config::runtime_presence_settings(&settings))
         .insert_resource(roundo_rendering::WorldRenderSettings {
             geometry_lod_pixel_error: settings.world.geometry_lod_pixel_error,
             ..Default::default()
         })
-        .insert_resource(roundo_local_coordinate::ClientChunkViewDistance::new(
-            settings.world.chunk_view_distance as u16,
-        ))
         .insert_resource(targeting::ClientVoxelRaycastSettings::new(
             settings.camera.voxel_raycast_distance,
         ))
@@ -102,7 +97,6 @@ fn main() -> bevy::app::AppExit {
             targeting::ClientVoxelTargetingPlugin,
             roundo_ui::RoundoUiPlugin::new(ui_catalogue, assets, command_io),
             input::ClientInputPlugin,
-            scene::ClientScenePlugin,
             ui_host::ClientUiHostPlugin,
         ));
     app.run()

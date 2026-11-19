@@ -1,7 +1,0 @@
-[package]
-name = "roundo_scene"
-version.workspace = true
-edition.workspace = true
-
-[dependencies]
-bevy.workspace = true

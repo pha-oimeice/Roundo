@@ -22,19 +22,12 @@ use std::{
 };
 
 pub const MENU_ROOT_SLOT: &str = "roundo.menu-root";
-pub const IN_GAME_ROOT_SLOT: &str = "roundo.in-game-root";
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq)]
 #[serde(rename_all = "kebab-case")]
 pub enum ClientInteractionMode {
     Ui,
     InGame,
-}
-#[derive(Clone, Copy, Debug, Deserialize, PartialEq)]
-#[serde(rename_all = "kebab-case")]
-pub enum UiWorldVisibility {
-    Hidden,
-    Visible,
 }
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq)]
 #[serde(rename_all = "kebab-case")]
@@ -67,7 +60,6 @@ pub struct UiDefinition {
     page_source: Arc<BoundFile>,
     font_source: Arc<BoundFile>,
     pub interaction_mode: ClientInteractionMode,
-    pub world_visibility: UiWorldVisibility,
     pub max_instances: u32,
     pub lifecycle_independent: bool,
     pub presentation: PresentationMode,
@@ -178,7 +170,6 @@ struct Declaration {
     name: String,
     entry: String,
     interaction_mode: ClientInteractionMode,
-    world_visibility: UiWorldVisibility,
     max_instances: u32,
     lifecycle_independent: bool,
     presentation: PresentationMode,
@@ -284,10 +275,8 @@ pub(crate) fn prepare(
         }
         slots.insert(slot, selected.value);
     }
-    for required in [MENU_ROOT_SLOT, IN_GAME_ROOT_SLOT] {
-        if !slots.contains_key(required) {
-            return Err(format!("required UI root slot {required} is missing"));
-        }
+    if !slots.contains_key(MENU_ROOT_SLOT) {
+        return Err(format!("required UI root slot {MENU_ROOT_SLOT} is missing"));
     }
     let (theme, font) = resolve_candidates(themes)
         .ok_or("native UI theme is not configured")?
@@ -309,7 +298,6 @@ pub(crate) fn prepare(
             page_source: page,
             font_source: Arc::clone(&font),
             interaction_mode: declaration.interaction_mode,
-            world_visibility: declaration.world_visibility,
             max_instances: declaration.max_instances,
             lifecycle_independent: declaration.lifecycle_independent,
             presentation: declaration.presentation,

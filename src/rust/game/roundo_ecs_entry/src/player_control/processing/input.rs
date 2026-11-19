@@ -2,7 +2,7 @@
 
 use super::*;
 
-/// Sequence state belongs to each runtime Controller rather than a connection.
+/// Sequence state belongs to each runtime Controller for the active local binding.
 /// Movement retains only the latest accepted sequence; gaze keeps its last
 /// accepted sequence after all same-tick deltas have been accumulated.
 #[derive(Resource, Default)]
@@ -43,38 +43,13 @@ impl ControllerTickInputs {
         &mut self,
         world: &mut World,
         controller_id: ControllerId,
-        input: DirectedControllerInput,
+        input: LocalAiInput,
     ) -> bool {
         let Some(route) = resolve_controller_command_route(world, controller_id) else {
             return false;
         };
         match input {
-            DirectedControllerInput::SetGaze(command)
-                if route.domain.contains(roundo_controller::IntentKind::Gaze) =>
-            {
-                if command.sequence
-                    <= world
-                        .resource::<ControllerInputSequences>()
-                        .gaze_sequence(controller_id)
-                    || self.gaze.contains_key(&controller_id)
-                {
-                    return false;
-                }
-                let published = world
-                    .run_system_once_with(
-                        commands::publish_set_gaze,
-                        (controller_id, command.action.orientation),
-                    )
-                    .expect("set gaze uses native registered Intent writer");
-                if published {
-                    world
-                        .resource_mut::<ControllerInputSequences>()
-                        .gaze
-                        .insert(controller_id, command.sequence);
-                }
-                published
-            }
-            DirectedControllerInput::Movement3D(command)
+            LocalAiInput::Movement3D(command)
                 if route
                     .domain
                     .contains(roundo_controller::IntentKind::Movement) =>
@@ -93,7 +68,7 @@ impl ControllerTickInputs {
                     .insert(controller_id, (sequence, command.action.direction));
                 true
             }
-            DirectedControllerInput::Gaze(command)
+            LocalAiInput::Gaze(command)
                 if route.domain.contains(roundo_controller::IntentKind::Gaze) =>
             {
                 let sequence = command.sequence;
@@ -105,8 +80,11 @@ impl ControllerTickInputs {
                         .gaze
                         .get(&controller_id)
                         .is_some_and(|deltas| deltas.contains_key(&sequence))
-                    || GazeCommandEvent::new(command.action.yaw_delta, command.action.pitch_delta)
-                        .is_err()
+                    || GazeCommandEvent::new(
+                        command.action.yaw_delta,
+                        command.action.pitch_delta,
+                    )
+                    .is_err()
                 {
                     return false;
                 }

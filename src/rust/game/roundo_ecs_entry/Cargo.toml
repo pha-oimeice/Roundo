@@ -23,6 +23,4 @@ roundo_items = { workspace = true, optional = true }
 roundo_life = { workspace = true, optional = true }
 roundo_rendering = { workspace = true, optional = true }
 roundo_player = { workspace = true, optional = true }
-roundo_presence.workspace = true
 roundo_portal = { workspace = true, optional = true }
-roundo_toolbox.workspace = true

@@ -1,2 +1,3 @@
 mouse_sensitivity = 0.002
+# Required by the shared configuration loader; not used by the standalone runtime.
 player_movement_prediction = false

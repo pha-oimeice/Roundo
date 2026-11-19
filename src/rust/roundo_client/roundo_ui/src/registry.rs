@@ -2,8 +2,7 @@
 //! configuration parsing or independent template ownership lives in this crate.
 
 pub(crate) use roundo_mod_manager::ui::{
-    ClientInteractionMode, IN_GAME_ROOT_SLOT, MENU_ROOT_SLOT, Palette, PresentationMode, UiLayout,
-    UiWorldVisibility,
+    ClientInteractionMode, MENU_ROOT_SLOT, Palette, PresentationMode, UiLayout,
 };
 use roundo_mod_manager::{
     AssetAccess, AssetPrototype,
@@ -17,7 +16,6 @@ use std::{collections::BTreeMap, sync::Arc};
 pub struct UiResource {
     pub page: Page,
     pub interaction_mode: ClientInteractionMode,
-    pub world_visibility: UiWorldVisibility,
     pub max_instances: u32,
     pub lifecycle_independent: bool,
     pub presentation: PresentationMode,
@@ -69,7 +67,6 @@ impl UiRegistry {
         Ok(UiResource {
             page,
             interaction_mode: definition.interaction_mode,
-            world_visibility: definition.world_visibility,
             max_instances: definition.max_instances,
             lifecycle_independent: definition.lifecycle_independent,
             presentation: definition.presentation,

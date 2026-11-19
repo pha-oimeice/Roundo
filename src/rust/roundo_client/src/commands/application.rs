@@ -50,7 +50,7 @@ impl ClientCommandApplication<'_, '_> {
             input_registry,
         } = self;
 
-        // Source identity is ECS instance liveness plus active scene ownership,
+        // Source identity is ECS instance liveness plus ownership by the active UI tree,
         // not a business ID or an authorization grant. Queued work from a
         // destroyed view is rejected before invoking any business operation.
         if let Some(source) = ui_source {
@@ -66,18 +66,8 @@ impl ClientCommandApplication<'_, '_> {
         let config = RefCell::new(config);
         let dev_level = RefCell::new(dev_level);
         let ui = RefCell::new(ui);
-        let execute_scene_intent = |intent| {
-            let mut manager = ui.borrow_mut();
-            let manager = manager.as_deref_mut().ok_or_else(scene_unavailable)?;
-            if !manager
-                .world
-                .contains_resource::<bevy::prelude::State<roundo_scene::Scene>>()
-            {
-                return Err(scene_unavailable());
-            }
-            crate::scene::execute(intent, manager).map_err(scene_transition_error)
-        };
-        let mut registry = roundo_cli::json_command::CommandRegistry::<CommandEffect>::default();
+        let mut registry =
+            roundo_cli::json_command::CommandRegistry::<CommandEffect>::default();
 
         // Settings mutation follows the same write-through, non-rollback model:
         // normalize memory first, then attempt persistence.
@@ -88,13 +78,13 @@ impl ClientCommandApplication<'_, '_> {
             let mut config = config.borrow_mut();
             let settings = config.settings_mut();
             match input.key.as_str() {
-                "controls.mouse_sensitivity" => settings.controls.mouse_sensitivity = input.value,
+                "controls.mouse_sensitivity" => {
+                    settings.controls.mouse_sensitivity = input.value
+                }
                 "camera.move_speed" => settings.camera.move_speed = input.value,
                 "camera.voxel_raycast_distance" => {
                     settings.camera.voxel_raycast_distance = input.value
                 }
-                "world.joinable_world_radius" => settings.world.joinable_world_radius = input.value,
-                "world.chunk_view_distance" => settings.world.chunk_view_distance = input.value,
                 "world.geometry_lod_pixel_error" => {
                     if !input.value.is_finite() || input.value < 0.0 {
                         return Err(roundo_cli::json_command::CommandError::new(
@@ -121,8 +111,9 @@ impl ClientCommandApplication<'_, '_> {
         registry.register_typed::<FunctionsListDefinition>(|_, _| {
             Ok(functions_list_output(input_registry))
         });
-        registry
-            .register_typed::<SlotsListDefinition>(|_, _| Ok(slots_list_output(&config.borrow())));
+        registry.register_typed::<SlotsListDefinition>(|_, _| {
+            Ok(slots_list_output(&config.borrow()))
+        });
         registry.register_typed::<SlotsCreateDefinition>(|input, _| {
             edit_input_configuration(&mut config.borrow_mut(), input_registry, |settings| {
                 if settings.input_slots.contains_key(&input.slot) {
@@ -305,13 +296,6 @@ impl ClientCommandApplication<'_, '_> {
                 status: "accepted".into(),
             })
         });
-        // Scene intents are source-neutral game logic, not UI imports or focus effects.
-        registry.register_typed::<ScenePauseDefinition>(|_, _| {
-            execute_scene_intent(crate::scene::ClientUiIntent::Pause).map(|_| EmptyOutput {})
-        });
-        registry.register_typed::<SceneResumeDefinition>(|_, _| {
-            execute_scene_intent(crate::scene::ClientUiIntent::Resume).map(|_| EmptyOutput {})
-        });
         registry.register_typed::<UiBackDefinition>(|_, _| {
             let source = ui_source.ok_or_else(|| {
                 roundo_cli::json_command::CommandError::new(
@@ -322,7 +306,7 @@ impl ClientCommandApplication<'_, '_> {
             let mut manager = ui.borrow_mut();
             manager
                 .as_deref_mut()
-                .ok_or_else(scene_unavailable)?
+                .ok_or_else(ui_unavailable)?
                 .back(source)
                 .map_err(map_ui_lifecycle_error)?;
             Ok(EmptyOutput {})
@@ -335,7 +319,7 @@ impl ClientCommandApplication<'_, '_> {
                 )
             })?;
             let mut manager = ui.borrow_mut();
-            let manager = manager.as_deref_mut().ok_or_else(scene_unavailable)?;
+            let manager = manager.as_deref_mut().ok_or_else(ui_unavailable)?;
             let target = manager
                 .resolve_import(source, &input.import)
                 .map_err(map_ui_lifecycle_error)?;
@@ -370,7 +354,9 @@ impl ClientCommandApplication<'_, '_> {
                     "Client command `{command_name}` destroyed its source before response delivery"
                 );
             } else {
-                log::warn!("Client command response receiver disconnected for `{command_name}`");
+                log::warn!(
+                    "Client command response receiver disconnected for `{command_name}`"
+                );
             }
         }
         quit_accepted
@@ -381,21 +367,6 @@ fn shortcut_error(code: &str, message: &str) -> roundo_cli::json_command::Comman
     roundo_cli::json_command::CommandError::new(code, message)
 }
 
-fn scene_unavailable() -> roundo_cli::json_command::CommandError {
-    roundo_cli::json_command::CommandError::new(
-        "scene_unavailable",
-        "Scene presentation is unavailable",
-    )
-}
-
-fn scene_transition_error(
-    error: crate::scene::SceneTransitionError,
-) -> roundo_cli::json_command::CommandError {
-    match error {
-        crate::scene::SceneTransitionError::Ui(error) => map_ui_lifecycle_error(error),
-        error => roundo_cli::json_command::CommandError::new(
-            "scene_transition_rejected",
-            error.to_string(),
-        ),
-    }
+fn ui_unavailable() -> roundo_cli::json_command::CommandError {
+    roundo_cli::json_command::CommandError::new("ui_unavailable", "Native UI is unavailable")
 }

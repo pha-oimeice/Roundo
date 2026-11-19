@@ -1,4 +1,4 @@
-//! Read-only Player adapters. Returned Handles/Entities are observations, not
+//! Read-only local Controller route validation. Returned Handles/Entities are observations, not
 //! retained authorization: publication and settlement must revalidate at use.
 
 use super::*;
@@ -70,22 +70,6 @@ impl ControllerCommandRoutes<'_, '_> {
         let route = self.resolve(id)?;
         self.instances.resolve_body(route.intent).ok()
     }
-
-    pub(super) fn gate_owned_by_player(
-        &self,
-        admission: &Admission,
-        player: PlayerId,
-    ) -> Vec<ControllerId> {
-        self.controllers
-            .iter()
-            .filter(|controller| {
-                admission
-                    .active_player(controller.id())
-                    .is_some_and(|(_, owner)| owner == player)
-            })
-            .map(Controller::id)
-            .collect()
-    }
 }
 
 pub(super) fn resolve_route(
@@ -100,85 +84,4 @@ pub(super) fn resolve_intent_entity(
     routes: ControllerCommandRoutes,
 ) -> Option<Entity> {
     routes.intent_entity(id)
-}
-
-/// This is the legacy prefix eligibility check, not an AuthorityGate Submit or
-/// settlement certificate. Multiple connections and a missing live route fail
-/// closed; it never mutates ownership, gate state, or sequence metadata.
-pub(super) fn resolve_prefix_player(
-    In((connection, id)): In<(ConnectionId, ControllerId)>,
-    players: Option<Res<PlayerRegistry>>,
-    routes: ControllerCommandRoutes,
-) -> Option<PlayerId> {
-    let players = players?;
-    let player = players.player_for_connection(connection)?;
-    if players.connections_for_player(player).count() != 1
-        || routes.controller(id)?.1.current_owner() != Some(ControllerOwner::Player(player))
-        || routes.intent_entity(id).is_none()
-    {
-        return None;
-    }
-    Some(player)
-}
-
-pub(super) enum AccessProjection {
-    UnknownConnection,
-    Unavailable,
-    Snapshot(PlayerControllerAccessSnapshot),
-}
-
-/// Projects the same Access list the FIFO owner used to construct synchronously.
-/// A grant is only listed with a current complete Factory route; occupancy is
-/// observed from Admission, not inferred from legacy ownership. No acquisition
-/// or binding is performed here, and callers must not reuse this as Submit proof.
-pub(super) fn project_access(
-    In(connection): In<ConnectionId>,
-    registry: Res<PlayerRegistry>,
-    players: Query<&Player>,
-    routes: ControllerCommandRoutes,
-    admission: Res<Admission>,
-) -> AccessProjection {
-    let Some(player_id) = registry.player_for_connection(connection) else {
-        return AccessProjection::UnknownConnection;
-    };
-    let Some(player) = registry
-        .player_entity(player_id)
-        .and_then(|entity| players.get(entity).ok())
-    else {
-        return AccessProjection::Unavailable;
-    };
-    let mut controllers = player
-        .controller_accesses()
-        .filter_map(|(controller_id, access_level)| {
-            let route = routes.resolve(controller_id)?;
-            let entity = routes.controller(controller_id)?.0;
-            let current = admission.active_player(controller_id);
-            let occupied_by_ai = admission
-                .active_ai_for_entity(controller_id, entity)
-                .is_some();
-            let intent_domain = if route.domain == roundo_controller::IntentDomain::movement() {
-                ControllerIntentDomain::Movement
-            } else if route.domain == roundo_controller::IntentDomain::gaze() {
-                ControllerIntentDomain::Gaze
-            } else {
-                return None;
-            };
-            Some(PlayerControllerAccess {
-                controller_id,
-                intent_domain,
-                access_level,
-                control_state: match current {
-                    None if occupied_by_ai => ControllerControlState::ControlledByOther,
-                    None => ControllerControlState::Uncontrolled,
-                    Some((_, id)) if id == player_id => ControllerControlState::ControlledBySelf,
-                    Some(_) => ControllerControlState::ControlledByOther,
-                },
-            })
-        })
-        .collect::<Vec<_>>();
-    controllers.sort_unstable_by_key(|entry| entry.controller_id);
-    AccessProjection::Snapshot(PlayerControllerAccessSnapshot {
-        player_id,
-        controllers,
-    })
 }

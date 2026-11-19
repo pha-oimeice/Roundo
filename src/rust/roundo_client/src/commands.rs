@@ -237,16 +237,6 @@ fn process_json_commands(world: &mut World) {
         let Some((transport, reply)) = world.resource::<ClientCommandPipe>().try_receive() else {
             break;
         };
-        if world.contains_resource::<bevy::prelude::State<roundo_scene::Scene>>()
-            && roundo_ui::UiLifecycleManager::is_installed(world)
-        {
-            if let Err(error) = crate::scene::reconcile_scene(world) {
-                let command = transport.command["command"].as_str().unwrap_or_default();
-                let _ = reply.respond(terminal_error(command, "ui_presentation_failed", error));
-                world.write_message(AppExit::error());
-                break;
-            }
-        }
         let camera_position = world
             .resource::<ClientPlayerController>()
             .camera()
@@ -277,7 +267,6 @@ fn process_json_commands(world: &mut World) {
                 })
             })
         };
-        crate::scene::apply_pending_transition(world);
         if quit {
             world.write_message(AppExit::Success);
         }

@@ -1,13 +1,11 @@
-//! Bounded diagnostic composition. UI identity is not authority: the Player FIFO
-//! admits requests from any current authenticated player, then these ordinary
-//! systems use native Factory, attribute and typed registration interfaces.
-//! No gameplay roles, Controller grants or physical fields are synthesized.
+//! Bounded, World-local operations for native game diagnostics.
 use crate::{
-    authoritative_creature::CreatureAssemblyRegistry,
-    player_control::{PlayerControlEvent, PlayerControlPipe, PlayerControlServerSet},
+    authoritative_creature::CreatureAssemblyRegistry, player_control::LocalAiControlSet,
 };
 use bevy::prelude::*;
-use roundo_contracts::{AttributeId, ConnectionId, debug::*};
+use roundo_contracts::AttributeId;
+mod data;
+pub use data::*;
 use roundo_creature::{
     CreatureMotionExperienceState, ExecutionBodyId, GazeCommandEvent, GazeCommandState,
     IntentBodyId, JumpCommandEvent, MovementCommandState, RecordBodyId,
@@ -28,21 +26,11 @@ const MAX_WORK: usize = 64;
 const PAGE: usize = 64;
 
 #[derive(Resource, Default)]
-pub(crate) struct DebugIngress {
-    queue: VecDeque<(ConnectionId, DebugRequest)>,
-    highest: BTreeMap<ConnectionId, u64>,
+pub struct DebugIngress {
+    queue: VecDeque<DebugRequest>,
 }
 impl DebugIngress {
-    pub(crate) fn admit(
-        &mut self,
-        connection: ConnectionId,
-        request: DebugRequest,
-    ) -> Result<(), DebugFailure> {
-        if request.request_id.len() > 20
-            || !request.request_id.bytes().all(|byte| byte.is_ascii_digit())
-        {
-            return Err(DebugFailure::new("invalid_request", "无效诊断请求编号"));
-        }
+    pub fn submit(&mut self, request: DebugRequest) -> Result<(), DebugFailure> {
         let short = |value: &str| !value.is_empty() && value.len() <= 128;
         let valid = match &request.operation {
             DebugOperation::Inspect { body } | DebugOperation::SetAttribute { body, .. } => {
@@ -93,30 +81,11 @@ impl DebugIngress {
                 "诊断选择器或参数无效；物品功能距离必须为有限正数",
             ));
         }
-        let id = request
-            .request_id
-            .parse::<u64>()
-            .ok()
-            .filter(|id| *id > 0)
-            .ok_or_else(|| DebugFailure::new("invalid_request", "无效诊断请求编号"))?;
-        if self.queue.len() >= MAX_WORK
-            || (!self.highest.contains_key(&connection) && self.highest.len() >= 1024)
-        {
+        if self.queue.len() >= MAX_WORK {
             return Err(DebugFailure::new("busy", "诊断入口容量已满"));
         }
-        let highest = self.highest.entry(connection).or_default();
-        if id <= *highest {
-            return Err(DebugFailure::new(
-                "replayed_request",
-                "重复或过期诊断请求，不重复执行",
-            ));
-        }
-        *highest = id;
-        self.queue.push_back((connection, request));
+        self.queue.push_back(request);
         Ok(())
-    }
-    pub(crate) fn forget(&mut self, connection: ConnectionId) {
-        self.highest.remove(&connection);
     }
 }
 
@@ -125,6 +94,7 @@ impl Plugin for DebugPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<DebugIngress>()
             .init_resource::<DebugState>()
+            .add_message::<DebugReply>()
             .add_systems(
                 FixedUpdate,
                 (
@@ -137,7 +107,7 @@ impl Plugin for DebugPlugin {
                     finish,
                 )
                     .chain()
-                    .after(PlayerControlServerSet::Commands)
+                    .after(LocalAiControlSet)
                     .before(roundo_creature::CreatureLifeSet::CommandProjection),
             );
         if app.is_plugin_added::<roundo_inventory::InventoryPlugin>() {
@@ -163,7 +133,6 @@ struct DebugState {
     pending: Vec<Pending>,
 }
 struct Work {
-    connection: ConnectionId,
     request: DebugRequest,
     body: Option<ConceptBodyHandle>,
     life: Option<LifeHandle>,
@@ -171,7 +140,6 @@ struct Work {
     deferred: bool,
 }
 struct Pending {
-    connection: ConnectionId,
     request: String,
     operation: PendingOperation,
 }
@@ -357,7 +325,7 @@ fn begin(
     mut attributes: AttributeWrites,
     registry: Res<AttributeRegistry>,
     mut management: ParamSet<(FactoryManagement, LifeStructureManagement)>,
-    pipe: Res<PlayerControlPipe>,
+    mut replies: MessageWriter<DebugReply>,
 ) {
     if ingress.queue.is_empty() && state.pending.is_empty() {
         return;
@@ -413,33 +381,26 @@ fn begin(
             }
         };
         if let Some(result) = result {
-            let _ = pipe.0.try_send(PlayerControlEvent::Debug {
-                connection_id: item.connection,
-                reply: DebugReply {
-                    request_id: item.request,
-                    result,
-                },
+            replies.write(DebugReply {
+                request_id: item.request,
+                result,
             });
         } else {
             state.pending.push(item);
         }
     }
     for _ in 0..16 {
-        let Some((connection, request)) = ingress.queue.pop_front() else {
+        let Some(request) = ingress.queue.pop_front() else {
             break;
         };
         if state.pending.len() + state.work.len() >= MAX_WORK {
-            let _ = pipe.0.try_send(PlayerControlEvent::Debug {
-                connection_id: connection,
-                reply: DebugReply {
-                    request_id: request.request_id,
-                    result: Err(DebugFailure::new("busy", "诊断请求容量已满")),
-                },
+            replies.write(DebugReply {
+                request_id: request.request_id,
+                result: Err(DebugFailure::new("busy", "诊断请求容量已满")),
             });
             continue;
         }
         let mut work = Work {
-            connection,
             request,
             body: None,
             life: None,
@@ -501,10 +462,9 @@ fn begin(
                         if let Some(value) =
                             attributes.get(entity, descriptor.id()).map_err(failure)?
                         {
-                            let value = value
-                                .as_i32()
-                                .map(DebugValue::Integer)
-                                .or_else(|| value.as_unorm().map(|v| DebugValue::Unorm(v.get())));
+                            let value = value.as_i32().map(DebugValue::Integer).or_else(|| {
+                                value.as_unorm().map(|v| DebugValue::Unorm(v.get()))
+                            });
                             values.push(DebugAttribute {
                                 id: descriptor.id() as u8,
                                 name: descriptor.name().into(),
@@ -554,7 +514,6 @@ fn begin(
                         .create_body(ConceptBodyPrototype::new(body_values(*values)?))
                         .map_err(failure)?;
                     state.pending.push(Pending {
-                        connection,
                         request: work.request.request_id.clone(),
                         operation: PendingOperation::Factory(id),
                     });
@@ -570,7 +529,6 @@ fn begin(
                         .create_life(life_recipe())
                         .map_err(failure)?;
                     state.pending.push(Pending {
-                        connection,
                         request: work.request.request_id.clone(),
                         operation: PendingOperation::Factory(id),
                     });
@@ -640,8 +598,12 @@ macro_rules! typed_system {
                                 life: name.clone(),
                                 data_type: T::KEY.as_str().into(),
                                 shape: $shape.into(),
-                                reader_declared: evidence.validate_reader_declaration(body).is_ok(),
-                                writer_declared: evidence.validate_writer_declaration(body).is_ok(),
+                                reader_declared: evidence
+                                    .validate_reader_declaration(body)
+                                    .is_ok(),
+                                writer_declared: evidence
+                                    .validate_writer_declaration(body)
+                                    .is_ok(),
                                 reader_registered: evidence.validate_reader(life, body).is_ok(),
                                 writer_registered: evidence.validate_writer(life, body).is_ok(),
                                 immutable_origin: ($origin)(&evidence, life, body),
@@ -674,7 +636,6 @@ macro_rules! typed_system {
                         Ok(id) => {
                             work.deferred = true;
                             pending.push(Pending {
-                                connection: work.connection,
                                 request: work.request.request_id.clone(),
                                 operation: PendingOperation::Structure(id),
                             });
@@ -721,7 +682,9 @@ typed_system!(
     rebind_writer,
     declare_state_reader,
     declare_state_writer,
-    |s: &mut LifeStructureManagement, life, body| Some(s.create_state_slot::<T>(life, body, None))
+    |s: &mut LifeStructureManagement, life, body| Some(
+        s.create_state_slot::<T>(life, body, None)
+    )
 );
 typed_system!(
     event_type,
@@ -740,7 +703,7 @@ typed_system!(
     >
 );
 
-fn finish(mut state: ResMut<DebugState>, pipe: Res<PlayerControlPipe>) {
+fn finish(mut state: ResMut<DebugState>, mut replies: MessageWriter<DebugReply>) {
     for work in state.work.drain(..) {
         if work.deferred {
             continue;
@@ -751,21 +714,9 @@ fn finish(mut state: ResMut<DebugState>, pipe: Res<PlayerControlPipe>) {
                 "没有原生诊断适配器处理该操作",
             ))
         });
-        if pipe
-            .0
-            .try_send(PlayerControlEvent::Debug {
-                connection_id: work.connection,
-                reply: DebugReply {
-                    request_id: work.request.request_id,
-                    result,
-                },
-            })
-            .is_err()
-        {
-            // Accepted mutations are not retried: transport failure is not rollback.
-            bevy::log::warn!(
-                "diagnostic reply channel closed; accepted mutation is not rolled back"
-            );
-        }
+        replies.write(DebugReply {
+            request_id: work.request.request_id,
+            result,
+        });
     }
 }

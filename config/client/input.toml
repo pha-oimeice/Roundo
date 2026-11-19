@@ -23,26 +23,14 @@ functions = ["roundo.move-forward"]
 display_name = "Move Backward"
 functions = ["roundo.move-backward"]
 
-[input_slots."roundo.spirit-camera"]
-display_name = "Spirit Camera"
-functions = ["roundo.spirit-camera"]
-
 # Client-owned shortcut resources.
 [input_slots.look]
 display_name = "视角"
 functions = ["roundo.look"]
 
-[input_slots.spawn-test-creature]
-display_name = "Spawn Test Creature"
-functions = ["roundo.spawn-test-creature"]
-
 [[input_bindings]]
 slot = "look"
 key = "mouse_motion"
-
-[[input_bindings]]
-slot = "spawn-test-creature"
-key = "digit1"
 
 [[input_bindings]]
 slot = "roundo.move-up"
@@ -67,7 +55,3 @@ key = "key_w"
 [[input_bindings]]
 slot = "roundo.move-backward"
 key = "key_s"
-
-[[input_bindings]]
-slot = "roundo.spirit-camera"
-key = "f1"

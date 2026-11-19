@@ -17,25 +17,6 @@ macro_rules! unix_empty_command {
     };
 }
 
-// Scene-related projections delegate names, discovery levels and outputs to the
-// canonical definitions; no parallel flow logic or metadata lives in this adapter.
-macro_rules! unix_scene_command {
-    ($name:ident, $definition:ty, $path:literal) => {
-        #[derive(Deserialize, Serialize, JsonSchema, roundo_cli::UnixCommand)]
-        #[serde(deny_unknown_fields)]
-        #[unix(path = $path)]
-        pub(super) struct $name {}
-        impl CommandDefinition for $name {
-            type Input = Self;
-            type Output = <$definition as CommandDefinition>::Output;
-            const NAME: &'static str = <$definition as CommandDefinition>::NAME;
-            const DEV_LEVEL: u8 = <$definition as CommandDefinition>::DEV_LEVEL;
-        }
-    };
-}
-unix_scene_command!(UnixScenePause, ScenePauseDefinition, "scene pause");
-unix_scene_command!(UnixSceneResume, SceneResumeDefinition, "scene resume");
-
 unix_empty_command!(UnixAppQuit, "app.quit", "app quit", AcceptedOutput);
 unix_empty_command!(UnixUiBack, "ui.back", "ui back", EmptyOutput);
 unix_empty_command!(
@@ -168,8 +149,6 @@ impl Default for ClientUnixAdapter {
         let mut registry = UnixCommandRegistry::default();
         registry.register::<UnixAppQuit>();
         registry.register::<UnixUiBack>();
-        registry.register::<UnixScenePause>();
-        registry.register::<UnixSceneResume>();
         registry.register::<UnixCommandHelp>();
         registry.register::<UnixCommandSchema>();
         registry.register::<UnixDev>();

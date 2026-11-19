@@ -5,7 +5,7 @@ pub(super) use super::reads::ControllerCommandRoutes;
 use super::*;
 use bevy::{
     ecs::system::SystemParam,
-    prelude::{In, Query, Res, ResMut},
+    prelude::{In, Query},
 };
 use roundo_life::{LifeEventReader, LifeEventWriter, LifeStateWriter};
 
@@ -55,29 +55,6 @@ pub(super) fn publish_gaze(
     routes
         .instances
         .with_body(intent, |body| gaze.write_event(&body, route.life, value, 1))
-        .is_ok_and(|result| result.is_ok())
-}
-
-pub(super) fn publish_set_gaze(
-    In((id, orientation)): In<(ControllerId, [f32; 4])>,
-    routes: ControllerCommandRoutes,
-    mut gaze: LifeStateWriter<roundo_creature::GazeCommandState>,
-) -> bool {
-    let Ok(value) = roundo_creature::GazeCommandState::new(orientation) else {
-        return false;
-    };
-    let Some(route) = routes.resolve(id) else {
-        return false;
-    };
-    if !route.domain.contains(roundo_controller::IntentKind::Gaze) {
-        return false;
-    }
-    let Ok(intent) = routes.instances.resolve_body(route.intent) else {
-        return false;
-    };
-    routes
-        .instances
-        .with_body(intent, |body| gaze.set_state(&body, route.life, value))
         .is_ok_and(|result| result.is_ok())
 }
 
@@ -145,26 +122,9 @@ impl CommandNeutralization<'_, '_> {
     }
 }
 
-pub(super) fn neutralize(In(id): In<ControllerId>, mut commands: CommandNeutralization) -> bool {
-    commands.apply(id)
-}
-
-/// Select the Player's gate-owned Controllers before admission revocation.
-/// Selection is not new authorization: each data operation still rechecks its
-/// live route and registration. Clear all sequence maps even on typed failure,
-/// continue with other selected Controllers, and return selected IDs (not a
-/// success certificate) so the FIFO owner discards exactly their pending input.
-/// This does not mutate gates, Access, bindings, or the shared Life clock.
-pub(super) fn neutralize_player(
-    In(player): In<PlayerId>,
+pub(super) fn neutralize(
+    In(id): In<ControllerId>,
     mut commands: CommandNeutralization,
-    admission: Res<Admission>,
-    mut sequences: ResMut<ControllerInputSequences>,
-) -> Vec<ControllerId> {
-    let selected = commands.routes.gate_owned_by_player(&admission, player);
-    for &id in &selected {
-        commands.apply(id);
-        sequences.forget_controller(id);
-    }
-    selected
+) -> bool {
+    commands.apply(id)
 }

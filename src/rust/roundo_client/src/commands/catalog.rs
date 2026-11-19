@@ -63,7 +63,10 @@ impl TryFrom<BindingArguments> for ClientInputBindingConfig {
         }
         let key =
             serde_json::from_value(serde_json::Value::String(value.key)).map_err(|error| {
-                roundo_cli::json_command::CommandError::new("invalid_arguments", error.to_string())
+                roundo_cli::json_command::CommandError::new(
+                    "invalid_arguments",
+                    error.to_string(),
+                )
             })?;
         Ok(Self::new(value.slot, key))
     }
@@ -393,22 +396,6 @@ pub(super) fn settings_show_output(config: &ClientConfigStore) -> SettingsShowOu
                 default: roundo_user_config::DEFAULT_VOXEL_RAYCAST_DISTANCE,
             },
             SettingDisplay {
-                key: "world.joinable_world_radius".into(),
-                value: settings.world.joinable_world_radius,
-                min: roundo_user_config::MIN_JOINABLE_WORLD_RADIUS,
-                max: Some(roundo_user_config::MAX_JOINABLE_WORLD_RADIUS),
-                step: 0.5,
-                default: roundo_user_config::DEFAULT_JOINABLE_WORLD_RADIUS,
-            },
-            SettingDisplay {
-                key: "world.chunk_view_distance".into(),
-                value: settings.world.chunk_view_distance,
-                min: roundo_user_config::MIN_CHUNK_VIEW_DISTANCE,
-                max: Some(roundo_user_config::MAX_CHUNK_VIEW_DISTANCE),
-                step: 1.0,
-                default: roundo_user_config::DEFAULT_CHUNK_VIEW_DISTANCE,
-            },
-            SettingDisplay {
                 key: "world.geometry_lod_pixel_error".into(),
                 value: settings.world.geometry_lod_pixel_error,
                 min: 0.0,
@@ -532,20 +519,6 @@ definition!(
     0
 );
 definition!(UiBackDefinition, UiBackArguments, EmptyOutput, "ui.back", 0);
-definition!(
-    ScenePauseDefinition,
-    EmptyArguments,
-    EmptyOutput,
-    "scene.pause",
-    0
-);
-definition!(
-    SceneResumeDefinition,
-    EmptyArguments,
-    EmptyOutput,
-    "scene.resume",
-    0
-);
 definition!(
     CommandSchemaDefinition,
     CommandSchemaArguments,
@@ -689,8 +662,6 @@ pub(super) const CLIENT_COMMANDS: &[ClientCommandCatalogEntry] = &[
     ClientCommandCatalogEntry::of::<OpenExternalUrlDefinition>(),
     ClientCommandCatalogEntry::of::<UiOpenDefinition>(),
     ClientCommandCatalogEntry::of::<UiBackDefinition>(),
-    ClientCommandCatalogEntry::of::<ScenePauseDefinition>(),
-    ClientCommandCatalogEntry::of::<SceneResumeDefinition>(),
     ClientCommandCatalogEntry::of::<SettingsShowDefinition>(),
     ClientCommandCatalogEntry::of::<SettingsSetDefinition>(),
     ClientCommandCatalogEntry::of::<SlotsListDefinition>(),

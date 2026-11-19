@@ -1,16 +1,15 @@
 [workspace]
 members = [
-    "src/rust/game/common/roundo_block_interaction",
-    "src/rust/game/common/roundo_contracts",
-    "src/rust/game/common/roundo_scene",
-    "src/rust/game/common/roundo_controller",
-    "src/rust/game/common/roundo_creature",
-    "src/rust/game/common/roundo_marionette",
-    "src/rust/game/common/roundo_local_coordinate",
-    "src/rust/game/common/roundo_life",
-    "src/rust/game/common/roundo_inventory",
-    "src/rust/game/common/roundo_items",
-    "src/rust/game/common/roundo_economy",
+    "src/rust/game/roundo_block_interaction",
+    "src/rust/game/roundo_contracts",
+    "src/rust/game/roundo_controller",
+    "src/rust/game/roundo_creature",
+    "src/rust/game/roundo_marionette",
+    "src/rust/game/roundo_local_coordinate",
+    "src/rust/game/roundo_life",
+    "src/rust/game/roundo_inventory",
+    "src/rust/game/roundo_items",
+    "src/rust/game/roundo_economy",
     "src/rust/game/roundo_ecs_entry",
     "src/rust/infra/roundo_toolbox",
     "src/rust/infra/roundo_mod_manager",
@@ -22,10 +21,10 @@ members = [
     "src/rust/infra/roundo_networking",
     "src/rust/infra/roundo_networking/proc_macro",
     "src/rust/infra/roundo_quinnet",
-    "src/rust/game/client/roundo_rendering",
-    "src/rust/game/common/roundo_presence",
-    "src/rust/game/common/roundo_portal",
-    "src/rust/game/common/roundo_player",
+    "src/rust/roundo_client/roundo_rendering",
+    "src/rust/game/roundo_presence",
+    "src/rust/game/roundo_portal",
+    "src/rust/game/roundo_player",
     "src/rust/roundo_client/roundo_ui",
     "src/rust/infra/roundo_cli/proc_macro",
 ]
@@ -70,7 +69,6 @@ quinn = "0.11.5"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 schemars = "1"
-sha2 = "0.11"
 thiserror = "2.0.18"
 tokio = { version = "1", features = ["sync", "rt"] }
 toml = "1.1"
@@ -81,25 +79,24 @@ syn = { version = "2", features = ["full", "visit-mut"] }
 roundo_cli_proc_macro = { path = "src/rust/infra/roundo_cli/proc_macro" }
 # ---
 roundo_dsa = {path = "src/rust/infra/roundo_dsa" }
-roundo_block_interaction = { path = "src/rust/game/common/roundo_block_interaction" }
-roundo_contracts = { path = "src/rust/game/common/roundo_contracts" }
-roundo_scene = { path = "src/rust/game/common/roundo_scene" }
-roundo_controller = { path = "src/rust/game/common/roundo_controller" }
-roundo_creature = { path = "src/rust/game/common/roundo_creature" }
+roundo_block_interaction = { path = "src/rust/game/roundo_block_interaction" }
+roundo_contracts = { path = "src/rust/game/roundo_contracts" }
+roundo_controller = { path = "src/rust/game/roundo_controller" }
+roundo_creature = { path = "src/rust/game/roundo_creature" }
 roundo_cli = { path = "src/rust/infra/roundo_cli" }
 roundo_ecs_entry = { path = "src/rust/game/roundo_ecs_entry", default-features = false }
-roundo_life = { path = "src/rust/game/common/roundo_life" }
-roundo_inventory = { path = "src/rust/game/common/roundo_inventory" }
-roundo_items = { path = "src/rust/game/common/roundo_items" }
-roundo_economy = { path = "src/rust/game/common/roundo_economy" }
-roundo_marionette = { path = "src/rust/game/common/roundo_marionette" }
+roundo_life = { path = "src/rust/game/roundo_life" }
+roundo_inventory = { path = "src/rust/game/roundo_inventory" }
+roundo_items = { path = "src/rust/game/roundo_items" }
+roundo_economy = { path = "src/rust/game/roundo_economy" }
+roundo_marionette = { path = "src/rust/game/roundo_marionette" }
 roundo_networking_proc_macro = { path = "src/rust/infra/roundo_networking/proc_macro" }
 roundo_quinnet = { path = "src/rust/infra/roundo_quinnet" }
-roundo_rendering = {path = "src/rust/game/client/roundo_rendering" }
-roundo_presence = { path = "src/rust/game/common/roundo_presence" }
-roundo_player = { path = "src/rust/game/common/roundo_player" }
-roundo_portal = { path = "src/rust/game/common/roundo_portal" }
-roundo_local_coordinate = { path = "src/rust/game/common/roundo_local_coordinate" }
+roundo_rendering = { path = "src/rust/roundo_client/roundo_rendering" }
+roundo_presence = { path = "src/rust/game/roundo_presence" }
+roundo_player = { path = "src/rust/game/roundo_player" }
+roundo_portal = { path = "src/rust/game/roundo_portal" }
+roundo_local_coordinate = { path = "src/rust/game/roundo_local_coordinate" }
 roundo_mod_manager = { path = "src/rust/infra/roundo_mod_manager" }
 roundo_toolbox = { path = "src/rust/infra/roundo_toolbox" }
 roundo_ui = { path = "src/rust/roundo_client/roundo_ui" }

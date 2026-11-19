@@ -5,104 +5,36 @@ use assembly::assemble_test_life_for_player;
 mod bootstrap;
 use bootstrap::*;
 mod lifecycle;
-mod projection;
-use projection::*;
 pub(crate) mod minimal_application;
+mod projection;
 pub use projection::{CreatureObservations, project_authorized_creature_observation};
 
-use crate::{
-    creature_snapshot::{CreatureSnapshotMetadata, encode_creature_snapshot},
-    player_control::PlayerControlServerSet,
-};
+use crate::player_control::LocalAiControlSet;
 use bevy::prelude::{
-    App, Commands, Component, Entity, FixedUpdate, IntoScheduleConfigs, On, Plugin, Query, Remove,
-    Res, Resource, Transform, With, World,
+    App, Commands, Component, Entity, FixedUpdate, IntoScheduleConfigs, On, Plugin, Query,
+    Remove, Res, Resource, Transform, With, World,
 };
-use roundo_contracts::{ConnectionId, ControllerAccessLevel, ControllerBindingId, ControllerId};
+use roundo_contracts::{ControllerAccessLevel, ControllerId, PlayerId};
 use roundo_controller::{
     Controller, ControllerCommitScope, ControllerLifecycleError, ControllerLifecyclePlugin,
     ControllerRegistry, IntentDomain,
 };
 use roundo_creature::{
     BodyInstanceIds, BodyOrientation, CreatureLifeDataPlugin, CreatureMotionError,
-    CreatureMotionExperienceState, CreatureMotionPlugin, CreatureMotionRecord, CreatureObservation,
-    EnvironmentSample, ExecutionBodyId, FactoryMotionRoute, FactoryMotionRouteValidator,
-    GazeCommandEvent, GazeCommandState, GazeOrientation, KinematicVelocity, LocomotionState,
-    MovementCommandState, TestLifePrototype, install_factory_motion_route_validator,
+    CreatureMotionExperienceState, CreatureMotionPlugin, CreatureMotionRecord,
+    CreatureObservation, EnvironmentSample, ExecutionBodyId, FactoryMotionRoute,
+    FactoryMotionRouteValidator, GazeCommandEvent, GazeCommandState, GazeOrientation,
+    KinematicVelocity, LocomotionState, MovementCommandState, TestLifePrototype,
+    install_factory_motion_route_validator,
 };
 use roundo_life::{
     AuthoritativeFixedTick, ConceptBodyHandle, ConceptBodyPrototype, EventError, EventPolicy,
-    FactoryError, FactoryInvalidation, LifeCommitScope, LifeFixedSet, LifeHandle, LifePrototype,
-    LifeRuntimePlugin, ScopedLifeError, StateError, StatePolicy,
+    FactoryError, FactoryInvalidation, LifeCommitScope, LifeFixedSet, LifeHandle,
+    LifePrototype, LifeRuntimePlugin, ScopedLifeError, StateError, StatePolicy,
 };
-use roundo_local_coordinate::{LocalCoordinateServerIpc, VirtualChunkEnvironmentMap};
-use roundo_marionette::ServerMarionetteSnapshotSender;
+use roundo_local_coordinate::VirtualChunkEnvironmentMap;
 use roundo_player::{Player, PlayerRegistry};
 use std::collections::HashMap;
-
-const SNAPSHOT_CONNECTION_CAPACITY: usize = 64;
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct SnapshotMetadataCandidate {
-    route: FactoryMotionRoute,
-    tick: u64,
-    player_id: roundo_contracts::PlayerId,
-    connection_generation: u64,
-    movement_controller: ControllerId,
-    gaze_controller: ControllerId,
-    acknowledged_movement: u64,
-    acknowledged_gaze: u64,
-    movement_binding: Option<ControllerBindingId>,
-    gaze_binding: Option<ControllerBindingId>,
-}
-
-#[derive(Resource, Default)]
-struct SnapshotMetadataCandidates {
-    tick: Option<u64>,
-    by_connection: HashMap<ConnectionId, SnapshotMetadataCandidate>,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct SnapshotPublicationAttempt {
-    tick: u64,
-    player_id: roundo_contracts::PlayerId,
-    connection_generation: u64,
-}
-
-#[derive(Resource, Default)]
-struct SnapshotPublicationState {
-    latest_by_connection: HashMap<ConnectionId, SnapshotPublicationAttempt>,
-}
-
-#[derive(Clone, Copy)]
-struct ActivePlayerController {
-    entity: Entity,
-    controller_id: ControllerId,
-    player_id: roundo_contracts::PlayerId,
-    connection_generation: Option<u64>,
-    binding: Option<ControllerBindingId>,
-    valid: bool,
-}
-
-#[derive(Clone, Copy)]
-struct LiveCreatureController {
-    life: LifeHandle,
-    route: FactoryMotionRoute,
-    domain: IntentDomain,
-    controller_ids: TestLifeControllers,
-}
-
-#[derive(Clone, Copy)]
-struct SnapshotSubject {
-    route: FactoryMotionRoute,
-    tick: u64,
-    player_id: roundo_contracts::PlayerId,
-    connection_generation: u64,
-    movement_controller: ControllerId,
-    gaze_controller: ControllerId,
-    movement_binding: Option<ControllerBindingId>,
-    gaze_binding: Option<ControllerBindingId>,
-}
 
 /// The two hard-coded, orthogonal Controller resources created for one test Life.
 #[derive(Component, Clone, Copy, Debug, Eq, PartialEq)]
@@ -281,17 +213,8 @@ impl From<StateError> for CreatureAssemblyError {
     }
 }
 
-/// Owns the authoritative Creature lifecycle behind one server-composition interface.
-///
-/// Player, Controller, Creature Motion, Local Coordinate, and transport remain
-/// independent modules. Their ordering and test-bootstrap policy are composed here.
+/// Composes native Creature lifecycle, motion and environment sampling.
 pub(crate) struct AuthoritativeCreaturePlugin;
-
-impl AuthoritativeCreaturePlugin {
-    pub(crate) fn new(_local_coordinate: LocalCoordinateServerIpc) -> Self {
-        Self
-    }
-}
 
 impl Plugin for AuthoritativeCreaturePlugin {
     fn build(&self, app: &mut App) {
@@ -314,36 +237,18 @@ impl Plugin for AuthoritativeCreaturePlugin {
         }
         app.init_resource::<VirtualChunkEnvironmentMap>()
             .init_resource::<CreatureAssemblyRegistry>()
-            .init_resource::<SnapshotMetadataCandidates>()
-            .init_resource::<SnapshotPublicationState>()
             .add_observer(cleanup_removed_player_assembly)
             .add_observer(cleanup_removed_controller_assembly)
             .configure_sets(
                 FixedUpdate,
-                PlayerControlServerSet::Commands
+                LocalAiControlSet
                     .after(LifeFixedSet::CommitFactories)
                     .before(roundo_creature::CreatureLifeSet::CommandProjection),
             )
             .add_systems(
                 FixedUpdate,
-                sample_creature_environment.before(roundo_creature::CreatureLifeSet::MotionCommit),
-            )
-            .add_systems(
-                FixedUpdate,
-                capture_creature_snapshot_metadata
-                    .after(PlayerControlServerSet::Commands)
-                    .after(roundo_creature::CreatureLifeSet::CommandProjection)
+                sample_creature_environment
                     .before(roundo_creature::CreatureLifeSet::MotionCommit),
-            )
-            .add_systems(
-                FixedUpdate,
-                (
-                    publish_creature_snapshots.in_set(roundo_creature::CreatureLifeSet::Projection),
-                    project_creature_presence
-                        .after(roundo_creature::CreatureLifeSet::RecordUpdate)
-                        .after(roundo_presence::PresenceServerSet::Commands)
-                        .before(roundo_presence::PresenceServerSet::PlayerStates),
-                ),
             );
     }
 }
@@ -381,17 +286,11 @@ pub(crate) fn ensure_test_life_for_player(
 struct AssemblyCleanup<'w, 's> {
     commands: Commands<'w, 's>,
     assemblies: bevy::prelude::ResMut<'w, CreatureAssemblyRegistry>,
-    candidates: Option<bevy::prelude::ResMut<'w, SnapshotMetadataCandidates>>,
     markers: Query<'w, 's, (Entity, &'static BootstrappedTestLife)>,
     execution_controllers: Query<'w, 's, (Entity, &'static TestLifeControllers)>,
 }
 impl AssemblyCleanup<'_, '_> {
     fn remove_mapping(&mut self, life: LifeHandle) {
-        if let Some(candidates) = self.candidates.as_mut() {
-            candidates
-                .by_connection
-                .retain(|_, candidate| candidate.route.life() != life);
-        }
         let controller_ids = self
             .assemblies
             .life_by_controller
