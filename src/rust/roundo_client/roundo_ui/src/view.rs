@@ -194,7 +194,7 @@ pub(crate) fn ingress(world: &mut World) {
             continue;
         };
         let live = UiLifecycleManager::with(world, |ui| {
-            ui.command_source_is_live(UiInstanceId::from_entity(element.instance))
+            ui.instance_is_live(UiInstanceId::from_entity(element.instance))
         });
         if !live
             || !world
@@ -245,8 +245,7 @@ pub(crate) fn ingress(world: &mut World) {
                 continue;
             }
         }
-        // Numeric drag previews update the widget/model, but invoke mutations only
-        // on final edits. This prevents a drag from flooding the command queue.
+        // Numeric drag previews update the widget/model; actions run on final edits.
         if final_edit {
             start_task(
                 world,
@@ -428,7 +427,6 @@ fn sync_nodes(
             data,
             locals,
             event: &Value::Null,
-            result: &Value::Null,
             error: &state.error,
             busy: state.task.is_some(),
         };
@@ -619,7 +617,6 @@ fn sync_nodes(
                     data,
                     locals: &locals,
                     event: &Value::Null,
-                    result: &Value::Null,
                     error: &state.error,
                     busy: state.task.is_some(),
                 };

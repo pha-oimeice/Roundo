@@ -7,17 +7,12 @@ use crate::{
     schema::Action,
 };
 use bevy::{input_focus::InputFocus, prelude::*};
-use roundo_toolbox::request_response_pipe::{
-    ContextualJsonRequestResponseIo, RequestCall, ResponsePoll,
-};
-use serde_json::{Value, json};
+use serde_json::Value;
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     fmt,
     time::{Duration, Instant},
 };
-
-pub type UiCommandIo = ContextualJsonRequestResponseIo<UiCommandSource, Value>;
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Hash)]
 pub struct UiInstanceId(Entity);
@@ -26,11 +21,6 @@ impl UiInstanceId {
     pub fn from_entity(entity: Entity) -> Self {
         Self(entity)
     }
-}
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub enum UiCommandSource {
-    Host,
-    Native(UiInstanceId),
 }
 #[derive(Clone, Debug)]
 pub struct UiOpenTarget(pub(crate) String);
@@ -88,7 +78,6 @@ pub(crate) struct UiRuntime {
     pub root: Entity,
     pub focus: Vec<UiInstanceId>,
     pub next_z: i32,
-    pub io: UiCommandIo,
     pub font: Handle<Font>,
 }
 
@@ -123,9 +112,6 @@ pub struct UiLifecycleManager<'w> {
     pub world: &'w mut World,
 }
 impl UiLifecycleManager<'_> {
-    pub fn is_installed(world: &World) -> bool {
-        world.contains_resource::<UiRuntime>()
-    }
     pub fn with<R>(world: &mut World, f: impl FnOnce(&mut UiLifecycleManager<'_>) -> R) -> R {
         f(&mut UiLifecycleManager { world })
     }
@@ -144,7 +130,7 @@ impl UiLifecycleManager<'_> {
         }
         false
     }
-    pub fn command_source_is_live(&self, id: UiInstanceId) -> bool {
+    pub(crate) fn instance_is_live(&self, id: UiInstanceId) -> bool {
         self.world.get::<UiInstance>(id.0).is_some() && self.belongs(id.0)
     }
     pub fn is_root(&self, id: UiInstanceId) -> bool {
@@ -192,7 +178,7 @@ impl UiLifecycleManager<'_> {
         source: UiInstanceId,
         handle: &str,
     ) -> Result<UiOpenTarget, UiLifecycleError> {
-        if !self.command_source_is_live(source) {
+        if !self.instance_is_live(source) {
             return Err(UiLifecycleError::StaleUiInstance);
         }
         let instance = self.world.get::<UiInstance>(source.0).unwrap();
@@ -205,13 +191,13 @@ impl UiLifecycleManager<'_> {
     }
     pub fn navigate(
         &mut self,
-        source: UiCommandSource,
+        parent: Option<UiInstanceId>,
         target: UiOpenTarget,
     ) -> Result<UiInstanceId, UiLifecycleError> {
-        let parent = match source {
-            UiCommandSource::Host => self.root_entity(),
-            UiCommandSource::Native(id) if self.command_source_is_live(id) => id.0,
-            _ => return Err(UiLifecycleError::StaleUiInstance),
+        let parent = match parent {
+            None => self.root_entity(),
+            Some(id) if self.instance_is_live(id) => id.0,
+            Some(_) => return Err(UiLifecycleError::StaleUiInstance),
         };
         let definition = self
             .registry()
@@ -297,7 +283,7 @@ impl UiLifecycleManager<'_> {
         Ok(())
     }
     pub fn back(&mut self, id: UiInstanceId) -> Result<(), UiLifecycleError> {
-        if !self.command_source_is_live(id) {
+        if !self.instance_is_live(id) {
             return Err(UiLifecycleError::StaleUiInstance);
         }
         if self.is_root(id) {
@@ -329,8 +315,7 @@ impl UiLifecycleManager<'_> {
         }
     }
     pub fn focus(&mut self, id: UiInstanceId) {
-        if !self.command_source_is_live(id) || !self.world.get::<UiInstance>(id.0).unwrap().visible
-        {
+        if !self.instance_is_live(id) || !self.world.get::<UiInstance>(id.0).unwrap().visible {
             return;
         }
         let definition = &self.world.get::<UiInstance>(id.0).unwrap().definition;
@@ -505,16 +490,7 @@ pub(crate) struct Task {
     actions: VecDeque<Action>,
     locals: BTreeMap<String, Value>,
     event: Value,
-    result: Value,
-    waiting: Option<Waiting>,
-    completed_steps: usize,
-}
-enum Waiting {
-    Command {
-        call: RequestCall<Value>,
-        save: Option<String>,
-    },
-    Timer(Instant),
+    resume_at: Option<Instant>,
 }
 impl Task {
     fn new(actions: Vec<Action>, locals: BTreeMap<String, Value>, event: Value) -> Self {
@@ -522,9 +498,7 @@ impl Task {
             actions: actions.into(),
             locals,
             event,
-            result: Value::Null,
-            waiting: None,
-            completed_steps: 0,
+            resume_at: None,
         }
     }
 }
@@ -599,14 +573,7 @@ pub(crate) fn advance(world: &mut World) {
             Err(error) => {
                 if let Some(mut view) = world.get_mut::<UiInstance>(entity) {
                     log::error!("native UI {name}: {error}");
-                    view.error = if task.completed_steps == 0 {
-                        error
-                    } else {
-                        format!(
-                            "动作序列已有 {} 个步骤收到成功响应；后续失败不撤回已完成操作，请读取状态，勿重复提交。\n{error}",
-                            task.completed_steps
-                        )
-                    };
+                    view.error = error;
                     drop(view);
                     crate::view::invalidate_values(world, entity);
                 }
@@ -620,46 +587,13 @@ fn advance_task(
     definition: &UiResource,
     task: &mut Task,
 ) -> Result<bool, String> {
-    if let Some(waiting) = task.waiting.take() {
-        match waiting {
-            Waiting::Timer(deadline) if Instant::now() < deadline => {
-                task.waiting = Some(Waiting::Timer(deadline));
-                return Ok(false);
-            }
-            Waiting::Timer(_) => {}
-            Waiting::Command { call, save } => match call.poll() {
-                ResponsePoll::Pending => {
-                    task.waiting = Some(Waiting::Command { call, save });
-                    return Ok(false);
-                }
-                ResponsePoll::Disconnected => {
-                    return Err(
-                        "命令响应通道已断开，结果未知；请读取当前状态，不要自动重试。".into(),
-                    );
-                }
-                ResponsePoll::Ready(response) => {
-                    if response["ok"] != true {
-                        return Err(format!(
-                            "{}: {}",
-                            response["error"]["code"], response["error"]["message"]
-                        ));
-                    }
-                    task.completed_steps += 1;
-                    task.result = response["data"].clone();
-                    if let Some(path) = save {
-                        set_model(
-                            &mut world
-                                .get_mut::<UiInstance>(entity)
-                                .ok_or("view ended")?
-                                .model,
-                            &path,
-                            task.result.clone(),
-                        )?;
-                    }
-                }
-            },
-        }
+    if task
+        .resume_at
+        .is_some_and(|deadline| Instant::now() < deadline)
+    {
+        return Ok(false);
     }
+    task.resume_at = None;
     while let Some(action) = task.actions.pop_front() {
         let instance = world.get::<UiInstance>(entity).ok_or("view ended")?;
         let data = data_context(world, definition);
@@ -668,7 +602,6 @@ fn advance_task(
             data: &data,
             locals: &task.locals,
             event: &task.event,
-            result: &task.result,
             error: &instance.error,
             busy: true,
         };
@@ -687,26 +620,7 @@ fn advance_task(
                 }
             }
             Action::Wait { seconds } => {
-                task.waiting = Some(Waiting::Timer(
-                    Instant::now() + Duration::from_secs_f32(seconds),
-                ));
-                return Ok(false);
-            }
-            Action::Command {
-                name,
-                arguments,
-                save,
-            } => {
-                let arguments = context.eval(&arguments)?;
-                let call = world
-                    .resource::<UiRuntime>()
-                    .io
-                    .submit(
-                        json!({"version":1,"command":name,"arguments":arguments}),
-                        UiCommandSource::Native(UiInstanceId(entity)),
-                    )
-                    .map_err(|e| format!("command not queued: {e:?}"))?;
-                task.waiting = Some(Waiting::Command { call, save });
+                task.resume_at = Some(Instant::now() + Duration::from_secs_f32(seconds));
                 return Ok(false);
             }
         }

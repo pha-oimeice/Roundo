@@ -2,15 +2,10 @@
 
 use roundo_marionette::{ClientMarionetteInputSettings, InputFunctionRegistry};
 use roundo_user_config::{ClientConfig, ClientSettingsConfig, CommonConfig};
-use std::{
-    path::PathBuf,
-    sync::{LazyLock, RwLock},
-};
+use std::{path::PathBuf, sync::LazyLock};
 
 static COMMON_CONFIG: LazyLock<CommonConfig> =
     LazyLock::new(roundo_user_config::load_common_config);
-static CLIENT_CONFIG: LazyLock<RwLock<ClientConfig>> =
-    LazyLock::new(|| RwLock::new(load_config()));
 
 pub fn load_config() -> ClientConfig {
     roundo_user_config::load_client_config()
@@ -18,12 +13,7 @@ pub fn load_config() -> ClientConfig {
 pub fn mod_path() -> PathBuf {
     COMMON_CONFIG.resolved_mod_path()
 }
-pub fn settings() -> ClientSettingsConfig {
-    read_config().settings.clone()
-}
-pub fn runtime_input_settings(
-    settings: &ClientSettingsConfig,
-) -> ClientMarionetteInputSettings {
+pub fn runtime_input_settings(settings: &ClientSettingsConfig) -> ClientMarionetteInputSettings {
     ClientMarionetteInputSettings {
         mouse_sensitivity: settings.controls.mouse_sensitivity,
         camera_move_speed: settings.camera.move_speed,
@@ -78,10 +68,4 @@ pub fn resolve_slot_functions<'a>(
         }
     }
     Ok(&resource.functions)
-}
-
-fn read_config() -> std::sync::RwLockReadGuard<'static, ClientConfig> {
-    CLIENT_CONFIG
-        .read()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }

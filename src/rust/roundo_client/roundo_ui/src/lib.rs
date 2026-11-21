@@ -1,5 +1,5 @@
 //! Mod-driven TOML views rendered exclusively by Bevy native UI and Feather widgets.
-//! Business commands remain client-owned; no browser, scripting engine or remote ECS endpoint.
+//! Views and their local actions run directly in the Bevy World.
 
 use roundo_mod_manager::AssetAccess;
 use roundo_mod_manager::ui::{UiCatalogue, expression, layout, schema};
@@ -10,10 +10,7 @@ mod view;
 use registry::UiRegistry;
 pub use registry::UiResource;
 pub use roundo_mod_manager::ui::{ClientInteractionMode, MENU_ROOT_SLOT};
-pub use runtime::{
-    UiCommandIo, UiCommandSource, UiData, UiInstanceId, UiLifecycleError, UiLifecycleManager,
-    UiOpenTarget,
-};
+pub use runtime::{UiData, UiInstanceId, UiLifecycleError, UiLifecycleManager, UiOpenTarget};
 pub use view::text_edit_has_focus;
 
 use bevy::{
@@ -35,13 +32,11 @@ struct UiRoot;
 
 pub struct RoundoUiPlugin {
     registry: UiRegistry,
-    command_io: UiCommandIo,
 }
 impl RoundoUiPlugin {
-    pub fn new(catalogue: UiCatalogue, assets: AssetAccess, command_io: UiCommandIo) -> Self {
+    pub fn new(catalogue: UiCatalogue, assets: AssetAccess) -> Self {
         Self {
             registry: UiRegistry::new(catalogue, assets),
-            command_io,
         }
     }
 }
@@ -69,7 +64,6 @@ impl Plugin for RoundoUiPlugin {
             root,
             focus: Vec::new(),
             next_z: 0,
-            io: self.command_io.clone(),
             font,
         })
         .init_resource::<UiData>()

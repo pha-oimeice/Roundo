@@ -1,8 +1,7 @@
 use log::debug;
-use roundo_cli::RoundoCliPlugin;
 use roundo_ecs_entry::create_ecs_client_app;
 
-mod commands;
+mod client_data;
 mod config;
 mod config_store;
 mod input;
@@ -27,7 +26,8 @@ fn init_logger() {
 fn main() -> bevy::app::AppExit {
     init_logger();
     debug!("Hello Roundo Client!");
-    let settings = config::settings();
+    let config = config_store::ClientConfigStore::new(config::load_config());
+    let settings = config.settings();
     let mods_root = config::mod_path();
     let mut resources =
         roundo_mod_manager::ModLoader::new(roundo_mod_manager::AssetLimits::default())
@@ -72,17 +72,12 @@ fn main() -> bevy::app::AppExit {
             roundo_mod_manager::INPUT_PROTOTYPE_TYPE,
         )
         .expect("Input prototypes must be published");
-    commands::validate_ui_registry(&ui_catalogue, &assets, &input_registry)
-        .unwrap_or_else(|error| panic!("invalid native UI command/data binding: {error}"));
-    config::validate_input_configuration(&settings, &input_registry)
+    ui_host::validate_ui_registry(&ui_catalogue, &assets, &input_registry)
+        .unwrap_or_else(|error| panic!("invalid native UI data/input binding: {error}"));
+    config::validate_input_configuration(settings, &input_registry)
         .unwrap_or_else(|error| panic!("invalid configured input binding: {error}"));
     let mut app = create_ecs_client_app(voxels);
-    // Both native UI and terminal adapters submit to this shared bounded queue; the
-    // client-owned command plugin executes it on Bevy's main world.
-    let command_pipe = commands::ClientCommandPipe::bounded(256);
-    let command_io = command_pipe.io();
-    app.insert_resource(command_pipe)
-        .insert_resource(config::runtime_input_settings(&settings))
+    app.insert_resource(config::runtime_input_settings(settings))
         .insert_resource(input_registry)
         .insert_resource(roundo_rendering::WorldRenderSettings {
             geometry_lod_pixel_error: settings.world.geometry_lod_pixel_error,
@@ -91,11 +86,18 @@ fn main() -> bevy::app::AppExit {
         .insert_resource(targeting::ClientVoxelRaycastSettings::new(
             settings.camera.voxel_raycast_distance,
         ))
+        .insert_resource(config)
+        .init_resource::<client_data::HudCache>()
+        .add_systems(
+            bevy::prelude::Update,
+            (
+                config_store::sync_runtime_settings,
+                client_data::update_hud_cache,
+            ),
+        )
         .add_plugins((
-            RoundoCliPlugin,
-            commands::ClientCommandsPlugin,
             targeting::ClientVoxelTargetingPlugin,
-            roundo_ui::RoundoUiPlugin::new(ui_catalogue, assets, command_io),
+            roundo_ui::RoundoUiPlugin::new(ui_catalogue, assets),
             input::ClientInputPlugin,
             ui_host::ClientUiHostPlugin,
         ));

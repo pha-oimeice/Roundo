@@ -1,7 +1,5 @@
-mod commands;
 mod config;
 use log::{debug, info};
-use roundo_cli::RoundoCliPlugin;
 use roundo_ecs_entry::{ServerEcsConfig, ServerEcsRuntime};
 
 fn init_logger() {
@@ -62,7 +60,6 @@ fn main() {
             .ok_or_else(|| "未配置宿主预留的 item_ids 区间，不能创建物品".into())
     }));
     info!("Standalone server ECS started");
-    app.add_plugins((RoundoCliPlugin, commands::ServerCommandsPlugin))
-        .run();
+    app.run();
     debug!("Main thread terminated.");
 }

@@ -1,5 +1,6 @@
 //! Camera-driven voxel selection and render-object highlighting.
 
+use crate::client_data::{HudCache, HudTargetSnapshot};
 use bevy::{prelude::*, transform::TransformSystems};
 use roundo_local_coordinate::{VoxelRaycastHit, VoxelRaycaster};
 use roundo_marionette::ClientPlayerController;
@@ -98,7 +99,7 @@ fn update_voxel_target(
     cameras: Query<(&Camera, &GlobalTransform), With<Camera3d>>,
     local_coordinates: Query<&GlobalTransform>,
     mut target: ResMut<ClientVoxelTarget>,
-    mut hud: ResMut<crate::commands::HudCache>,
+    mut hud: ResMut<HudCache>,
     mut highlight: ResMut<VoxelHighlightState>,
     mut render_objects: ResMut<RenderObjects>,
 ) {
@@ -114,17 +115,13 @@ fn update_voxel_target(
     if target.hit != hit {
         target.hit = hit;
     }
-    hud.set_target(hit.map(|hit| {
-        let voxel = hit.voxel_position();
-        let chunk = hit.chunk.local_chunk_position();
-        serde_json::json!({
-            "voxel": format!("{:?}", hit.voxel),
-            "voxel_position": [voxel.x, voxel.y, voxel.z],
-            "relative_position": [hit.voxel_relative_position.x, hit.voxel_relative_position.y, hit.voxel_relative_position.z],
-            "chunk": [chunk.x, chunk.y, chunk.z],
-            "local_coordinate": format!("{:?}", hit.chunk.local_coordinate_entity()),
-        })
-    }));
+    hud.target = hit.map(|hit| HudTargetSnapshot {
+        voxel: format!("{:?}", hit.voxel),
+        voxel_position: hit.voxel_position().to_array(),
+        relative_position: hit.voxel_relative_position.as_vec3().to_array(),
+        chunk: hit.chunk.local_chunk_position().to_array(),
+        local_coordinate: format!("{:?}", hit.chunk.local_coordinate_entity()),
+    });
 
     // Missing targets hide rather than destroy the reusable highlight.
     let Some(hit) = hit else {

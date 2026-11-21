@@ -9,7 +9,6 @@ pub struct Context<'a> {
     pub data: &'a Value,
     pub locals: &'a BTreeMap<String, Value>,
     pub event: &'a Value,
-    pub result: &'a Value,
     pub error: &'a str,
     pub busy: bool,
 }
@@ -22,7 +21,6 @@ impl Context<'_> {
             "model" => self.model.clone(),
             "data" => self.data.clone(),
             "event" => self.event.clone(),
-            "result" => self.result.clone(),
             "error" => Value::String(self.error.into()),
             "busy" => Value::Bool(self.busy),
             name => self

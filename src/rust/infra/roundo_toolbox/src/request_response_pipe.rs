@@ -5,15 +5,6 @@ use std::sync::Arc;
 /// Maximum serialized JSON command size admitted to a request queue.
 pub const MAX_JSON_REQUEST_BYTES: usize = 64 * 1024;
 
-/// A typed JSON command plus adapter-owned transport context. `command` is
-/// deliberately left untouched so strict command-envelope validation remains
-/// the shared execution seam.
-#[derive(Clone, Debug, PartialEq)]
-pub struct CommandTransport<Context> {
-    pub command: Value,
-    pub context: Context,
-}
-
 /// A bounded multi-producer request queue with a private one-shot response
 /// channel per request. Responses therefore cannot be consumed by another
 /// caller, unlike a shared duplex queue.
@@ -56,15 +47,6 @@ pub enum ResponsePoll<Response> {
 #[derive(Clone)]
 pub struct JsonRequestResponseIo<Response> {
     inner: RequestResponseIo<Value, Response>,
-}
-
-/// JSON submission adapter that carries non-JSON command context separately.
-/// This is intentionally a concrete transport shape rather than a trait: the
-/// host has two real adapters (terminal and native UI), while their command
-/// payload remains source-neutral.
-#[derive(Clone)]
-pub struct ContextualJsonRequestResponseIo<Context, Response> {
-    inner: RequestResponseIo<CommandTransport<Context>, Response>,
 }
 
 /// Failure to admit a JSON request; no request is queued on any variant.
@@ -179,22 +161,6 @@ impl<Response> JsonRequestResponseIo<Response> {
 
     pub fn submit(&self, request: Value) -> Result<RequestCall<Response>, JsonSubmitError> {
         submit_json_request(request, |request| self.inner.submit(request))
-    }
-}
-
-impl<Context, Response> ContextualJsonRequestResponseIo<Context, Response> {
-    pub fn new(inner: RequestResponseIo<CommandTransport<Context>, Response>) -> Self {
-        Self { inner }
-    }
-
-    pub fn submit(
-        &self,
-        command: Value,
-        context: Context,
-    ) -> Result<RequestCall<Response>, JsonSubmitError> {
-        submit_json_request(command, |command| {
-            self.inner.submit(CommandTransport { command, context })
-        })
     }
 }
 

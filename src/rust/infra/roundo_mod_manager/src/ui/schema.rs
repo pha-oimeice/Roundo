@@ -1,5 +1,5 @@
 //! TOML caller contract for native views. Expressions can only read declared data,
-//! the view's model, repeat locals and the current action result; never the ECS World.
+//! the view's model, repeat locals and local view state; never the ECS World.
 
 use serde::Deserialize;
 use serde_json::Value;
@@ -92,22 +92,9 @@ pub struct Style {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
 pub enum Action {
-    Set {
-        path: String,
-        value: Value,
-    },
-    Command {
-        name: String,
-        arguments: Value,
-        save: Option<String>,
-    },
-    Require {
-        condition: Value,
-        message: String,
-    },
-    Wait {
-        seconds: f32,
-    },
+    Set { path: String, value: Value },
+    Require { condition: Value, message: String },
+    Wait { seconds: f32 },
 }
 
 impl Page {
@@ -131,7 +118,7 @@ impl Page {
             validate_actions(actions)?;
         }
         validate_nodes(&self.nodes)?;
-        let mut roots = ["model", "data", "event", "result", "error", "busy"]
+        let mut roots = ["model", "data", "event", "error", "busy"]
             .into_iter()
             .map(str::to_owned)
             .collect::<std::collections::BTreeSet<_>>();
@@ -340,14 +327,6 @@ fn validate_action_expressions(
                 validate_write(path, model)?;
                 super::expression::validate(value, roots)?;
             }
-            Action::Command {
-                arguments, save, ..
-            } => {
-                if let Some(path) = save {
-                    validate_write(path, model)?;
-                }
-                super::expression::validate(arguments, roots)?;
-            }
             Action::Require { condition, .. } => super::expression::validate(condition, roots)?,
             Action::Wait { .. } => {}
         }
@@ -365,9 +344,6 @@ fn validate_actions(actions: &[Action]) -> Result<(), String> {
     for action in actions {
         match action {
             Action::Set { path, .. } => validate_model_path(path)?,
-            Action::Command {
-                save: Some(path), ..
-            } => validate_model_path(path)?,
             Action::Wait { seconds } if !seconds.is_finite() || *seconds < 0.0 => {
                 return Err("wait duration must be finite/nonnegative".into());
             }

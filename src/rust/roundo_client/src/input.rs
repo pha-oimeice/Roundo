@@ -1,5 +1,5 @@
 //! Sole device-input adapter. Configured bindings produce semantic functions;
-//! TOML view actions, not Rust key tables, decide which native UI to open.
+//! TOML views can map these functions to local view actions.
 
 use bevy::prelude::*;
 use roundo_marionette::InputFunctionRegistry;
@@ -23,7 +23,7 @@ impl Plugin for ClientInputPlugin {
         app.init_resource::<CapturedInput>().add_systems(
             Update,
             collect_input
-                .after(crate::commands::ClientCommandSystemSet::ExecuteAndPublish)
+                .after(UiSystemSet::Ingress)
                 .before(UiSystemSet::Project)
                 .run_if(resource_exists::<UiReady>),
         );

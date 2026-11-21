@@ -60,7 +60,6 @@ crossbeam = "0.8"
 env_logger = "0.11"
 log = "0.4"
 num-traits = "0.2"
-open = "5.4.5"
 openusd = { git = "https://github.com/mxpv/openusd", rev = "900ea31591348e3fbf416d4661d703aa8700771b" }
 postcard = { version = "1.1", features = ["use-std"] }
 rand = "0.10"
@@ -83,7 +82,6 @@ roundo_block_interaction = { path = "src/rust/game/roundo_block_interaction" }
 roundo_contracts = { path = "src/rust/game/roundo_contracts" }
 roundo_controller = { path = "src/rust/game/roundo_controller" }
 roundo_creature = { path = "src/rust/game/roundo_creature" }
-roundo_cli = { path = "src/rust/infra/roundo_cli" }
 roundo_ecs_entry = { path = "src/rust/game/roundo_ecs_entry", default-features = false }
 roundo_life = { path = "src/rust/game/roundo_life" }
 roundo_inventory = { path = "src/rust/game/roundo_inventory" }
@@ -93,7 +91,6 @@ roundo_marionette = { path = "src/rust/game/roundo_marionette" }
 roundo_networking_proc_macro = { path = "src/rust/infra/roundo_networking/proc_macro" }
 roundo_quinnet = { path = "src/rust/infra/roundo_quinnet" }
 roundo_rendering = { path = "src/rust/roundo_client/roundo_rendering" }
-roundo_presence = { path = "src/rust/game/roundo_presence" }
 roundo_player = { path = "src/rust/game/roundo_player" }
 roundo_portal = { path = "src/rust/game/roundo_portal" }
 roundo_local_coordinate = { path = "src/rust/game/roundo_local_coordinate" }
