@@ -62,8 +62,8 @@ mono_crash.*
 # Build results
 [Dd]ebug/
 # These are source directories, not build output.
-!src/rust/game/roundo_ecs_entry/src/debug/
-!src/rust/game/roundo_ecs_entry/src/debug/*.rs
+!src/game/roundo_ecs_entry/src/debug/
+!src/game/roundo_ecs_entry/src/debug/*.rs
 !mods/vanilla_ui/assets/webui/debug/
 !mods/vanilla_ui/assets/webui/debug/*
 [Dd]ebugPublic/

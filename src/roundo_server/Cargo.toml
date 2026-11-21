@@ -3,15 +3,9 @@ name = "roundo_server"
 version.workspace = true
 edition.workspace = true
 
-[[bin]]
-name = "roundo-server"
-path = "src/main.rs"
-
 [dependencies]
 anyhow.workspace = true
 bevy.workspace = true
-env_logger.workspace = true
-log.workspace = true
 roundo_ecs_entry = { workspace = true, features = ["server"] }
 roundo_local_coordinate.workspace = true
 roundo_items.workspace = true

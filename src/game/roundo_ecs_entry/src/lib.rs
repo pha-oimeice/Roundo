@@ -1,4 +1,4 @@
-//! Feature-gated World constructors for the game ECS runtime.
+//! Feature-gated plugins for the game ECS runtimes.
 
 #[cfg(feature = "server")]
 mod authoritative_creature;
@@ -40,6 +40,6 @@ pub use player_control::{
 };
 
 #[cfg(feature = "client")]
-pub use client::{create_ecs_client_app, run_ecs_client};
+pub use client::ClientEcsPlugin;
 #[cfg(feature = "server")]
-pub use server::{ServerEcsConfig, ServerEcsRuntime, create_ecs_server_app, run_ecs_server};
+pub use server::{ServerEcsPlugin, ensure_local_test_player};

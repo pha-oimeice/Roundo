@@ -3,13 +3,8 @@ name = "roundo_client"
 version.workspace = true
 edition.workspace = true
 
-[[bin]]
-name = "roundo-client"
-path = "src/main.rs"
-
 [dependencies]
 bevy.workspace = true
-env_logger.workspace = true
 log.workspace = true
 roundo_ecs_entry = { workspace = true, features = ["client"] }
 roundo_local_coordinate.workspace = true
