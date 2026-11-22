@@ -21,3 +21,5 @@ rustdocflags = [
     "-Zshare-generics=y",
     "-Zthreads=0",
 ]
+
+[env]
