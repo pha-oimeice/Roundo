@@ -1,5 +1,5 @@
 //! Interactive Life Event/State example using the production runtime.
-//! Ownership and access grants are implemented once in roundo_dsa, through Life.
+//! Ownership and access grants reuse infrastructure primitives through Life.
 //!
 //! cargo run -p roundo_creature --example life_event_state_prototype --profile dev --features dev
 

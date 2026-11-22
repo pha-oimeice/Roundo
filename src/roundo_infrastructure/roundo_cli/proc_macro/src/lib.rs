@@ -5,8 +5,10 @@
 //! tokenizer's responsibility.
 
 use proc_macro::TokenStream;
+use proc_macro_crate::{Error, FoundCrate, crate_name};
+use proc_macro2::Span;
 use quote::quote;
-use syn::{DeriveInput, LitChar, LitStr, Type, parse_macro_input};
+use syn::{DeriveInput, LitChar, LitStr, Type, parse_macro_input, parse_quote};
 
 // Recognizes the final path segment of simple Option<T>/Vec<T>-style field types.
 fn generic_inner<'a>(ty: &'a Type, container: &str) -> Option<&'a Type> {
@@ -147,7 +149,26 @@ fn unix_path(attributes: &[syn::Attribute], name: &syn::Ident) -> Result<LitStr,
     path.ok_or_else(|| syn::Error::new_spanned(name, "UnixCommand requires #[unix(path = \"…\")]"))
 }
 
-/// Derives `roundo_cli::UnixCommand` for a named-field command struct.
+fn cli_path(span: Span) -> syn::Result<syn::Path> {
+    match crate_name("roundo_infrastructure") {
+        Ok(FoundCrate::Itself) => Ok(parse_quote!(crate::cli)),
+        Ok(FoundCrate::Name(name)) => {
+            let name = syn::Ident::new_raw(&name, span);
+            Ok(parse_quote!(::#name::cli))
+        }
+        Err(Error::CrateNotFound { .. }) => match crate_name("roundo_cli") {
+            Ok(FoundCrate::Itself) => Ok(parse_quote!(::roundo_cli)),
+            Ok(FoundCrate::Name(name)) => {
+                let name = syn::Ident::new_raw(&name, span);
+                Ok(parse_quote!(::#name))
+            }
+            Err(error) => Err(syn::Error::new(span, error)),
+        },
+        Err(error) => Err(syn::Error::new(span, error)),
+    }
+}
+
+/// Derives `roundo_infrastructure::cli::UnixCommand` for a named-field command struct.
 ///
 /// The struct requires `#[unix(path = "command path")]`. Fields are positional
 /// by default and may instead declare `#[unix(long)]`,
@@ -174,6 +195,10 @@ fn unix_path(attributes: &[syn::Attribute], name: &syn::Ident) -> Result<LitStr,
 pub fn derive_unix_command(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
     let name = input.ident;
+    let cli = match cli_path(name.span()) {
+        Ok(path) => path,
+        Err(error) => return error.to_compile_error().into(),
+    };
     let path = match unix_path(&input.attrs, &name) {
         Ok(path) => path,
         Err(error) => return error.to_compile_error().into(),
@@ -244,7 +269,7 @@ pub fn derive_unix_command(input: TokenStream) -> TokenStream {
         if let Some(default) = &spec.default {
             let default = LitStr::new(default, field.ident.as_ref().unwrap().span());
             let ty = &field.ty;
-            Some(quote! { values.insert(#key.to_string(), ::serde_json::to_value(#default.parse::<#ty>().map_err(|_| ::roundo_cli::UnixCommandParseError::new(concat!("invalid default for ", #key)))?).map_err(|error| ::roundo_cli::UnixCommandParseError::new(error.to_string()))?); })
+            Some(quote! { values.insert(#key.to_string(), ::serde_json::to_value(#default.parse::<#ty>().map_err(|_| #cli::UnixCommandParseError::new(concat!("invalid default for ", #key)))?).map_err(|error| #cli::UnixCommandParseError::new(error.to_string()))?); })
         } else {
             match spec.kind {
                 UnixFieldKind::Flag => Some(quote! { values.insert(#key.to_string(), ::serde_json::Value::Bool(false)); }),
@@ -259,10 +284,10 @@ pub fn derive_unix_command(input: TokenStream) -> TokenStream {
         let parse = match spec.kind {
             UnixFieldKind::Flag => quote! { values.insert(#key.to_string(), ::serde_json::Value::Bool(true)); },
             UnixFieldKind::Repeated(inner) => {
-                quote! { let value = arguments.get(index + 1).ok_or_else(|| ::roundo_cli::UnixCommandParseError::new(format!("missing value for {}", token)))?.parse::<#inner>().map_err(|_| ::roundo_cli::UnixCommandParseError::new(format!("invalid value for {}", token)))?; let entry = values.entry(#key.to_string()).or_insert_with(|| ::serde_json::json!([])); entry.as_array_mut().unwrap().push(::serde_json::to_value(value).map_err(|error| ::roundo_cli::UnixCommandParseError::new(error.to_string()))?); index += 1; }
+                quote! { let value = arguments.get(index + 1).ok_or_else(|| #cli::UnixCommandParseError::new(format!("missing value for {}", token)))?.parse::<#inner>().map_err(|_| #cli::UnixCommandParseError::new(format!("invalid value for {}", token)))?; let entry = values.entry(#key.to_string()).or_insert_with(|| ::serde_json::json!([])); entry.as_array_mut().unwrap().push(::serde_json::to_value(value).map_err(|error| #cli::UnixCommandParseError::new(error.to_string()))?); index += 1; }
             }
             UnixFieldKind::Optional(ty) | UnixFieldKind::Scalar(ty) => {
-                quote! { let value = arguments.get(index + 1).ok_or_else(|| ::roundo_cli::UnixCommandParseError::new(format!("missing value for {}", token)))?.parse::<#ty>().map_err(|_| ::roundo_cli::UnixCommandParseError::new(format!("invalid value for {}", token)))?; values.insert(#key.to_string(), ::serde_json::to_value(value).map_err(|error| ::roundo_cli::UnixCommandParseError::new(error.to_string()))?); index += 1; }
+                quote! { let value = arguments.get(index + 1).ok_or_else(|| #cli::UnixCommandParseError::new(format!("missing value for {}", token)))?.parse::<#ty>().map_err(|_| #cli::UnixCommandParseError::new(format!("invalid value for {}", token)))?; values.insert(#key.to_string(), ::serde_json::to_value(value).map_err(|error| #cli::UnixCommandParseError::new(error.to_string()))?); index += 1; }
             }
         };
         let mut arms = Vec::new();
@@ -274,16 +299,16 @@ pub fn derive_unix_command(input: TokenStream) -> TokenStream {
         let key = LitStr::new(&field.ident.as_ref().unwrap().to_string(), field.ident.as_ref().unwrap().span());
         match spec.kind {
             UnixFieldKind::Repeated(inner) => {
-                quote! { let parsed = positional.iter().skip(#index).map(|value| value.parse::<#inner>().map_err(|_| ::roundo_cli::UnixCommandParseError::new(format!("invalid argument {}", #index + 1)))).collect::<Result<Vec<_>, _>>()?; values.insert(#key.to_string(), ::serde_json::to_value(parsed).map_err(|error| ::roundo_cli::UnixCommandParseError::new(error.to_string()))?); }
+                quote! { let parsed = positional.iter().skip(#index).map(|value| value.parse::<#inner>().map_err(|_| #cli::UnixCommandParseError::new(format!("invalid argument {}", #index + 1)))).collect::<Result<Vec<_>, _>>()?; values.insert(#key.to_string(), ::serde_json::to_value(parsed).map_err(|error| #cli::UnixCommandParseError::new(error.to_string()))?); }
             }
             UnixFieldKind::Optional(ty) => {
-                quote! { if let Some(value) = positional.get(#index) { values.insert(#key.to_string(), ::serde_json::to_value(value.parse::<#ty>().map_err(|_| ::roundo_cli::UnixCommandParseError::new(format!("invalid argument {}", #index + 1)))?).map_err(|error| ::roundo_cli::UnixCommandParseError::new(error.to_string()))?); } }
+                quote! { if let Some(value) = positional.get(#index) { values.insert(#key.to_string(), ::serde_json::to_value(value.parse::<#ty>().map_err(|_| #cli::UnixCommandParseError::new(format!("invalid argument {}", #index + 1)))?).map_err(|error| #cli::UnixCommandParseError::new(error.to_string()))?); } }
             }
             UnixFieldKind::Scalar(ty) if spec.omittable => {
-                quote! { if let Some(value) = positional.get(#index) { values.insert(#key.to_string(), ::serde_json::to_value(value.parse::<#ty>().map_err(|_| ::roundo_cli::UnixCommandParseError::new(format!("invalid argument {}", #index + 1)))?).map_err(|error| ::roundo_cli::UnixCommandParseError::new(error.to_string()))?); } }
+                quote! { if let Some(value) = positional.get(#index) { values.insert(#key.to_string(), ::serde_json::to_value(value.parse::<#ty>().map_err(|_| #cli::UnixCommandParseError::new(format!("invalid argument {}", #index + 1)))?).map_err(|error| #cli::UnixCommandParseError::new(error.to_string()))?); } }
             }
             UnixFieldKind::Scalar(ty) => {
-                quote! { let value = positional.get(#index).ok_or_else(|| ::roundo_cli::UnixCommandParseError::new(format!("missing argument {}", #index + 1)))?.parse::<#ty>().map_err(|_| ::roundo_cli::UnixCommandParseError::new(format!("invalid argument {}", #index + 1)))?; values.insert(#key.to_string(), ::serde_json::to_value(value).map_err(|error| ::roundo_cli::UnixCommandParseError::new(error.to_string()))?); }
+                quote! { let value = positional.get(#index).ok_or_else(|| #cli::UnixCommandParseError::new(format!("missing argument {}", #index + 1)))?.parse::<#ty>().map_err(|_| #cli::UnixCommandParseError::new(format!("invalid argument {}", #index + 1)))?; values.insert(#key.to_string(), ::serde_json::to_value(value).map_err(|error| #cli::UnixCommandParseError::new(error.to_string()))?); }
             }
             UnixFieldKind::Flag => unreachable!("flags are options"),
         }
@@ -296,7 +321,7 @@ pub fn derive_unix_command(input: TokenStream) -> TokenStream {
     } else {
         Some(positional.len())
     };
-    let positional_limit = max_positionals.map(|max| quote! { if positional.len() > #max { return Err(::roundo_cli::UnixCommandParseError::new(format!("expected at most {} positional arguments", #max))); } });
+    let positional_limit = max_positionals.map(|max| quote! { if positional.len() > #max { return Err(#cli::UnixCommandParseError::new(format!("expected at most {} positional arguments", #max))); } });
     let mut usage = path.value();
     for (field, spec) in fields.iter().zip(&specs) {
         let field_name = field.ident.as_ref().unwrap();
@@ -324,9 +349,9 @@ pub fn derive_unix_command(input: TokenStream) -> TokenStream {
     }
     let usage = LitStr::new(&usage, path.span());
     quote! {
-        impl ::roundo_cli::UnixCommand for #name {
+        impl #cli::UnixCommand for #name {
             const UNIX_PATH: &'static [&'static str] = &[#(#path_parts),*];
-            fn parse_unix(arguments: &[String]) -> Result<::serde_json::Value, ::roundo_cli::UnixCommandParseError> {
+            fn parse_unix(arguments: &[String]) -> Result<::serde_json::Value, #cli::UnixCommandParseError> {
                 let mut values = ::serde_json::Map::new();
                 #(#initializers)*
                 let mut positional = Vec::new();
@@ -334,14 +359,14 @@ pub fn derive_unix_command(input: TokenStream) -> TokenStream {
                 while index < arguments.len() {
                     let token = &arguments[index];
                     if token.starts_with('-') {
-                        match token.as_str() { #(#option_arms)* _ => return Err(::roundo_cli::UnixCommandParseError::new(format!("unknown option {}", token))), }
+                        match token.as_str() { #(#option_arms)* _ => return Err(#cli::UnixCommandParseError::new(format!("unknown option {}", token))), }
                     } else { positional.push(token.clone()); }
                     index += 1;
                 }
                 #positional_limit
                 #(#positional_assignments)*
-                ::serde_json::from_value::<Self>(::serde_json::Value::Object(values)).map_err(|error| ::roundo_cli::UnixCommandParseError::new(error.to_string()))
-                    .and_then(|value| ::serde_json::to_value(value).map_err(|error| ::roundo_cli::UnixCommandParseError::new(error.to_string())))
+                ::serde_json::from_value::<Self>(::serde_json::Value::Object(values)).map_err(|error| #cli::UnixCommandParseError::new(error.to_string()))
+                    .and_then(|value| ::serde_json::to_value(value).map_err(|error| #cli::UnixCommandParseError::new(error.to_string())))
             }
             fn usage() -> String {
                 #usage.to_string()

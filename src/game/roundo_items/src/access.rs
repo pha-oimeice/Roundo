@@ -1,9 +1,11 @@
 //! Errors and the private, immutable item authorization target.
 
 use crate::{ItemDataError, ItemInstanceId};
-use roundo_dsa::data_structure::resource_access::{AccessError, ModifyAccess, ReadAccess, Shared};
+use roundo_infrastructure::dsa::data_structure::resource_access::{
+    AccessError, ModifyAccess, ReadAccess, Shared,
+};
 use roundo_inventory::{InventoryError, ItemId};
-use roundo_mod_manager::ResourceName;
+use roundo_infrastructure::mod_manager::ResourceName;
 use std::{error::Error, fmt};
 
 /// Installation refuses to replace either half of an existing runtime.

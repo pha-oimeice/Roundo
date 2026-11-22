@@ -7,7 +7,7 @@ edition.workspace = true
 bevy.workspace = true
 log.workspace = true
 roundo_contracts.workspace = true
-roundo_mod_manager.workspace = true
+roundo_infrastructure.workspace = true
 serde.workspace = true
 
 [features]

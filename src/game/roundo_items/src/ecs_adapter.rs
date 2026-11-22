@@ -9,11 +9,11 @@ use bevy::{
     ecs::{system::SystemParam, world::WorldId},
     prelude::*,
 };
-use roundo_dsa::data_structure::resource_access::{
+use roundo_infrastructure::dsa::data_structure::resource_access::{
     AccessError, Owner, ResourceAccessManager, Shared,
 };
 use roundo_inventory::{Inventories, InventoryError, ItemId};
-use roundo_mod_manager::ResourceName;
+use roundo_infrastructure::mod_manager::ResourceName;
 use std::collections::HashMap;
 
 #[derive(Resource)]

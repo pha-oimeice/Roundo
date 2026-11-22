@@ -1,10 +1,10 @@
 //! Runtime adapter over ModManager-owned UI prototypes. No directory scanning,
 //! configuration parsing or independent template ownership lives in this crate.
 
-pub(crate) use roundo_mod_manager::ui::{
+pub(crate) use roundo_infrastructure::mod_manager::ui::{
     ClientInteractionMode, MENU_ROOT_SLOT, Palette, PresentationMode, UiLayout,
 };
-use roundo_mod_manager::{
+use roundo_infrastructure::mod_manager::{
     AssetAccess, AssetPrototype,
     ui::{Theme, UiCatalogue, UiDefinition, schema::Page},
 };

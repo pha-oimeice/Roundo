@@ -5,8 +5,7 @@ edition.workspace = true
 
 [dependencies]
 bevy.workspace = true
-roundo_dsa.workspace = true
+roundo_infrastructure.workspace = true
 roundo_inventory.workspace = true
-roundo_mod_manager.workspace = true
 serde.workspace = true
 toml.workspace = true

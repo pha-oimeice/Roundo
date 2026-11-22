@@ -12,17 +12,6 @@ kind = "text"
 text = "FPS ${data.hud.fps.current} · avg ${data.hud.fps.average} · min ${data.hud.fps.min} · max ${data.hud.fps.max}\nPosition ${data.hud.position.absolute}\nVoxel ${data.hud.position.chunk_relative}"
 style = { font_size = 14.0, color = [255, 255, 255, 255] }
 [[nodes.children]]
-id = "crosshair"
-kind = "text"
-text = "+"
-style = { position_type = "Absolute", left = "50%", top = "50%", font_size = 28.0, color = [255, 255, 255, 255] }
-[[nodes.children]]
-id = "target"
-kind = "text"
-text = { op = "json", value = "$data.hud.target" }
-visible = { op = "ne", left = "$data.hud.target", right = { op = "null" } }
-style = { position_type = "Absolute", right = 12.0, bottom = 12.0, font_size = 14.0, color = [255, 255, 255, 255] }
-[[nodes.children]]
 id = "error"
 kind = "text"
 text = "$error"

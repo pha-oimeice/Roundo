@@ -9,8 +9,8 @@ roundo_client.workspace = true
 roundo_server.workspace = true
 
 [features]
-dev = ["roundo_client/dev", "roundo_server/dev"]
-release = ["roundo_client/release", "roundo_server/release"]
+dev = ["roundo_client/dev"]
+release = []
 
 [workspace]
 members = [
@@ -24,23 +24,23 @@ members = [
     "src/game/roundo_inventory",
     "src/game/roundo_items",
     "src/game/roundo_economy",
-    "src/game/roundo_ecs_entry",
-    "src/infra/roundo_toolbox",
-    "src/infra/roundo_mod_manager",
+    "src/roundo_infrastructure",
+    "src/roundo_infrastructure/roundo_cli",
+    "src/roundo_infrastructure/roundo_cli/proc_macro",
+    "src/roundo_infrastructure/roundo_dsa",
+    "src/roundo_infrastructure/roundo_mod_manager",
+    "src/roundo_infrastructure/roundo_networking",
+    "src/roundo_infrastructure/roundo_networking/proc_macro",
+    "src/roundo_infrastructure/roundo_quinnet",
+    "src/roundo_infrastructure/roundo_toolbox",
+    "src/roundo_infrastructure/roundo_user_config",
     "src/roundo_server",
     "src/roundo_client",
-    "src/infra/roundo_cli",
-    "src/infra/roundo_user_config",
-    "src/infra/roundo_dsa",
-    "src/infra/roundo_networking",
-    "src/infra/roundo_networking/proc_macro",
-    "src/infra/roundo_quinnet",
     "src/roundo_client/roundo_rendering",
     "src/game/roundo_presence",
     "src/game/roundo_portal",
     "src/game/roundo_player",
     "src/roundo_client/roundo_ui",
-    "src/infra/roundo_cli/proc_macro",
 ]
 resolver = "3"
 
@@ -67,7 +67,6 @@ overflow-checks = false
 strip = "debuginfo"
 
 [workspace.dependencies]
-anyhow = "1.0"
 avian3d = "0.8"
 bevy = { version = "0.20.1", default-features = false, features = ["bevy_scene", "bevy_state", "bevy_winit", "bevy_render", "bevy_pbr", "bevy_text", "bevy_audio", "bevy_ui_render", "bevy_feathers", "custom_cursor", "complex_script_segmentation", "tonemapping_luts", "zstd_rust", "x11"] }
 crossbeam = "0.8"
@@ -86,30 +85,29 @@ tokio = { version = "1", features = ["sync", "rt"] }
 toml = "1.1"
 toml_edit = { version = "0.25", features = ["serde"] }
 proc-macro2 = "1"
+proc-macro-crate = "3.5"
 quote = "1"
 syn = { version = "2", features = ["full", "visit-mut"] }
-roundo_cli_proc_macro = { path = "src/infra/roundo_cli/proc_macro" }
 # ---
-roundo_dsa = {path = "src/infra/roundo_dsa" }
-roundo_block_interaction = { path = "src/game/roundo_block_interaction" }
+roundo_infrastructure = { path = "src/roundo_infrastructure" }
+roundo_cli = { path = "src/roundo_infrastructure/roundo_cli" }
+roundo_cli_proc_macro = { path = "src/roundo_infrastructure/roundo_cli/proc_macro" }
+roundo_dsa = { path = "src/roundo_infrastructure/roundo_dsa" }
+roundo_mod_manager = { path = "src/roundo_infrastructure/roundo_mod_manager" }
+roundo_networking = { path = "src/roundo_infrastructure/roundo_networking" }
+roundo_networking_proc_macro = { path = "src/roundo_infrastructure/roundo_networking/proc_macro" }
+roundo_quinnet = { path = "src/roundo_infrastructure/roundo_quinnet" }
+roundo_toolbox = { path = "src/roundo_infrastructure/roundo_toolbox" }
+roundo_user_config = { path = "src/roundo_infrastructure/roundo_user_config" }
+# ---
 roundo_client = { path = "src/roundo_client" }
 roundo_contracts = { path = "src/game/roundo_contracts" }
-roundo_controller = { path = "src/game/roundo_controller" }
 roundo_creature = { path = "src/game/roundo_creature" }
-roundo_ecs_entry = { path = "src/game/roundo_ecs_entry", default-features = false }
 roundo_life = { path = "src/game/roundo_life" }
 roundo_inventory = { path = "src/game/roundo_inventory" }
 roundo_items = { path = "src/game/roundo_items" }
-roundo_economy = { path = "src/game/roundo_economy" }
-roundo_marionette = { path = "src/game/roundo_marionette" }
-roundo_networking_proc_macro = { path = "src/infra/roundo_networking/proc_macro" }
-roundo_quinnet = { path = "src/infra/roundo_quinnet" }
 roundo_rendering = { path = "src/roundo_client/roundo_rendering" }
 roundo_player = { path = "src/game/roundo_player" }
-roundo_portal = { path = "src/game/roundo_portal" }
 roundo_local_coordinate = { path = "src/game/roundo_local_coordinate" }
-roundo_mod_manager = { path = "src/infra/roundo_mod_manager" }
 roundo_server = { path = "src/roundo_server" }
-roundo_toolbox = { path = "src/infra/roundo_toolbox" }
 roundo_ui = { path = "src/roundo_client/roundo_ui" }
-roundo_user_config = { path = "src/infra/roundo_user_config" }

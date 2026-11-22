@@ -109,7 +109,7 @@ pub use ecs_adapter::{
 };
 pub use issuer::{ItemIdRange, ItemIssueError, ItemIssuer};
 /// The existing resource-access identity, not a new allocator or serialized ItemId.
-pub use roundo_dsa::data_structure::resource_access::ResourceId as ItemInstanceId;
+pub use roundo_infrastructure::dsa::data_structure::resource_access::ResourceId as ItemInstanceId;
 
 pub use catalogue::{ItemDataBuilder, ItemDataError, ItemSchema};
 pub use data::{

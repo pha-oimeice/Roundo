@@ -1,7 +1,7 @@
 //! Dedicated worker for deterministic procedural chunk generation.
 
 use crate::{ChunkCoordinate, GeneratedChunk, LocalCoordinateId, SuperflatGenerator};
-use roundo_toolbox::{
+use roundo_infrastructure::toolbox::{
     CrossbeamThreadPipe, CrossbeamThreadPipeEndpointA, CrossbeamThreadPipeEndpointB,
 };
 

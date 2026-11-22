@@ -1,6 +1,7 @@
-//! DataTransferObject derive for structs and enums sent through `roundo_networking`.
+//! DataTransferObject derive for structs and enums sent through `roundo_infrastructure::networking`.
 
 use proc_macro::TokenStream;
+use proc_macro_crate::{Error, FoundCrate, crate_name};
 use proc_macro2::Span;
 use quote::{format_ident, quote};
 use syn::{
@@ -18,7 +19,7 @@ use syn::{
 /// its input to outlive
 /// the struct's lifetime parameters. Fields use the standard Serde encoding,
 /// without implicit defaults, skipped fields, or a separate network schema.
-/// Owned results can be received by `roundo_networking::Connection` directly.
+/// Owned results can be received by `roundo_infrastructure::networking::Connection` directly.
 /// Unions are rejected. Enum variants use Serde's externally tagged encoding;
 /// Postcard transmits their declaration-order index followed by their fields,
 /// not their Rust discriminant values. Peers must agree on variant order.
@@ -40,6 +41,9 @@ fn expand(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
     }
 
     let name = &input.ident;
+    let networking = networking_path(name.span())?;
+    let serde = quote!(#networking::__serde);
+    let serde_path = LitStr::new(&serde.to_string(), name.span());
     let helper = format_ident!("__DataTransferObjectFor{}", name);
     let remote = LitStr::new(&name.to_string(), name.span());
     let (_, ty_generics, _) = input.generics.split_for_impl();
@@ -51,11 +55,11 @@ fn expand(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
     definition.vis = syn::Visibility::Inherited;
     definition.attrs = vec![
         parse_quote!(#[derive(
-            ::roundo_networking::__serde::Serialize,
-            ::roundo_networking::__serde::Deserialize
+            #serde::Serialize,
+            #serde::Deserialize
         )]),
         parse_quote!(#[serde(
-            crate = "::roundo_networking::__serde",
+            crate = #serde_path,
             remote = #remote,
             rename = #remote
         )]),
@@ -89,9 +93,7 @@ fn expand(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
 
     let mut serialize_generics = input.generics.clone();
     for parameter in serialize_generics.type_params_mut() {
-        parameter
-            .bounds
-            .push(parse_quote!(::roundo_networking::__serde::Serialize));
+        parameter.bounds.push(parse_quote!(#serde::Serialize));
     }
     let (ser_impl, _, ser_where) = serialize_generics.split_for_impl();
 
@@ -99,7 +101,7 @@ fn expand(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
     for parameter in deserialize_generics.type_params_mut() {
         parameter
             .bounds
-            .push(parse_quote!(::roundo_networking::__serde::Deserialize<#de>));
+            .push(parse_quote!(#serde::Deserialize<#de>));
     }
     let mut de_parameter = LifetimeParam::new(de.clone());
     for parameter in input.generics.lifetimes() {
@@ -115,7 +117,7 @@ fn expand(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
             #definition
 
             #[automatically_derived]
-            impl #ser_impl ::roundo_networking::__serde::Serialize
+            impl #ser_impl #serde::Serialize
                 for #name #ty_generics #ser_where
             {
                 fn serialize<#serializer>(
@@ -123,32 +125,52 @@ fn expand(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
                     serializer: #serializer,
                 ) -> ::core::result::Result<#serializer::Ok, #serializer::Error>
                 where
-                    #serializer: ::roundo_networking::__serde::Serializer,
+                    #serializer: #serde::Serializer,
                 {
                     #helper::serialize(self, serializer)
                 }
             }
 
             #[automatically_derived]
-            impl #ser_impl ::roundo_networking::DataTransferObject
+            impl #ser_impl #networking::DataTransferObject
                 for #name #ty_generics #ser_where
             {}
 
             #[automatically_derived]
-            impl #de_impl ::roundo_networking::__serde::Deserialize<#de>
+            impl #de_impl #serde::Deserialize<#de>
                 for #name #ty_generics #de_where
             {
                 fn deserialize<#deserializer>(
                     deserializer: #deserializer,
                 ) -> ::core::result::Result<Self, #deserializer::Error>
                 where
-                    #deserializer: ::roundo_networking::__serde::Deserializer<#de>,
+                    #deserializer: #serde::Deserializer<#de>,
                 {
                     #helper::deserialize(deserializer)
                 }
             }
         };
     })
+}
+
+fn networking_path(span: Span) -> syn::Result<syn::Path> {
+    match crate_name("roundo_infrastructure") {
+        Ok(FoundCrate::Itself) => Ok(parse_quote!(crate::networking)),
+        Ok(FoundCrate::Name(name)) => {
+            let name = syn::Ident::new_raw(&name, span);
+            Ok(parse_quote!(::#name::networking))
+        }
+        // The networking crate derives DTOs itself and cannot depend on the façade.
+        Err(Error::CrateNotFound { .. }) => match crate_name("roundo_networking") {
+            Ok(FoundCrate::Itself) => Ok(parse_quote!(::roundo_networking)),
+            Ok(FoundCrate::Name(name)) => {
+                let name = syn::Ident::new_raw(&name, span);
+                Ok(parse_quote!(::#name))
+            }
+            Err(error) => Err(syn::Error::new(span, error)),
+        },
+        Err(error) => Err(syn::Error::new(span, error)),
+    }
 }
 
 fn fresh_ident(generics: &syn::Generics, base: &str) -> syn::Ident {

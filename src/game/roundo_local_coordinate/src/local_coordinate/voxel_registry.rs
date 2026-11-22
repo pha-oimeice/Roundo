@@ -8,8 +8,8 @@ use crate::local_coordinate::data::{
     AtomicVoxelId, EMPTY_VOXEL_ID, GlobalAtomicVoxelData, SOLID_VOXEL_ID,
 };
 use bevy::prelude::Resource;
-use roundo_mod_manager::{
-    ModId, ModTypeInput, ResourceCandidate, ResourceName, ResourceReferenceError,
+use roundo_infrastructure::mod_manager::{
+    ModId, ModPrototype, ModTypeInput, ResourceCandidate, ResourceName, ResourceReferenceError,
     resolve_candidates, valid_resource_local_name,
 };
 use serde::Deserialize;
@@ -35,7 +35,7 @@ pub struct AtomicVoxelRegistry {
     slots: BTreeMap<String, AtomicVoxelId>,
 }
 
-impl roundo_mod_manager::ModPrototype for AtomicVoxelRegistry {}
+impl ModPrototype for AtomicVoxelRegistry {}
 
 impl AtomicVoxelRegistry {
     /// Receives loader-parsed voxel declarations; this module performs no I/O.

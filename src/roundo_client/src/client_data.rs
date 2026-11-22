@@ -2,8 +2,8 @@
 
 use crate::config_store::ClientConfigStore;
 use bevy::prelude::*;
-use roundo_marionette::{ClientPlayerController, InputFunctionRegistry};
-use roundo_user_config::{ClientInputBindingConfig, ClientInputKey};
+use roundo_infrastructure::user_config::{self, ClientInputBindingConfig, ClientInputKey};
+use roundo_rendering::DebugCamera;
 use serde::Serialize;
 use std::collections::{BTreeMap, VecDeque};
 
@@ -17,9 +17,8 @@ const HUD_SYNC_INTERVAL_SECS: f32 = 0.05;
 pub(crate) struct HudCache {
     /// Statistics over at most the latest 120 valid frame durations.
     pub fps: HudFps,
-    /// Current bound-camera position, absent when no valid camera is available.
+    /// Debug camera position, absent if there is not exactly one debug camera.
     pub position: Option<HudPosition>,
-    pub(crate) target: Option<HudTargetSnapshot>,
     #[serde(skip)]
     frames: VecDeque<f32>,
 }
@@ -50,7 +49,6 @@ impl Default for HudCache {
                 max: 0.0,
             },
             position: None,
-            target: None,
             frames: VecDeque::new(),
         }
     }
@@ -74,11 +72,6 @@ impl HudCache {
 }
 
 #[derive(Serialize)]
-pub(crate) struct FunctionDisplay {
-    pub(crate) function: String,
-    pub(crate) display_name: String,
-}
-#[derive(Serialize)]
 pub(crate) struct BindingDisplay {
     pub(crate) slot: String,
     pub(crate) key: String,
@@ -99,7 +92,6 @@ pub(crate) struct BindingsSnapshot {
     pub(crate) bindings: Vec<BindingDisplay>,
     pub(crate) supported_keys: Vec<SupportedKeyDisplay>,
     pub(crate) supported_slots: Vec<SupportedSlotDisplay>,
-    pub(crate) supported_functions: Vec<FunctionDisplay>,
 }
 pub(crate) fn key_display(key: ClientInputKey) -> SupportedKeyDisplay {
     use ClientInputKey::*;
@@ -254,58 +246,21 @@ pub(crate) struct SettingDisplay {
 pub(crate) struct SettingsSnapshot {
     pub(crate) settings: Vec<SettingDisplay>,
 }
-#[derive(Clone, Debug, Serialize)]
-pub(crate) struct HudTargetSnapshot {
-    pub(crate) voxel: String,
-    pub(crate) voxel_position: [i32; 3],
-    pub(crate) relative_position: [f32; 3],
-    pub(crate) chunk: [i32; 3],
-    pub(crate) local_coordinate: String,
-}
 pub(crate) fn settings_snapshot(config: &ClientConfigStore) -> SettingsSnapshot {
     let settings = config.settings();
     SettingsSnapshot {
-        settings: vec![
-            SettingDisplay {
-                key: "controls.mouse_sensitivity".into(),
-                value: settings.controls.mouse_sensitivity,
-                min: roundo_user_config::MIN_MOUSE_SENSITIVITY,
-                max: Some(roundo_user_config::MAX_MOUSE_SENSITIVITY),
-                step: 0.0005,
-                default: roundo_user_config::DEFAULT_MOUSE_SENSITIVITY,
-            },
-            SettingDisplay {
-                key: "camera.move_speed".into(),
-                value: settings.camera.move_speed,
-                min: roundo_user_config::MIN_CAMERA_MOVE_SPEED,
-                max: Some(roundo_user_config::MAX_CAMERA_MOVE_SPEED),
-                step: 1.0,
-                default: roundo_user_config::DEFAULT_CAMERA_MOVE_SPEED,
-            },
-            SettingDisplay {
-                key: "camera.voxel_raycast_distance".into(),
-                value: settings.camera.voxel_raycast_distance,
-                min: roundo_user_config::MIN_VOXEL_RAYCAST_DISTANCE,
-                max: Some(roundo_user_config::MAX_VOXEL_RAYCAST_DISTANCE),
-                step: 1.0,
-                default: roundo_user_config::DEFAULT_VOXEL_RAYCAST_DISTANCE,
-            },
-            SettingDisplay {
-                key: "world.geometry_lod_pixel_error".into(),
-                value: settings.world.geometry_lod_pixel_error,
-                min: 0.0,
-                max: None,
-                step: roundo_user_config::DEFAULT_GEOMETRY_LOD_PIXEL_ERROR,
-                default: roundo_user_config::DEFAULT_GEOMETRY_LOD_PIXEL_ERROR,
-            },
-        ],
+        settings: vec![SettingDisplay {
+            key: "world.geometry_lod_pixel_error".into(),
+            value: settings.world.geometry_lod_pixel_error,
+            min: 0.0,
+            max: None,
+            step: user_config::DEFAULT_GEOMETRY_LOD_PIXEL_ERROR,
+            default: user_config::DEFAULT_GEOMETRY_LOD_PIXEL_ERROR,
+        }],
     }
 }
 
-pub(crate) fn bindings_snapshot(
-    config: &ClientConfigStore,
-    registry: &InputFunctionRegistry,
-) -> BindingsSnapshot {
+pub(crate) fn bindings_snapshot(config: &ClientConfigStore) -> BindingsSnapshot {
     BindingsSnapshot {
         bindings: config
             .settings()
@@ -322,13 +277,6 @@ pub(crate) fn bindings_snapshot(
                 slot: id.clone(),
                 display_name: slot.display_name.clone(),
                 functions: slot.functions.iter().cloned().collect(),
-            })
-            .collect(),
-        supported_functions: registry
-            .functions()
-            .map(|(name, definition)| FunctionDisplay {
-                function: name.into(),
-                display_name: definition.display_name.clone(),
             })
             .collect(),
     }
@@ -368,28 +316,21 @@ impl ClientDataSyncState {
 
 pub(crate) fn update_hud_cache(
     time: Res<Time>,
-    controller: Res<ClientPlayerController>,
-    cameras: Query<&Transform>,
+    cameras: Query<&Transform, With<DebugCamera>>,
     mut hud: ResMut<HudCache>,
 ) {
     hud.record_frame(time.delta_secs());
-    hud.position = controller
-        .camera()
-        .and_then(|entity| {
-            let camera = cameras.get(entity);
-            camera.ok()
-        })
-        .map(|transform| {
-            let translation = transform.translation;
-            HudPosition {
-                absolute: [translation.x, translation.y, translation.z],
-                chunk_relative: [
-                    translation.x.floor() as i32,
-                    translation.y.floor() as i32,
-                    translation.z.floor() as i32,
-                ],
-            }
-        });
+    hud.position = cameras.single().ok().map(|transform| {
+        let translation = transform.translation;
+        HudPosition {
+            absolute: [translation.x, translation.y, translation.z],
+            chunk_relative: [
+                translation.x.floor() as i32,
+                translation.y.floor() as i32,
+                translation.z.floor() as i32,
+            ],
+        }
+    });
 }
 
 /// Client-owned producers publish directly into the native ECS snapshot store.
@@ -398,28 +339,19 @@ pub(crate) fn sync_subscribed_client_data(
     time: Res<Time>,
     config: Res<ClientConfigStore>,
     hud: Res<HudCache>,
-    input_registry: Res<InputFunctionRegistry>,
     mut sync: ResMut<ClientDataSyncState>,
     mut data: Option<ResMut<roundo_ui::UiData>>,
 ) {
     let Some(data) = data.as_deref_mut() else {
         return;
     };
-    sync_client_data_update(
-        time.delta_secs(),
-        &config,
-        &hud,
-        &input_registry,
-        &mut sync,
-        data,
-    );
+    sync_client_data_update(time.delta_secs(), &config, &hud, &mut sync, data);
 }
 
 fn sync_client_data_update(
     delta_secs: f32,
     config: &ClientConfigStore,
     hud: &HudCache,
-    input_registry: &InputFunctionRegistry,
     sync: &mut ClientDataSyncState,
     sink: &mut roundo_ui::UiData,
 ) {
@@ -429,8 +361,8 @@ fn sync_client_data_update(
         sync.publish_snapshot(sink, SETTINGS_DATA, snapshot);
     }
     if sink.has_data_subscribers(BINDINGS_DATA) {
-        let snapshot = serde_json::to_value(bindings_snapshot(config, input_registry))
-            .expect("bindings snapshot serializes");
+        let snapshot =
+            serde_json::to_value(bindings_snapshot(config)).expect("bindings snapshot serializes");
         sync.publish_snapshot(sink, BINDINGS_DATA, snapshot);
     }
 

@@ -1,7 +1,7 @@
 mod management;
 use crate::resource::{ManagedData, ModifyGrant, ReadGrant, Registration};
 pub use management::LifeStateManagement;
-use roundo_dsa::data_structure::resource_access::AccessError;
+use roundo_infrastructure::dsa::data_structure::resource_access::AccessError;
 
 use crate::{
     BodyCaller, BodyInstance, ConceptBodyFactory, ConceptBodyHandle, FrozenStateHistoryConfig,

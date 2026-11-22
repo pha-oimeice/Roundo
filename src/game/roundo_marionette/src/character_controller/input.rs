@@ -2,8 +2,8 @@
 //! and physical bindings are separate, user-owned configuration resources.
 
 use bevy::prelude::{Message, Resource, Vec2};
-use roundo_mod_manager::{
-    ModTypeInput, ResourceCandidate, ResourceName, resolve_candidates,
+use roundo_infrastructure::mod_manager::{
+    ModPrototype, ModTypeInput, ResourceCandidate, ResourceName, resolve_candidates,
     valid_resource_local_name,
 };
 use serde::Deserialize;
@@ -35,7 +35,7 @@ pub struct InputFunctionRegistry {
     functions: BTreeMap<String, ResourceName>,
 }
 
-impl roundo_mod_manager::ModPrototype for InputFunctionRegistry {}
+impl ModPrototype for InputFunctionRegistry {}
 
 impl InputFunctionRegistry {
     pub fn from_mod_configs(input: &ModTypeInput) -> Result<Self, InputFunctionRegistryError> {

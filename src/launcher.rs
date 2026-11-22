@@ -1,5 +1,3 @@
-use std::process::{Child, Command, Stdio};
-
 use bevy::{
     app::AppExit,
     audio::AudioPlugin,
@@ -17,71 +15,26 @@ use bevy::{
     ui_widgets::Activate,
 };
 
-use roundo_client::RoundoClientPlugin;
-use roundo_server::RoundoServerPlugin;
+use crate::app_process::AppProcess;
 
-const USAGE: &str =
-    "Usage: roundo [server|client]\nWith no arguments, open the graphical launcher.";
-
-#[derive(Clone, Copy)]
-enum Role {
-    Server,
-    Client,
+pub(crate) struct LaunchTarget {
+    pub(crate) button_label: &'static str,
+    pub(crate) process: AppProcess,
 }
 
-impl Role {
-    const fn argument(self) -> &'static str {
-        match self {
-            Self::Server => "server",
-            Self::Client => "client",
-        }
-    }
-
-    fn parse(argument: &str) -> Option<Self> {
-        [Self::Server, Self::Client]
-            .into_iter()
-            .find(|role| role.argument() == argument)
-    }
+pub(crate) fn run(targets: &'static [LaunchTarget]) -> AppExit {
+    App::new().add_plugins(LauncherPlugin { targets }).run()
 }
 
-pub(crate) fn run() -> AppExit {
-    let mut args = std::env::args_os().skip(1);
-    let Some(argument) = args.next() else {
-        return run_app(None);
-    };
-    if args.next().is_none()
-        && let Some(argument) = argument.to_str()
-    {
-        match Role::parse(argument) {
-            Some(role) => return run_app(Some(role)),
-            None if matches!(argument, "--help" | "-h") => {
-                println!("{USAGE}");
-                return AppExit::Success;
-            }
-            None => {}
-        }
-    }
-
-    eprintln!("{USAGE}");
-    AppExit::error()
+struct LauncherPlugin {
+    targets: &'static [LaunchTarget],
 }
-
-fn run_app(role: Option<Role>) -> AppExit {
-    let mut app = App::new();
-    app.add_plugins(LogPlugin::default());
-    match role {
-        Some(Role::Server) => app.add_plugins(RoundoServerPlugin),
-        Some(Role::Client) => app.add_plugins(RoundoClientPlugin),
-        None => app.add_plugins(LauncherPlugin),
-    };
-    app.run()
-}
-
-struct LauncherPlugin;
 
 impl Plugin for LauncherPlugin {
     fn build(&self, app: &mut App) {
+        let targets = self.targets;
         app.add_plugins((
+            LogPlugin::default(),
             DefaultPlugins
                 .set(WindowPlugin {
                     primary_window: Some(Window {
@@ -95,19 +48,17 @@ impl Plugin for LauncherPlugin {
             FeathersPlugins,
         ))
         .insert_resource(UiTheme(create_dark_theme()))
-        .add_systems(Startup, create_ui)
-        .add_systems(Update, poll_processes);
+        .add_systems(Startup, move |world: &mut World| create_ui(world, targets));
     }
 }
 
 #[derive(Component)]
-struct ProcessSlot {
-    role: Role,
-    child: Option<Child>,
-    status_label: Entity,
+struct LaunchButton {
+    process: &'static AppProcess,
+    error_label: Entity,
 }
 
-fn create_ui(world: &mut World) {
+fn create_ui(world: &mut World, targets: &'static [LaunchTarget]) {
     world.spawn(Camera2d);
     let root = world
         .spawn_scene(bsn! {
@@ -124,15 +75,13 @@ fn create_ui(world: &mut World) {
             Children [
                 @label("Roundo Launcher")
                 --
-                @label_dim("Choose a role to start in a separate process.")
+                @label_dim("Choose an app to start in a separate process.")
             ]
         })
         .expect("install launcher UI")
         .id();
-    for (role, button_label) in [
-        (Role::Server, "Start Server"),
-        (Role::Client, "Start Client"),
-    ] {
+    for target in targets {
+        let button_label = target.button_label;
         let panel = world
             .spawn((
                 Node {
@@ -148,70 +97,29 @@ fn create_ui(world: &mut World) {
             .expect("install launcher start button")
             .insert(ChildOf(panel))
             .id();
-        let status_label = world
-            .spawn_scene(label_dim("Not started"))
-            .expect("install launcher status label")
+        let error_label = world
+            .spawn_scene(label_dim(""))
+            .expect("install launcher error label")
             .insert(ChildOf(panel))
             .id();
         world
             .entity_mut(button)
-            .insert(ProcessSlot {
-                role,
-                child: None,
-                status_label,
+            .insert(LaunchButton {
+                process: &target.process,
+                error_label,
             })
             .observe(start_process);
     }
 }
 
-fn start_process(
-    event: On<Activate>,
-    mut slots: Query<&mut ProcessSlot>,
-    mut statuses: Query<&mut Text>,
-) {
-    let mut slot = slots.get_mut(event.entity).expect("launcher process slot");
-    if slot.child.is_some() {
-        return;
-    }
-
-    let argument = slot.role.argument();
-    let status = match std::env::current_exe().and_then(|executable| {
-        Command::new(executable)
-            .arg(argument)
-            .stdin(Stdio::null())
-            .spawn()
-    }) {
-        Ok(child) => {
-            let pid = child.id();
-            info!("Launcher spawned {argument} (PID {pid})");
-            slot.child = Some(child);
-            format!("Process running (PID {pid})")
-        }
-        Err(error) => format!("Could not start {argument}: {error}"),
+fn start_process(event: On<Activate>, buttons: Query<&LaunchButton>, mut labels: Query<&mut Text>) {
+    let button = buttons.get(event.entity).expect("launcher button");
+    let message = match button.process.spawn() {
+        Ok(()) => String::new(),
+        Err(error) => format!("Could not start {}: {error}", button.process.id),
     };
-    show_status(&mut statuses, slot.status_label, status);
-}
-
-fn poll_processes(mut slots: Query<&mut ProcessSlot>, mut statuses: Query<&mut Text>) {
-    for mut slot in &mut slots {
-        let Some(child) = &mut slot.child else {
-            continue;
-        };
-        let status = match child.try_wait() {
-            Ok(None) => continue,
-            Ok(Some(status)) => {
-                slot.child = None;
-                format!("Process exited ({status})")
-            }
-            Err(error) => format!("Could not check process status: {error}"),
-        };
-        show_status(&mut statuses, slot.status_label, status);
-    }
-}
-
-fn show_status(statuses: &mut Query<&mut Text>, label: Entity, status: String) {
-    let mut text = statuses.get_mut(label).expect("launcher status label");
-    if text.0 != status {
-        text.0 = status;
-    }
+    labels
+        .get_mut(button.error_label)
+        .expect("launcher error label")
+        .0 = message;
 }

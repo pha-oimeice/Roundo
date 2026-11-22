@@ -4,7 +4,7 @@ use crate::local_coordinate::data::{
     AtomicVoxel, AtomicVoxelId, CHUNK_EDGE_LENGTH, Chunk, EMPTY_VOXEL_ID, LocalAtomicVoxelData,
 };
 use bevy::prelude::IVec3;
-use roundo_dsa::data_structure::tree::BreadthFirstLosslessSvo;
+use roundo_infrastructure::dsa::data_structure::tree::BreadthFirstLosslessSvo;
 use std::sync::Arc;
 
 const CHUNK_OCTREE_DEPTH: usize = CHUNK_EDGE_LENGTH.ilog2() as usize;

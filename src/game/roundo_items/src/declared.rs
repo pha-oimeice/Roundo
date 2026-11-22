@@ -1,6 +1,6 @@
 //! The single native type payload shared by all Mod item definitions.
 
-use roundo_mod_manager::ResourceName;
+use roundo_infrastructure::mod_manager::ResourceName;
 
 /// Owned definition identity and data; neither constitutes an item ID or grant.
 ///

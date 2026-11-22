@@ -2,7 +2,7 @@
 //! Neither payload locks, Owners nor issuing endpoints reach Body callers.
 
 use bevy::prelude::{Resource, World};
-use roundo_dsa::data_structure::resource_access::{
+use roundo_infrastructure::dsa::data_structure::resource_access::{
     AccessError, ModifyAccess, Owner, ReadAccess, ResourceAccessManager, Shared,
 };
 use std::sync::RwLock;

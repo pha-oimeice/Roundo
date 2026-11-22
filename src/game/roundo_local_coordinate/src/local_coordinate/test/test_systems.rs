@@ -2,7 +2,7 @@ use crate::local_coordinate::msg::{LocalCoordinateCRUDMessage, LocalCoordinateCR
 use crate::local_coordinate::test::LocalCoordinateTestMessage;
 use crate::local_coordinate::test::msg::TestCreateDummyMaze;
 use bevy::prelude::{IVec3, MessageReader, MessageWriter};
-use roundo_dsa::algorithm::pcg::maze::generate_maze;
+use roundo_infrastructure::dsa::algorithm::pcg::maze::generate_maze;
 
 pub fn test_msg_router(
     mut msg_reader: MessageReader<LocalCoordinateTestMessage>,

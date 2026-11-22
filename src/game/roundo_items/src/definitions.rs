@@ -1,7 +1,7 @@
 //! Immutable Mod-owned item definitions; loading does not create item instances.
 
 use crate::DeclaredItemData;
-use roundo_mod_manager::{ModId, ModTypeInput, ResourceName};
+use roundo_infrastructure::mod_manager::{ModId, ModPrototype, ModTypeInput, ResourceName};
 use serde::Deserialize;
 use std::{
     collections::BTreeMap,
@@ -34,7 +34,7 @@ pub struct ItemDefinitions {
     entries: BTreeMap<ResourceName, toml::Table>,
 }
 
-impl roundo_mod_manager::ModPrototype for ItemDefinitions {}
+impl ModPrototype for ItemDefinitions {}
 
 impl ItemDefinitions {
     /// Creates an explicitly empty definition directory without filesystem access.

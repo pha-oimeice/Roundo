@@ -3,7 +3,7 @@
 use crate::local_coordinate::data::{CHUNK_EDGE_LENGTH, Chunk, LocalCoordinate};
 use crate::{AtomicVoxelRegistry, ChunkCoordinate};
 use bevy::prelude::IVec3;
-use roundo_dsa::algorithm::pcg::infinite_spheres::{
+use roundo_infrastructure::dsa::algorithm::pcg::infinite_spheres::{
     CHUNK_EDGE_LENGTH as GENERATED_CHUNK_EDGE_LENGTH, EMPTY_MATERIAL_ID, GeneratedChunk,
 };
 

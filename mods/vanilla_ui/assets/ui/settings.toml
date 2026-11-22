@@ -29,7 +29,7 @@ text = "${setting.key}: ${setting.value}"
 [[nodes.children.children]]
 id = "bindings-heading"
 kind = "text"
-text = "按键绑定"
+text = "已配置的按键绑定（未启用）"
 style = { font_size = 24.0 }
 [[nodes.children.children]]
 id = "bindings"

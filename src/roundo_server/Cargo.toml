@@ -4,15 +4,4 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
-anyhow.workspace = true
 bevy.workspace = true
-roundo_ecs_entry = { workspace = true, features = ["server"] }
-roundo_local_coordinate.workspace = true
-roundo_items.workspace = true
-roundo_mod_manager.workspace = true
-roundo_toolbox.workspace = true
-roundo_user_config.workspace = true
-
-[features]
-dev = ["roundo_ecs_entry/dev"]
-release = []

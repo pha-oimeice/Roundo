@@ -1,15 +1,17 @@
 //! Mod-driven TOML views rendered exclusively by Bevy native UI and Feather widgets.
 //! Views and their local actions run directly in the Bevy World.
 
-use roundo_mod_manager::AssetAccess;
-use roundo_mod_manager::ui::{UiCatalogue, expression, layout, schema};
+use roundo_infrastructure::mod_manager::{
+    AssetAccess,
+    ui::{UiCatalogue, expression, layout, schema},
+};
 mod registry;
 mod runtime;
 mod view;
 
 use registry::UiRegistry;
 pub use registry::UiResource;
-pub use roundo_mod_manager::ui::{ClientInteractionMode, MENU_ROOT_SLOT};
+pub use roundo_infrastructure::mod_manager::ui::{ClientInteractionMode, MENU_ROOT_SLOT};
 pub use runtime::{UiData, UiInstanceId, UiLifecycleError, UiLifecycleManager, UiOpenTarget};
 pub use view::text_edit_has_focus;
 
