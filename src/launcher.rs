@@ -1,6 +1,7 @@
 use std::process::{Child, Command, Stdio};
 
 use bevy::{
+    app::AppExit,
     audio::AudioPlugin,
     feathers::{
         FeathersPlugins,
@@ -16,9 +17,67 @@ use bevy::{
     ui_widgets::Activate,
 };
 
-use crate::Role;
+use roundo_client::RoundoClientPlugin;
+use roundo_server::RoundoServerPlugin;
 
-pub(crate) struct LauncherPlugin;
+const USAGE: &str =
+    "Usage: roundo [server|client]\nWith no arguments, open the graphical launcher.";
+
+#[derive(Clone, Copy)]
+enum Role {
+    Server,
+    Client,
+}
+
+impl Role {
+    const fn argument(self) -> &'static str {
+        match self {
+            Self::Server => "server",
+            Self::Client => "client",
+        }
+    }
+
+    fn parse(argument: &str) -> Option<Self> {
+        [Self::Server, Self::Client]
+            .into_iter()
+            .find(|role| role.argument() == argument)
+    }
+}
+
+pub(crate) fn run() -> AppExit {
+    let mut args = std::env::args_os().skip(1);
+    let Some(argument) = args.next() else {
+        return run_app(None);
+    };
+    if args.next().is_none()
+        && let Some(argument) = argument.to_str()
+    {
+        match Role::parse(argument) {
+            Some(role) => return run_app(Some(role)),
+            None if matches!(argument, "--help" | "-h") => {
+                println!("{USAGE}");
+                return AppExit::Success;
+            }
+            None => {}
+        }
+    }
+
+    eprintln!("{USAGE}");
+    AppExit::error()
+}
+
+fn run_app(role: Option<Role>) -> AppExit {
+    let mut app = App::new();
+    app.add_plugins(LogPlugin::default());
+    match role {
+        Some(Role::Server) => app.add_plugins(RoundoServerPlugin),
+        Some(Role::Client) => app.add_plugins(RoundoClientPlugin),
+        None => app.add_plugins(LauncherPlugin),
+    };
+    app.run()
+}
+
+struct LauncherPlugin;
 
 impl Plugin for LauncherPlugin {
     fn build(&self, app: &mut App) {
