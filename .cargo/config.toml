@@ -1,6 +1,6 @@
 [alias]
-workspace-dev = "build --workspace --features dev --profile dev --color=always"
-workspace-release = "build --workspace --features release --profile release --color=always"
+workspace-dev = "build --features dev --profile dev --color=always"
+workspace-release = "build --features release --profile release --color=always"
 
 [target.x86_64-pc-windows-msvc]
 linker = "rust-lld"

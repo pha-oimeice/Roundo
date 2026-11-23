@@ -1,35 +1,25 @@
-mod app_process;
 mod launcher;
 
-use app_process::AppProcess;
-use bevy::{app::AppExit, log::LogPlugin};
-use launcher::LaunchTarget;
+use bevy::{app::AppExit, log::LogPlugin, prelude::App};
+use launcher::LaunchMode;
 use roundo_client::RoundoClientPlugin;
 use roundo_server::RoundoServerPlugin;
 
-const LAUNCH_TARGETS: &[LaunchTarget] = &[
-    LaunchTarget {
-        button_label: "Start Server",
-        process: AppProcess {
-            id: "server",
-            configure: |app| {
-                app.add_plugins((LogPlugin::default(), RoundoServerPlugin));
-            },
-        },
-    },
-    LaunchTarget {
-        button_label: "Start Client",
-        process: AppProcess {
-            id: "client",
-            configure: |app| {
-                app.add_plugins((LogPlugin::default(), RoundoClientPlugin));
-            },
-        },
-    },
-];
-
 fn main() -> AppExit {
-    app_process::run(LAUNCH_TARGETS.iter().map(|target| &target.process), || {
-        launcher::run(LAUNCH_TARGETS)
-    })
+    let mode = match LaunchMode::select() {
+        Ok(Some(mode)) => mode,
+        Ok(None) => return AppExit::Success,
+        Err(error) => {
+            eprintln!("{error}");
+            return AppExit::error();
+        }
+    };
+
+    let mut app = App::new();
+    app.add_plugins(LogPlugin::default());
+    match mode {
+        LaunchMode::Server => app.add_plugins(RoundoServerPlugin),
+        LaunchMode::Client => app.add_plugins(RoundoClientPlugin),
+    };
+    app.run()
 }
