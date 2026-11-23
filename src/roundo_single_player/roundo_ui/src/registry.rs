@@ -2,7 +2,7 @@
 //! configuration parsing or independent template ownership lives in this crate.
 
 pub(crate) use roundo_infrastructure::mod_manager::ui::{
-    ClientInteractionMode, MENU_ROOT_SLOT, Palette, PresentationMode, UiLayout,
+    ClientInteractionMode, Palette, PresentationMode, UiLayout,
 };
 use roundo_infrastructure::mod_manager::{
     AssetAccess, AssetPrototype,
@@ -77,11 +77,10 @@ impl UiRegistry {
     }
 
     /// Copies font data into the renderer's independent native Font projection.
-    pub fn font(&self) -> Result<Vec<u8>, String> {
+    pub fn font(&self, slot: &str) -> Result<Vec<u8>, String> {
         let name = self
-            .catalogue
-            .slot(MENU_ROOT_SLOT)
-            .ok_or("menu UI slot is missing")?;
+            .slot_name(slot)
+            .ok_or_else(|| format!("missing UI slot `{slot}`"))?;
         let key = self.catalogue.key(name).expect("UI catalogue identity");
         self.assets.with(|assets| {
             let handle = assets.load(key).map_err(|error| error.to_string())?;

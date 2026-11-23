@@ -1,5 +1,5 @@
 [package]
-name = "roundo_client"
+name = "roundo_single_player"
 version.workspace = true
 edition.workspace = true
 
@@ -7,6 +7,7 @@ edition.workspace = true
 bevy.workspace = true
 log.workspace = true
 roundo_infrastructure.workspace = true
+roundo_local_coordinate.workspace = true
 roundo_rendering.workspace = true
 roundo_ui.workspace = true
 serde.workspace = true

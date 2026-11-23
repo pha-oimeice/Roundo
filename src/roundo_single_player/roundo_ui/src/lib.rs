@@ -32,6 +32,7 @@ pub struct UiReady;
 #[derive(Component, Clone, Copy)]
 struct UiRoot;
 
+/// Installs the native UI runtime without mounting any pages.
 pub struct RoundoUiPlugin {
     registry: UiRegistry,
 }
@@ -50,12 +51,16 @@ impl Plugin for RoundoUiPlugin {
                 app.insert_resource(UiTheme(create_dark_theme()));
             }
         }
+        // All UI prototypes share the catalogue theme font; the required
+        // menu slot supplies the font asset without mounting its page.
+        let font_bytes = self
+            .registry
+            .font(MENU_ROOT_SLOT)
+            .unwrap_or_else(|error| panic!("cannot load native UI theme font: {error}"));
         let font = app
             .world_mut()
             .resource_mut::<Assets<Font>>()
-            .add(Font::from_bytes(
-                self.registry.font().expect("load native UI font prototype"),
-            ));
+            .add(Font::from_bytes(font_bytes));
         let root = app
             .world_mut()
             .spawn_scene(bsn! { ~{UiRoot} })
@@ -82,8 +87,6 @@ impl Plugin for RoundoUiPlugin {
     }
 }
 fn initialize(world: &mut World) {
-    UiLifecycleManager::with(world, |ui| ui.mount_menu())
-        .unwrap_or_else(|error| panic!("cannot instantiate native menu: {error}"));
     for mut window in world
         .query_filtered::<&mut Window, With<bevy::window::PrimaryWindow>>()
         .iter_mut(world)

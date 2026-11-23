@@ -2,6 +2,7 @@
 
 use bevy::prelude::{Res, ResMut};
 use roundo_infrastructure::user_config::{ClientConfig, ClientSettingsConfig};
+use roundo_local_coordinate::WorldRenderSettings;
 
 #[derive(bevy::prelude::Resource)]
 pub(crate) struct ClientConfigStore {
@@ -22,7 +23,7 @@ impl ClientConfigStore {
 
 pub(crate) fn sync_runtime_settings(
     config: Res<ClientConfigStore>,
-    mut rendering: ResMut<roundo_rendering::WorldRenderSettings>,
+    mut rendering: ResMut<WorldRenderSettings>,
 ) {
     let settings = config.settings();
     if rendering.geometry_lod_pixel_error != settings.world.geometry_lod_pixel_error {

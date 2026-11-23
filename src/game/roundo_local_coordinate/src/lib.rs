@@ -1,8 +1,11 @@
-//! Public voxel-world model, procedural generation, and physics integration.
+//! Public voxel-world model, procedural generation, physics, and rendering.
 
 #![allow(dead_code)]
 pub mod local_coordinate;
 pub mod roundo_physics;
+mod voxel_render;
+
+pub use voxel_render::{WorldRenderPlugin, WorldRenderSettings};
 
 /// Native attribute definitions; existing root type exports remain available.
 pub use local_coordinate::attributes;

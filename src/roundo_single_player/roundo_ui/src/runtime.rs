@@ -35,6 +35,7 @@ pub enum UiLifecycleError {
     UiInstanceLimit,
     UnknownImport(String),
     StaleUiInstance,
+    RootAlreadyMounted,
     CannotCloseUiRoot,
     Presentation(String),
 }
@@ -45,6 +46,7 @@ impl fmt::Display for UiLifecycleError {
             Self::UiInstanceLimit => write!(f, "UI instance limit reached"),
             Self::UnknownImport(e) => write!(f, "unknown UI import `{e}`"),
             Self::StaleUiInstance => write!(f, "UI instance is no longer live"),
+            Self::RootAlreadyMounted => write!(f, "a root UI is already mounted"),
             Self::CannotCloseUiRoot => write!(f, "cannot close the root UI"),
             Self::Presentation(e) => write!(f, "native UI presentation failed: {e}"),
         }
@@ -199,20 +201,7 @@ impl UiLifecycleManager<'_> {
             Some(id) if self.instance_is_live(id) => id.0,
             Some(_) => return Err(UiLifecycleError::StaleUiInstance),
         };
-        let definition = self
-            .registry()
-            .resource(target.resource())
-            .ok_or_else(|| UiLifecycleError::Registry(target.0.clone()))?;
-        if self
-            .instances()
-            .iter()
-            .filter(|e| self.world.get::<UiInstance>(**e).unwrap().definition == target.0)
-            .count()
-            >= definition.max_instances as usize
-        {
-            return Err(UiLifecycleError::UiInstanceLimit);
-        }
-        let id = self.spawn(parent, &target.0, false)?;
+        let id = self.spawn(parent, target.resource(), false)?;
         self.recompute();
         Ok(id)
     }
@@ -222,6 +211,20 @@ impl UiLifecycleManager<'_> {
         name: &str,
         root_ui: bool,
     ) -> Result<UiInstanceId, UiLifecycleError> {
+        let limit = self
+            .registry()
+            .resource(name)
+            .ok_or_else(|| UiLifecycleError::Registry(name.into()))?
+            .max_instances as usize;
+        if self
+            .instances()
+            .into_iter()
+            .filter(|&entity| self.world.get::<UiInstance>(entity).unwrap().definition == name)
+            .count()
+            >= limit
+        {
+            return Err(UiLifecycleError::UiInstanceLimit);
+        }
         let definition = std::sync::Arc::new(
             self.registry()
                 .materialize(name)
@@ -272,15 +275,24 @@ impl UiLifecycleManager<'_> {
         }
         Ok(UiInstanceId(id))
     }
-    pub(crate) fn mount_menu(&mut self) -> Result<(), UiLifecycleError> {
+    /// Explicitly mounts the non-closeable root page from a Mod slot.
+    /// The UI runtime starts empty; mounting a second root is rejected.
+    pub fn mount_root(&mut self, slot: &str) -> Result<UiInstanceId, UiLifecycleError> {
+        if self
+            .instances()
+            .into_iter()
+            .any(|entity| self.world.get::<UiInstance>(entity).unwrap().root_ui)
+        {
+            return Err(UiLifecycleError::RootAlreadyMounted);
+        }
         let resource = self
             .registry()
-            .slot_name(MENU_ROOT_SLOT)
-            .ok_or_else(|| UiLifecycleError::Registry(format!("missing slot {MENU_ROOT_SLOT}")))?
+            .slot_name(slot)
+            .ok_or_else(|| UiLifecycleError::Registry(format!("missing slot {slot}")))?
             .to_owned();
-        self.spawn(self.root_entity(), &resource, true)?;
+        let id = self.spawn(self.root_entity(), &resource, true)?;
         self.recompute();
-        Ok(())
+        Ok(id)
     }
     pub fn back(&mut self, id: UiInstanceId) -> Result<(), UiLifecycleError> {
         if !self.instance_is_live(id) {

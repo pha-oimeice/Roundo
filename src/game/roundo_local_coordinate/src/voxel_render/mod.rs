@@ -28,6 +28,10 @@ use surface_proxy::{GpuQefReducePass, GpuQefSummary};
 use svo_arena::SvoAllocation;
 use svo_upload::SvoUploads;
 
+use crate::{
+    CHUNK_EDGE_LENGTH, ChunkId, LocalCoordinate, LocalCoordinateId, LocalCoordinateIdentity,
+    VoxelChunkSvo,
+};
 use bevy::{
     asset::{embedded_asset, load_embedded_asset},
     core_pipeline::{
@@ -47,9 +51,9 @@ use bevy::{
             BlendState, Buffer, BufferInitDescriptor, BufferUsages, CachedComputePipelineId,
             CachedRenderPipelineId, ColorTargetState, ColorWrites, CompareFunction,
             ComputePassDescriptor, ComputePipelineDescriptor, DepthStencilState, Face,
-            FragmentState, FrontFace, MultisampleState, PipelineCache, PolygonMode,
-            PrimitiveState, PrimitiveTopology, RenderPassDescriptor, RenderPipelineDescriptor,
-            ShaderStages, ShaderType, StencilState, StoreOp, TextureFormat, VertexState,
+            FragmentState, FrontFace, MultisampleState, PipelineCache, PolygonMode, PrimitiveState,
+            PrimitiveTopology, RenderPassDescriptor, RenderPipelineDescriptor, ShaderStages,
+            ShaderType, StencilState, StoreOp, TextureFormat, VertexState,
             binding_types::{storage_buffer, storage_buffer_read_only, uniform_buffer},
         },
         renderer::{RenderContext, RenderDevice, RenderQueue, ViewQuery},
@@ -58,10 +62,6 @@ use bevy::{
             ViewUniformOffset, ViewUniforms,
         },
     },
-};
-use roundo_local_coordinate::{
-    CHUNK_EDGE_LENGTH, ChunkId, LocalCoordinate, LocalCoordinateId, LocalCoordinateIdentity,
-    VoxelChunkSvo,
 };
 use std::{
     borrow::Cow,

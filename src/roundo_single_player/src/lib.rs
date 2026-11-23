@@ -1,13 +1,16 @@
+//! Windowed single-player host. Game state lives in the main World without a transport.
+
 use bevy::{
     DefaultPlugins,
-    app::{App, Plugin},
-    log::LogPlugin,
+    app::{App, Plugin, Startup, Update},
+    log::{LogPlugin, info},
     prelude::{IVec2, PluginGroup, Window, WindowPlugin, WindowPosition},
     window::WindowMode,
 };
 use roundo_infrastructure::mod_manager::{
     AssetLimits, ModLoader, UI_PROTOTYPE_TYPE, ui::UiCatalogue,
 };
+use roundo_local_coordinate::{WorldRenderPlugin, WorldRenderSettings};
 use roundo_rendering::RoundoRenderingPlugin;
 
 mod client_data;
@@ -16,11 +19,12 @@ mod config_store;
 mod input;
 mod ui_host;
 
-/// Loads client configuration and Mods, then installs the windowed client on
-/// the supplied App. Invalid configuration or Mod data aborts installation.
-pub struct RoundoClientPlugin;
+/// Loads configuration and Mods, then installs 3D rendering and the UI runtime.
+/// The supplied App must not already have a Bevy runner. Invalid configuration
+/// or Mod data aborts installation.
+pub struct RoundoSinglePlayerPlugin;
 
-impl Plugin for RoundoClientPlugin {
+impl Plugin for RoundoSinglePlayerPlugin {
     fn build(&self, app: &mut App) {
         let config = config_store::ClientConfigStore::new(config::load_config());
         let settings = config.settings();
@@ -53,15 +57,17 @@ impl Plugin for RoundoClientPlugin {
                 })
                 .disable::<LogPlugin>(),
             RoundoRenderingPlugin,
+            WorldRenderPlugin,
         ))
-        .insert_resource(roundo_rendering::WorldRenderSettings {
+        .insert_resource(WorldRenderSettings {
             geometry_lod_pixel_error: settings.world.geometry_lod_pixel_error,
             ..Default::default()
         })
         .insert_resource(config)
         .init_resource::<client_data::HudCache>()
+        .add_systems(Startup, || info!("Roundo single-player started"))
         .add_systems(
-            bevy::prelude::Update,
+            Update,
             (
                 config_store::sync_runtime_settings,
                 client_data::update_hud_cache,

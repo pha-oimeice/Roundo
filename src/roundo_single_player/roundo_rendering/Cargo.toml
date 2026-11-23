@@ -1,7 +1,8 @@
 [package]
-name = "roundo_server"
+name = "roundo_rendering"
 version.workspace = true
 edition.workspace = true
 
 [dependencies]
 bevy.workspace = true
+roundo_creature.workspace = true
