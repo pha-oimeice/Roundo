@@ -1,13 +1,126 @@
 title = "Roundo"
-sources = {}
-model = {}
+sources = { settings = "client.settings", bindings = "client.bindings" }
+model = { panel = "start", labels = { start = "Start", option = "Option", quit = "Quit" } }
 
 [[nodes]]
-id = "menu"
-kind = "column"
-style = { width = "100%", height = "100%", align_items = "Center", justify_content = "Center" }
+id = "launcher"
+kind = "row"
+style = { width = "100%", height = "100%", padding = 24.0 }
+
 [[nodes.children]]
+id = "frame"
+kind = "row"
+style = { width = "100%", height = "100%", padding = 1.0, column_gap = 1.0, background = [58, 72, 89, 255] }
+
+[[nodes.children.children]]
+id = "content"
+kind = "column"
+style = { flex_grow = 1.0, flex_basis = 0.0, min_width = 0.0, padding = 24.0, row_gap = 16.0, background = [16, 21, 29, 255] }
+
+[[nodes.children.children.children]]
+id = "heading"
+kind = "text"
+text = { op = "get", value = "$model.labels", key = "$model.panel" }
+style = { font_size = 28.0, color = [244, 247, 251, 255] }
+
+[[nodes.children.children.children]]
+id = "divider"
+kind = "container"
+style = { width = "100%", height = 1.0, flex_shrink = 0.0, background = [58, 72, 89, 255] }
+
+[[nodes.children.children.children]]
+id = "start-panel"
+kind = "text"
+visible = { op = "eq", left = "$model.panel", right = "start" }
+text = "单人游戏的世界选择尚未接入。"
+
+[[nodes.children.children.children]]
+id = "option-panel"
+kind = "scroll"
+visible = { op = "eq", left = "$model.panel", right = "option" }
+scrollbar_width = 8.0
+style = { flex_grow = 1.0, min_height = 0.0, row_gap = 12.0 }
+
+[[nodes.children.children.children.children]]
+id = "settings-heading"
+kind = "text"
+text = "当前设置（只读）"
+style = { font_size = 22.0 }
+
+[[nodes.children.children.children.children]]
+id = "settings"
+kind = "repeat"
+items = "$data.settings.settings"
+alias = "setting"
+key = "$setting.key"
+
+[[nodes.children.children.children.children.children]]
+id = "value"
+kind = "text"
+text = "${setting.key}: ${setting.value}"
+
+[[nodes.children.children.children.children]]
+id = "bindings-heading"
+kind = "text"
+text = "已配置的按键绑定（未启用）"
+style = { font_size = 22.0 }
+
+[[nodes.children.children.children.children]]
+id = "bindings"
+kind = "repeat"
+items = "$data.bindings.bindings"
+alias = "binding"
+key = "$index"
+
+[[nodes.children.children.children.children.children]]
+id = "binding"
+kind = "text"
+text = "${binding.slot}: ${binding.key}"
+
+[[nodes.children.children.children]]
+id = "quit-panel"
+kind = "text"
+visible = { op = "eq", left = "$model.panel", right = "quit" }
+text = "使用窗口的关闭按钮退出 Roundo。"
+
+[[nodes.children.children]]
+id = "sidebar"
+kind = "column"
+style = { width = "25%", min_width = 208.0, flex_shrink = 0.0, align_items = "Center", justify_content = "SpaceBetween", padding = 24.0, background = [24, 32, 43, 255] }
+
+[[nodes.children.children.children]]
+id = "brand"
+kind = "column"
+style = { width = "100%", height = "40%", align_items = "Center", justify_content = "Center" }
+
+[[nodes.children.children.children.children]]
 id = "title"
 kind = "text"
-text = "ROUNDO"
-style = { font_size = 72.0, color = [244, 247, 251, 255] }
+text = "Roundo"
+style = { font_size = 40.0, color = [244, 247, 251, 255] }
+
+[[nodes.children.children.children]]
+id = "buttons"
+kind = "column"
+style = { width = "100%", max_width = 208.0, flex_shrink = 0.0, row_gap = 12.0 }
+
+[[nodes.children.children.children.children]]
+id = "start"
+kind = "button"
+text = "$model.labels.start"
+style = { width = "100%", height = 48.0 }
+on_activate = [{ kind = "set", path = "model.panel", value = "start" }]
+
+[[nodes.children.children.children.children]]
+id = "option"
+kind = "button"
+text = "$model.labels.option"
+style = { width = "100%", height = 48.0 }
+on_activate = [{ kind = "set", path = "model.panel", value = "option" }]
+
+[[nodes.children.children.children.children]]
+id = "quit"
+kind = "button"
+text = "$model.labels.quit"
+style = { width = "100%", height = 48.0 }
+on_activate = [{ kind = "set", path = "model.panel", value = "quit" }]

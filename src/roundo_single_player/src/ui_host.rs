@@ -6,20 +6,27 @@ use crate::client_data::{
 };
 use bevy::prelude::*;
 use roundo_infrastructure::mod_manager::{AssetAccess, AssetPrototype, ui::UiCatalogue};
-use roundo_ui::UiSystemSet;
+use roundo_ui::{MENU_ROOT_SLOT, UiLifecycleManager, UiSystemSet};
 
 pub(crate) struct ClientUiHostPlugin;
 
 impl Plugin for ClientUiHostPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<ClientDataSyncState>().add_systems(
-            Update,
-            sync_subscribed_client_data
-                .after(update_hud_cache)
-                .after(UiSystemSet::Ingress)
-                .before(UiSystemSet::Project),
-        );
+        app.init_resource::<ClientDataSyncState>()
+            .add_systems(PostStartup, mount_main_menu)
+            .add_systems(
+                Update,
+                sync_subscribed_client_data
+                    .after(update_hud_cache)
+                    .after(UiSystemSet::Ingress)
+                    .before(UiSystemSet::Project),
+            );
     }
+}
+
+fn mount_main_menu(world: &mut World) {
+    UiLifecycleManager::with(world, |ui| ui.mount_root(MENU_ROOT_SLOT))
+        .unwrap_or_else(|error| panic!("cannot mount UI root slot {MENU_ROOT_SLOT}: {error}"));
 }
 
 /// Validates references against the sources available in the single-player host.

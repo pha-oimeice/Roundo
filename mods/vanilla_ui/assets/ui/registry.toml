@@ -19,8 +19,6 @@ lifecycle_independent = false
 presentation = "exclusive"
 layout = { kind = "fullscreen" }
 background_color = [16, 21, 29, 255]
-[resource.imports]
-settings = "roundo.settings"
 
 [[resource]]
 name = "hud"
