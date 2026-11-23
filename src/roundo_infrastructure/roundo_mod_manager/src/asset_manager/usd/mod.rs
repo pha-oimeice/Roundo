@@ -151,13 +151,7 @@ impl AssetLoader for UsdDefinition {
                 })?;
         for dependency in dependencies {
             let handle = context.require(&dependency)?;
-            context.with_dependency(&handle, |payload| match payload {
-                AssetPrototype::Usd(child) => prototype.merge(child).map_err(AssetError::from),
-                other => Err(AssetError::KindMismatch {
-                    asset: dependency.clone(),
-                    actual: *other.kind(),
-                }),
-            })??;
+            context.with_dependency(&handle, |AssetPrototype::Usd(child)| prototype.merge(child))??;
         }
         Ok(Arc::new(AssetPrototype::Usd(prototype)))
     }

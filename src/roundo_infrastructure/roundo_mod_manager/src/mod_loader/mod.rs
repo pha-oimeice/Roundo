@@ -21,7 +21,6 @@ type NativeReceiver = Box<dyn Fn(&ModTypeInput) -> Result<ErasedPrototype, Strin
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct PrototypeTypeId(pub &'static str);
 pub const ATOMIC_VOXEL_PROTOTYPE_TYPE: PrototypeTypeId = PrototypeTypeId("atomic-voxel");
-pub const UI_PROTOTYPE_TYPE: PrototypeTypeId = PrototypeTypeId("ui");
 pub const INPUT_PROTOTYPE_TYPE: PrototypeTypeId = PrototypeTypeId("input");
 pub const ITEM_PROTOTYPE_TYPE: PrototypeTypeId = PrototypeTypeId("item");
 
@@ -56,13 +55,9 @@ impl ModTypeInput {
     }
 }
 
-enum Receiver {
-    Native(NativeReceiver),
-    Ui,
-}
 struct Registration {
     dependencies: &'static [PrototypeTypeId],
-    receiver: Receiver,
+    receiver: NativeReceiver,
 }
 
 /// Consumed initialization builder. There is no post-initialization add-Mod,
@@ -83,7 +78,7 @@ impl ModLoader {
         }
     }
 
-    /// Registers a data receiver, not an Item/UI/gameplay factory.
+    /// Registers a data receiver, not a gameplay factory.
     pub fn register_prototype<T, E>(
         mut self,
         id: PrototypeTypeId,
@@ -94,28 +89,16 @@ impl ModLoader {
         T: crate::ModPrototype,
         E: fmt::Display + 'static,
     {
-        let receiver = Receiver::Native(Box::new(move |input| {
+        let receiver = Box::new(move |input: &ModTypeInput| {
             receive(input)
                 .map(|value| Box::new(value) as ErasedPrototype)
                 .map_err(|error| error.to_string())
-        }));
+        });
         self.insert(
             id,
             Registration {
                 dependencies,
                 receiver,
-            },
-        );
-        self
-    }
-
-    /// Enables the existing UI declaration schema. Pages/font bytes remain unloaded.
-    pub fn with_ui(mut self) -> Self {
-        self.insert(
-            UI_PROTOTYPE_TYPE,
-            Registration {
-                dependencies: &[],
-                receiver: Receiver::Ui,
             },
         );
         self
@@ -156,7 +139,7 @@ impl ModLoader {
             })?);
         let directory = SourceDirectory::new(Arc::clone(&mods))
             .map_err(|error| PrototypeLoadErrors::one(PrototypeTypeId("mod-sources"), error))?;
-        let mut bindings: Vec<(AssetKey, Arc<AssetDefinition>)> =
+        let bindings: Vec<(AssetKey, Arc<AssetDefinition>)> =
             ImportDirectory::prepare(Arc::clone(&directory), self.usd_sources)
                 .map_err(|error| PrototypeLoadErrors::one(PrototypeTypeId("usd"), error))?;
         let mut published = BTreeMap::new();
@@ -164,17 +147,8 @@ impl ModLoader {
             let mut staged = Vec::new();
             let mut errors = Vec::new();
             for id in phase {
-                let result = (|| {
-                    let input = read_configs(&directory, id)?;
-                    match &self.registrations[&id].receiver {
-                        Receiver::Native(receive) => receive(&input),
-                        Receiver::Ui => {
-                            let (catalogue, definitions) = crate::ui::prepare(&input, &directory)?;
-                            bindings.extend(definitions);
-                            Ok(Box::new(catalogue) as ErasedPrototype)
-                        }
-                    }
-                })();
+                let receive = &self.registrations[&id].receiver;
+                let result = read_configs(&directory, id).and_then(|input| receive(&input));
                 match result {
                     Ok(prototype) => staged.push((id, prototype)),
                     Err(message) => errors.push(PrototypeLoadError { id, message }),
@@ -261,7 +235,6 @@ fn read_configs(
     let relative = match id {
         ATOMIC_VOXEL_PROTOTYPE_TYPE => "assets/voxel/registry.toml",
         INPUT_PROTOTYPE_TYPE => "assets/input/registry.toml",
-        UI_PROTOTYPE_TYPE => crate::source::UI_REGISTRY_PATH,
         ITEM_PROTOTYPE_TYPE => "game_data/item/registry.toml",
         _ => {
             return Err(format!(

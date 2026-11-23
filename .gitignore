@@ -62,8 +62,6 @@ mono_crash.*
 # Build results
 [Dd]ebug/
 # These are source directories, not build output.
-!mods/vanilla_ui/assets/webui/debug/
-!mods/vanilla_ui/assets/webui/debug/*
 [Dd]ebugPublic/
 [Rr]elease/
 [Rr]eleases/

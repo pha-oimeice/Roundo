@@ -12,9 +12,7 @@ use std::{
     sync::Arc,
 };
 
-pub(crate) const UI_REGISTRY_PATH: &str = "assets/ui/registry.toml";
-
-// One loader-owned byte-reading seam for configuration, UI and USD. No shared
+// One loader-owned byte-reading seam for configuration and USD. No shared
 // cross-asset cache is installed yet; adding one does not change consumer APIs.
 pub(crate) fn read_file(path: &Path) -> std::io::Result<Vec<u8>> {
     std::fs::read(path)
@@ -43,44 +41,6 @@ impl SourceDirectory {
             roots.insert(installed.id.clone(), root);
         }
         Ok(Arc::new(Self { mods, roots }))
-    }
-
-    pub fn bind_ui(
-        &self,
-        owner: &ModId,
-        relative: &str,
-        page: bool,
-    ) -> Result<Arc<BoundFile>, String> {
-        let relative = Path::new(relative);
-        if relative
-            .components()
-            .any(|part| !matches!(part, Component::Normal(_) | Component::CurDir))
-        {
-            return Err(format!(
-                "UI entry must be relative to its resource directory: {relative:?}"
-            ));
-        }
-        let base = Path::new(UI_REGISTRY_PATH)
-            .parent()
-            .expect("UI registry directory");
-        let bound = self.bind(owner, &base.join(relative))?;
-        let root = std::fs::canonicalize(self.roots[owner].join(base))
-            .map_err(|error| error.to_string())?;
-        if !bound.path().starts_with(root) {
-            return Err(format!(
-                "UI entry escapes its resource directory: {relative:?}"
-            ));
-        }
-        if page
-            && bound
-                .path()
-                .extension()
-                .and_then(|extension| extension.to_str())
-                != Some("toml")
-        {
-            return Err(format!("UI page must use .toml: {relative:?}"));
-        }
-        Ok(bound)
     }
 
     pub fn bind(&self, owner: &ModId, relative: &Path) -> Result<Arc<BoundFile>, String> {

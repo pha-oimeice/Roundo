@@ -13,7 +13,6 @@ pub mod asset_manager;
 mod mod_loader;
 mod mods;
 mod source;
-pub mod ui;
 
 pub use asset_manager::usd;
 pub use asset_manager::{
@@ -23,7 +22,6 @@ pub use asset_manager::{
 pub use mod_loader::{
     ATOMIC_VOXEL_PROTOTYPE_TYPE, INPUT_PROTOTYPE_TYPE, ITEM_PROTOTYPE_TYPE, ModConfig, ModLoader,
     ModManager, ModTypeInput, PrototypeLoadError, PrototypeLoadErrors, PrototypeTypeId,
-    UI_PROTOTYPE_TYPE,
 };
 pub use mods::{
     LoadError, LoadedMod, LoadedMods, ModId, ResourceCandidate, ResourceName,

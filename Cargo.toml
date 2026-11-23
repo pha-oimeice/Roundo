@@ -35,7 +35,6 @@ members = [
     "src/roundo_infrastructure/roundo_user_config",
     "src/roundo_single_player",
     "src/roundo_single_player/roundo_rendering",
-    "src/roundo_single_player/roundo_ui",
     "src/game/roundo_presence",
     "src/game/roundo_portal",
     "src/game/roundo_player",
@@ -107,4 +106,3 @@ roundo_rendering = { path = "src/roundo_single_player/roundo_rendering" }
 roundo_player = { path = "src/game/roundo_player" }
 roundo_local_coordinate = { path = "src/game/roundo_local_coordinate" }
 roundo_single_player = { path = "src/roundo_single_player" }
-roundo_ui = { path = "src/roundo_single_player/roundo_ui" }

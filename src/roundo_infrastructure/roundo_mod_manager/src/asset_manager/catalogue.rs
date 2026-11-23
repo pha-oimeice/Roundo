@@ -10,8 +10,6 @@ use crate::{
 pub enum AssetKind {
     /// USD source and its resolved composition dependencies, without rendering.
     Usd,
-    /// Native UI page template and its bound font source, without runtime views.
-    Ui,
 }
 
 /// Catalogue identity: category plus the existing Mod-qualified resource name.
@@ -50,8 +48,6 @@ impl AssetKey {
 pub enum AssetDefinition {
     /// A USD source in a validated unified Mod import directory.
     Usd(UsdDefinition),
-    /// Loader-parsed UI metadata with private immutable source bindings.
-    Ui(Arc<crate::ui::UiDefinition>),
 }
 
 impl AssetDefinition {
@@ -59,14 +55,12 @@ impl AssetDefinition {
     pub fn kind(&self) -> &AssetKind {
         match self {
             Self::Usd(_) => &AssetKind::Usd,
-            Self::Ui(_) => &AssetKind::Ui,
         }
     }
 
     pub(crate) fn loader(&self) -> &dyn AssetLoader {
         match self {
             Self::Usd(definition) => definition,
-            Self::Ui(definition) => definition.as_ref(),
         }
     }
 }
@@ -79,8 +73,6 @@ impl AssetDefinition {
 pub enum AssetPrototype {
     /// Immutable USD source bytes and the resolved dependency inventory.
     Usd(UsdPrototype),
-    /// Immutable native UI template, not a UI instance.
-    Ui(crate::ui::UiPrototype),
 }
 
 impl AssetPrototype {
@@ -88,7 +80,6 @@ impl AssetPrototype {
     pub fn kind(&self) -> &AssetKind {
         match self {
             Self::Usd(_) => &AssetKind::Usd,
-            Self::Ui(_) => &AssetKind::Ui,
         }
     }
 }

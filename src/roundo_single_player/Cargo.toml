@@ -5,13 +5,9 @@ edition.workspace = true
 
 [dependencies]
 bevy.workspace = true
-log.workspace = true
 roundo_infrastructure.workspace = true
 roundo_local_coordinate.workspace = true
 roundo_rendering.workspace = true
-roundo_ui.workspace = true
-serde.workspace = true
-serde_json.workspace = true
 
 [features]
 dev = ["bevy/debug", "bevy/file_watcher"]
