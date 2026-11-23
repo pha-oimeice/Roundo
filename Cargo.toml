@@ -31,7 +31,7 @@ members = [
     "src/roundo_infrastructure/roundo_mod_manager",
     "src/roundo_infrastructure/roundo_networking",
     "src/roundo_infrastructure/roundo_networking/proc_macro",
-    "src/roundo_infrastructure/roundo_quinnet",
+    "src/roundo_infrastructure/roundo_networking/roundo_quinnet",
     "src/roundo_infrastructure/roundo_toolbox",
     "src/roundo_infrastructure/roundo_user_config",
     "src/roundo_server",
@@ -96,7 +96,7 @@ roundo_dsa = { path = "src/roundo_infrastructure/roundo_dsa" }
 roundo_mod_manager = { path = "src/roundo_infrastructure/roundo_mod_manager" }
 roundo_networking = { path = "src/roundo_infrastructure/roundo_networking" }
 roundo_networking_proc_macro = { path = "src/roundo_infrastructure/roundo_networking/proc_macro" }
-roundo_quinnet = { path = "src/roundo_infrastructure/roundo_quinnet" }
+roundo_quinnet = { path = "src/roundo_infrastructure/roundo_networking/roundo_quinnet" }
 roundo_toolbox = { path = "src/roundo_infrastructure/roundo_toolbox" }
 roundo_user_config = { path = "src/roundo_infrastructure/roundo_user_config" }
 # ---
