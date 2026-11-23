@@ -1,6 +1,6 @@
 //! Native launcher scene and in-place panel navigation.
 
-use crate::config_store::ClientConfigStore;
+use crate::{bundled_assets_root, config_store::ClientConfigStore};
 use bevy::{
     app::AppExit,
     ecs::template::{EntityTemplate, FromTemplate, OptionTemplate},
@@ -27,13 +27,24 @@ use bevy::{
 };
 use roundo_infrastructure::user_config::ClientSettingsConfig;
 
+mod directory;
+mod local_saves;
+mod remote_servers;
+
 pub(crate) struct LauncherUiPlugin;
+
+#[derive(Resource)]
+struct LauncherFont(Handle<Font>);
 
 impl Plugin for LauncherUiPlugin {
     fn build(&self, app: &mut App) {
-        app.add_plugins(FeathersPlugins)
-            .insert_resource(UiTheme(create_dark_theme()))
-            .add_systems(PostStartup, spawn_launcher_main_menu);
+        app.add_plugins((
+            FeathersPlugins,
+            local_saves::LocalSavesPlugin,
+            remote_servers::RemoteDirectoryPlugin,
+        ))
+        .insert_resource(UiTheme(create_dark_theme()))
+        .add_systems(PostStartup, spawn_launcher_main_menu);
     }
 }
 
@@ -67,18 +78,6 @@ struct PanelButton(Panel);
 #[derive(Component, FromTemplate)]
 struct LauncherTabBody(Entity);
 
-#[derive(Component, FromTemplate)]
-struct DisclosureButton {
-    body: Entity,
-    indicator: Entity,
-}
-
-// Presentation only: no save identity, endpoint validation, or persistence.
-struct SessionEntryDisplay {
-    title: String,
-    details: Vec<String>,
-}
-
 #[derive(Clone, Component, Default)]
 struct LauncherRoot;
 
@@ -94,15 +93,24 @@ const DIVIDER: Color = Color::srgb_u8(58, 72, 89);
 const QUIT_RED: Color = Color::srgb_u8(241, 82, 88);
 const ACTIVE_TAB_BACKGROUND: Color = Color::srgb_u8(48, 66, 86);
 
+const FONT_DATA_PATH: &str = "fonts/NotoSansSC.ttf";
 const ROUNDO_TITLE_FONT_SIZE_PX: f32 = 60.0;
 const NAVIGATION_BUTTON_FONT_SIZE_PX: f32 = 24.0;
 const LAUNCHER_TAB_FONT_SIZE_PX: f32 = 20.0;
 
 fn spawn_launcher_main_menu(world: &mut World) {
-    let font = world.resource_mut::<Assets<Font>>().add(Font::from_bytes(
-        include_bytes!("../assets/fonts/NotoSansSC.ttf").to_vec(),
-    ));
-    let start = server_directory_tabs_scene(&font, &[], &[]);
+    let font_path = bundled_assets_root().join(FONT_DATA_PATH);
+    let font_data = std::fs::read(&font_path).unwrap_or_else(|error| {
+        panic!(
+            "failed to read launcher font {}: {error}",
+            font_path.display()
+        )
+    });
+    let font = world
+        .resource_mut::<Assets<Font>>()
+        .add(Font::from_bytes(font_data));
+    world.insert_resource(LauncherFont(font.clone()));
+    let start = launcher_start_tabs_scene(&font);
     let options =
         launcher_options_tabs_scene(world.resource::<ClientConfigStore>().settings(), &font);
     world
@@ -181,13 +189,9 @@ fn content_header_divider_scene() -> impl Scene {
     }
 }
 
-fn server_directory_tabs_scene(
-    font: &Handle<Font>,
-    local_entries: &[SessionEntryDisplay],
-    remote_entries: &[SessionEntryDisplay],
-) -> impl Scene + use<> {
-    let local = server_entry_list_scene(font, "尚未接入本地服务器目录。", local_entries);
-    let remote = server_entry_list_scene(font, "尚未接入远程地址簿。", remote_entries);
+fn launcher_start_tabs_scene(font: &Handle<Font>) -> impl Scene + use<> {
+    let local = local_saves::local_save_list_scene(font.clone());
+    let remote = remote_servers::remote_server_list_scene(font.clone());
     let font = font.clone();
     bsn! {
         @launcher_tabbed_content_layout_scene()
@@ -282,81 +286,6 @@ fn show_selected_launcher_tab_body(
             node.display = Display::None;
             *visibility = Visibility::Hidden;
         }
-    }
-}
-
-fn server_entry_list_scene(
-    font: &Handle<Font>,
-    unavailable_message: &'static str,
-    entries: &[SessionEntryDisplay],
-) -> impl Scene + use<> {
-    let rows = entries
-        .iter()
-        .map(|entry| {
-            let details = entry
-                .details
-                .iter()
-                .map(|line| launcher_label_with_font(font.clone(), line.clone(), 16.0))
-                .collect::<Vec<_>>();
-            collapsible_server_entry_scene(font.clone(), entry.title.clone(), details)
-        })
-        .collect::<Vec<_>>();
-    let notice = rows
-        .is_empty()
-        .then(|| launcher_label_with_font(font.clone(), unavailable_message, 16.0));
-    let contents = bsn_list! { {notice.into_iter().collect::<Vec<_>>()} -- {rows} };
-    launcher_scroll_area_scene(contents)
-}
-
-fn collapsible_server_entry_scene(
-    font: Handle<Font>,
-    title: String,
-    contents: impl SceneList,
-) -> impl Scene {
-    bsn! {
-        Node { flex_direction: FlexDirection::Column, flex_shrink: 0.0 }
-        Children [
-            @FeathersButton
-            Node { width: percent(100), min_height: px(36), justify_content: JustifyContent::SpaceBetween, column_gap: px(12) }
-            DisclosureButton { body: #DisclosureBody, indicator: #DisclosureIndicator }
-            on(toggle_list_section_body)
-            Children [
-                @launcher_label_with_font(font.clone(), title, 18.0)
-                Pickable::IGNORE
-                --
-                #DisclosureIndicator
-                @launcher_label_with_font(font, "+", 18.0)
-                Pickable::IGNORE
-            ]
-            --
-            #DisclosureBody
-            Visibility::Hidden
-            Node { display: Display::None, flex_direction: FlexDirection::Column, row_gap: px(8), padding: {UiRect::all(px(12))} }
-            BackgroundColor(SIDEBAR)
-            Children [ {contents} ]
-        ]
-    }
-}
-
-fn toggle_list_section_body(
-    event: On<Activate>,
-    buttons: Query<&DisclosureButton>,
-    mut bodies: Query<(&mut Node, &mut Visibility)>,
-    mut indicators: Query<&mut Text>,
-) {
-    let button = buttons.get(event.entity).expect("list disclosure button");
-    let (mut body, mut visibility) = bodies.get_mut(button.body).expect("list disclosure body");
-    let mut indicator = indicators
-        .get_mut(button.indicator)
-        .expect("list disclosure indicator");
-    if body.display == Display::None {
-        body.display = Display::Flex;
-        *visibility = Visibility::Inherited;
-        indicator.0 = "−".into();
-    } else {
-        body.display = Display::None;
-        *visibility = Visibility::Hidden;
-        indicator.0 = "+".into();
     }
 }
 

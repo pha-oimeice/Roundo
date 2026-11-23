@@ -33,7 +33,6 @@ use crate::{
     VoxelChunkSvo,
 };
 use bevy::{
-    asset::{embedded_asset, load_embedded_asset},
     core_pipeline::{
         core_3d::main_opaque_pass_3d,
         schedule::{Core3d, Core3dSystems},
@@ -117,14 +116,12 @@ impl Default for WorldRenderSettings {
 
 /// Installs extraction and render-graph systems for local voxel chunks.
 ///
-/// If Bevy has no [`RenderApp`], the plugin still initializes settings and
-/// shader assets but installs no GPU-world systems.
+/// If Bevy has no [`RenderApp`], the plugin initializes settings but does not
+/// load shaders or install GPU-world systems.
 pub struct WorldRenderPlugin;
 
 impl bevy::prelude::Plugin for WorldRenderPlugin {
     fn build(&self, app: &mut App) {
-        register_world_shaders(app);
-
         app.init_resource::<WorldRenderSettings>()
             .add_plugins(ExtractResourcePlugin::<WorldRenderSettings>::default());
 

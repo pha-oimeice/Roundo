@@ -8,15 +8,6 @@ use bevy::{
     shader::{Shader, ShaderCacheError},
 };
 
-pub(super) fn register_world_shaders(app: &mut App) {
-    embedded_asset!(app, "shaders/world_cull_lod.wesl");
-    embedded_asset!(app, "shaders/world_greedy_emit.wesl");
-    embedded_asset!(app, "shaders/world_model_select.wesl");
-    embedded_asset!(app, "shaders/world_surface_proxy.wesl");
-    embedded_asset!(app, "shaders/world_vertex.wesl");
-    embedded_asset!(app, "shaders/world_fragment.wesl");
-}
-
 #[derive(Resource)]
 pub(super) struct WorldShaders {
     pub(super) cull_lod: Handle<Shader>,
@@ -31,12 +22,12 @@ impl WorldShaders {
     pub(super) fn load(server: &AssetServer) -> Self {
         bevy::log::info!("starting world shader compilation checks");
         Self {
-            cull_lod: load_embedded_asset!(server, "shaders/world_cull_lod.wesl"),
-            greedy_emit: load_embedded_asset!(server, "shaders/world_greedy_emit.wesl"),
-            model_select: load_embedded_asset!(server, "shaders/world_model_select.wesl"),
-            surface_proxy: load_embedded_asset!(server, "shaders/world_surface_proxy.wesl"),
-            vertex: load_embedded_asset!(server, "shaders/world_vertex.wesl"),
-            fragment: load_embedded_asset!(server, "shaders/world_fragment.wesl"),
+            cull_lod: server.load("shaders/world_cull_lod.wesl"),
+            greedy_emit: server.load("shaders/world_greedy_emit.wesl"),
+            model_select: server.load("shaders/world_model_select.wesl"),
+            surface_proxy: server.load("shaders/world_surface_proxy.wesl"),
+            vertex: server.load("shaders/world_vertex.wesl"),
+            fragment: server.load("shaders/world_fragment.wesl"),
         }
     }
 

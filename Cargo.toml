@@ -66,6 +66,7 @@ strip = "debuginfo"
 [workspace.dependencies]
 avian3d = "0.8"
 bevy = { version = "0.20.1", default-features = false, features = ["bevy_scene", "bevy_state", "bevy_winit", "bevy_render", "bevy_pbr", "bevy_text", "bevy_audio", "bevy_ui_render", "bevy_feathers", "custom_cursor", "complex_script_segmentation", "tonemapping_luts", "zstd_rust", "x11"] }
+chrono = { version = "0.4", default-features = false, features = ["std"] }
 crossbeam = "0.8"
 log = "0.4"
 num-traits = "0.2"
