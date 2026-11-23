@@ -1,43 +1,45 @@
 [package]
-name = "roundo"
+name = "roundo_bin"
 version.workspace = true
 edition.workspace = true
 
 [dependencies]
 bevy.workspace = true
-roundo_single_player.workspace = true
+chrono.workspace = true
+roundo_infrastructure.workspace = true
+roundo_local_coordinate.workspace = true
+roundo_rendering.workspace = true
 
 [features]
-dev = ["roundo_single_player/dev"]
+dev = ["bevy/debug", "bevy/file_watcher"]
 release = []
 
 [workspace]
 members = [
-    "src/game/roundo_block_interaction",
-    "src/game/roundo_contracts",
-    "src/game/roundo_controller",
-    "src/game/roundo_creature",
-    "src/game/roundo_marionette",
-    "src/game/roundo_local_coordinate",
-    "src/game/roundo_life",
-    "src/game/roundo_inventory",
-    "src/game/roundo_items",
-    "src/game/roundo_economy",
-    "src/roundo_infrastructure",
-    "src/roundo_infrastructure/roundo_cli",
-    "src/roundo_infrastructure/roundo_cli/proc_macro",
-    "src/roundo_infrastructure/roundo_dsa",
-    "src/roundo_infrastructure/roundo_mod_manager",
-    "src/roundo_infrastructure/roundo_networking",
-    "src/roundo_infrastructure/roundo_networking/proc_macro",
-    "src/roundo_infrastructure/roundo_networking/roundo_quinnet",
-    "src/roundo_infrastructure/roundo_toolbox",
-    "src/roundo_infrastructure/roundo_user_config",
-    "src/roundo_single_player",
-    "src/roundo_single_player/roundo_rendering",
-    "src/game/roundo_presence",
-    "src/game/roundo_portal",
-    "src/game/roundo_player",
+    "crates/game/roundo_block_interaction",
+    "crates/game/roundo_contracts",
+    "crates/game/roundo_controller",
+    "crates/game/roundo_creature",
+    "crates/game/roundo_marionette",
+    "crates/game/roundo_local_coordinate",
+    "crates/game/roundo_life",
+    "crates/game/roundo_inventory",
+    "crates/game/roundo_items",
+    "crates/game/roundo_economy",
+    "crates/roundo_infrastructure",
+    "crates/roundo_infrastructure/roundo_cli",
+    "crates/roundo_infrastructure/roundo_cli/proc_macro",
+    "crates/roundo_infrastructure/roundo_dsa",
+    "crates/roundo_infrastructure/roundo_mod_manager",
+    "crates/roundo_infrastructure/roundo_networking",
+    "crates/roundo_infrastructure/roundo_networking/proc_macro",
+    "crates/roundo_infrastructure/roundo_networking/roundo_quinnet",
+    "crates/roundo_infrastructure/roundo_toolbox",
+    "crates/roundo_infrastructure/roundo_user_config",
+    "crates/roundo_rendering",
+    "crates/game/roundo_presence",
+    "crates/game/roundo_portal",
+    "crates/game/roundo_player",
 ]
 resolver = "3"
 
@@ -87,23 +89,22 @@ proc-macro-crate = "3.5"
 quote = "1"
 syn = { version = "2", features = ["full", "visit-mut"] }
 # ---
-roundo_infrastructure = { path = "src/roundo_infrastructure" }
-roundo_cli = { path = "src/roundo_infrastructure/roundo_cli" }
-roundo_cli_proc_macro = { path = "src/roundo_infrastructure/roundo_cli/proc_macro" }
-roundo_dsa = { path = "src/roundo_infrastructure/roundo_dsa" }
-roundo_mod_manager = { path = "src/roundo_infrastructure/roundo_mod_manager" }
-roundo_networking = { path = "src/roundo_infrastructure/roundo_networking" }
-roundo_networking_proc_macro = { path = "src/roundo_infrastructure/roundo_networking/proc_macro" }
-roundo_quinnet = { path = "src/roundo_infrastructure/roundo_networking/roundo_quinnet" }
-roundo_toolbox = { path = "src/roundo_infrastructure/roundo_toolbox" }
-roundo_user_config = { path = "src/roundo_infrastructure/roundo_user_config" }
+roundo_infrastructure = { path = "crates/roundo_infrastructure" }
+roundo_cli = { path = "crates/roundo_infrastructure/roundo_cli" }
+roundo_cli_proc_macro = { path = "crates/roundo_infrastructure/roundo_cli/proc_macro" }
+roundo_dsa = { path = "crates/roundo_infrastructure/roundo_dsa" }
+roundo_mod_manager = { path = "crates/roundo_infrastructure/roundo_mod_manager" }
+roundo_networking = { path = "crates/roundo_infrastructure/roundo_networking" }
+roundo_networking_proc_macro = { path = "crates/roundo_infrastructure/roundo_networking/proc_macro" }
+roundo_quinnet = { path = "crates/roundo_infrastructure/roundo_networking/roundo_quinnet" }
+roundo_toolbox = { path = "crates/roundo_infrastructure/roundo_toolbox" }
+roundo_user_config = { path = "crates/roundo_infrastructure/roundo_user_config" }
 # ---
-roundo_contracts = { path = "src/game/roundo_contracts" }
-roundo_creature = { path = "src/game/roundo_creature" }
-roundo_life = { path = "src/game/roundo_life" }
-roundo_inventory = { path = "src/game/roundo_inventory" }
-roundo_items = { path = "src/game/roundo_items" }
-roundo_rendering = { path = "src/roundo_single_player/roundo_rendering" }
-roundo_player = { path = "src/game/roundo_player" }
-roundo_local_coordinate = { path = "src/game/roundo_local_coordinate" }
-roundo_single_player = { path = "src/roundo_single_player" }
+roundo_contracts = { path = "crates/game/roundo_contracts" }
+roundo_creature = { path = "crates/game/roundo_creature" }
+roundo_life = { path = "crates/game/roundo_life" }
+roundo_inventory = { path = "crates/game/roundo_inventory" }
+roundo_items = { path = "crates/game/roundo_items" }
+roundo_rendering = { path = "crates/roundo_rendering" }
+roundo_player = { path = "crates/game/roundo_player" }
+roundo_local_coordinate = { path = "crates/game/roundo_local_coordinate" }

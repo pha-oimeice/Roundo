@@ -5,11 +5,14 @@ use std::{fs, io, path::Path};
 const ASSETS_DIR: &str = "assets";
 
 fn main() {
-    println!("cargo:rerun-if-changed={ASSETS_DIR}");
-    println!("cargo:rerun-if-changed=mods");
-    println!("cargo:rerun-if-changed=config");
+    let workspace_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let assets = workspace_dir.join(ASSETS_DIR);
+    let mods = workspace_dir.join("mods");
+    let config = workspace_dir.join("config");
+    for source in [&assets, &mods, &config] {
+        println!("cargo:rerun-if-changed={}", source.display());
+    }
 
-    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
     let out_dir = std::env::var_os("OUT_DIR").expect("OUT_DIR is unavailable");
     // In the workspace's Cargo layout, intermediate build output is under
     // the executable's profile directory, in `build/<package output>/out`.
@@ -19,11 +22,11 @@ fn main() {
         .and_then(Path::parent)
         .expect("Cargo profile output directory is unavailable");
 
-    deploy_assets(&manifest_dir.join(ASSETS_DIR), &profile.join(ASSETS_DIR))
+    deploy_assets(&assets, &profile.join(ASSETS_DIR))
         .expect("failed to deploy assets beside the launcher executable");
-    copy_mods(&manifest_dir.join("mods"), &profile.join("mods"))
+    copy_mods(&mods, &profile.join("mods"))
         .expect("failed to deploy Mods beside the launcher executable");
-    install_config(&manifest_dir.join("config"), &profile.join("config"))
+    install_config(&config, &profile.join("config"))
         .expect("failed to install categorized configuration beside the launcher executable");
 }
 

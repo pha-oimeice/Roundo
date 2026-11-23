@@ -1,6 +1,5 @@
 //! Native launcher scene and in-place panel navigation.
 
-use crate::{bundled_assets_root, config_store::ClientConfigStore};
 use bevy::{
     app::AppExit,
     ecs::template::{EntityTemplate, FromTemplate, OptionTemplate},
@@ -26,6 +25,8 @@ use bevy::{
     },
 };
 use roundo_infrastructure::user_config::ClientSettingsConfig;
+
+use super::{bundled_assets_root, config_store::ClientConfigStore};
 
 mod directory;
 mod local_saves;

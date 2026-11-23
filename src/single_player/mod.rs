@@ -24,7 +24,7 @@ fn bundled_assets_root() -> PathBuf {
 
 /// Loads client configuration and installs the launcher and 3D rendering.
 /// The supplied App must not already have a Bevy runner.
-pub struct RoundoSinglePlayerPlugin;
+pub(super) struct RoundoSinglePlayerPlugin;
 
 impl Plugin for RoundoSinglePlayerPlugin {
     fn build(&self, app: &mut App) {

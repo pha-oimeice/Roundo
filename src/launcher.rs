@@ -2,7 +2,7 @@ use std::env;
 
 const SINGLE_PLAYER: &str = "single-player";
 const USAGE: &str =
-    "Usage: roundo [single-player]\nWith no arguments, opens the graphical launcher.";
+    "Usage: roundo_bin [single-player]\nWith no arguments, opens the graphical launcher.";
 
 pub(crate) fn should_launch() -> Result<bool, String> {
     let mut args = env::args_os().skip(1);
