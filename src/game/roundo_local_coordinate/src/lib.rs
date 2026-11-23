@@ -31,14 +31,9 @@ pub use local_coordinate::{
 };
 pub use roundo_contracts::{ChunkId, LocalCoordinateId};
 pub use roundo_infrastructure::dsa::algorithm::pcg::{
-    infinite_spheres::{
-        CHUNK_EDGE_LENGTH, EMPTY_MATERIAL_ID, GeneratedChunk, SOLID_MATERIAL_ID,
-    },
-    superflat::{SuperflatGenerator, generate_chunk},
+    CHUNK_EDGE_LENGTH, ChunkCoordinate, ChunkGenerator, EMPTY_MATERIAL_ID, GeneratedChunk,
+    SOLID_MATERIAL_ID, superflat::SuperflatGenerator,
 };
 /// Lossless sparse representation used to render a voxel chunk.
 pub type VoxelChunkSvo =
     roundo_infrastructure::dsa::data_structure::tree::BreadthFirstLosslessSvo<AtomicVoxel>;
-
-/// Signed chunk position in local-coordinate space.
-pub type ChunkCoordinate = [i64; 3];

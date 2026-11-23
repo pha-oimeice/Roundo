@@ -4,18 +4,14 @@
 //! reply (or local failure/cancellation). No transport, executor or clock is owned here.
 //! Calls are synchronous and nonblocking; the owner must advance time explicitly.
 
-use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 static NEXT_TICKET_ID: AtomicU64 = AtomicU64::new(1);
 
-/// Opaque process-local correlation identity. Never recycled, including across books
-/// in this process. Serialization is for correlation only: restarting the process
-/// does not preserve its pending book or guarantee ID uniqueness across restarts.
-/// A wire protocol needing restart-safe identity must namespace this ID externally.
-#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq, Hash, PartialOrd, Ord)]
-#[serde(transparent)]
+/// Opaque correlation identity, never recycled across books within a process.
+/// Restarting the process does not preserve pending tickets or ID uniqueness.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct TicketId(u64);
 
 #[derive(Debug, PartialEq, Eq)]

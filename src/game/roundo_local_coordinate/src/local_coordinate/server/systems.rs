@@ -30,8 +30,7 @@ impl Plugin for LocalCoordinateServerPlugin {
             )
             .add_systems(
                 Update,
-                super::super::base::clear_chunk_changes
-                    .in_set(LocalCoordinateServerSet::Commit),
+                super::super::base::clear_chunk_changes.in_set(LocalCoordinateServerSet::Commit),
             );
     }
 }
@@ -69,7 +68,7 @@ fn spawn_generated_local_coordinates(
         commands.spawn((
             LocalCoordinate::default(),
             LocalCoordinateIdentity(coordinate.id),
-            *coordinate,
+            coordinate.clone(),
             RigidBody::Static,
             LocalCoordinateTransform::default(),
         ));
@@ -171,9 +170,8 @@ fn prepare_generated_chunks(
             }
             if worker
                 .submit(ChunkGenerationJob {
-                    local_coordinate_id: generated.id,
-                    coordinate: position,
-                    generator: generated.generator,
+                    id,
+                    generator: generated.generator.clone(),
                     installation: coordinate.incarnation,
                 })
                 .is_err()
@@ -206,10 +204,7 @@ fn commit_generated_chunks(
         let Some(result) = worker.try_receive() else {
             break;
         };
-        let id = ChunkId {
-            local_coordinate_id: result.local_coordinate_id,
-            coordinate: result.chunk.coordinate,
-        };
+        let id = result.id;
         let was_pending = world.generation_jobs.remove(&id);
         let generation_plan = world.generation_plans.get(&id.local_coordinate_id);
         let still_desired =
@@ -239,7 +234,7 @@ fn commit_generated_chunks(
             }
             continue;
         }
-        if !replace_generated_chunk(&mut local_coordinate, &result.chunk, voxels) {
+        if !replace_generated_chunk(&mut local_coordinate, id.coordinate, &result.chunk, voxels) {
             continue;
         }
         let position = super::super::pcg::local_chunk_position(id.coordinate)

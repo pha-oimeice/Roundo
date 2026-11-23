@@ -11,7 +11,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 /// Chunk edges are powers of two so local positions map directly to octree paths.
-pub const CHUNK_EDGE_LENGTH: i32 = 16;
+pub const CHUNK_EDGE_LENGTH: i32 = crate::CHUNK_EDGE_LENGTH as i32;
 identifier!(AtomicVoxelId, u32);
 pub type AtomicVoxel = AtomicVoxelId;
 

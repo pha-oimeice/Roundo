@@ -1,36 +1,72 @@
 //! Deterministic three-dimensional maze generation from a seed and radius.
 
-use super::GeneratedVoxel;
+use super::{
+    CHUNK_EDGE_LENGTH, ChunkCoordinate, ChunkGenerator, EMPTY_MATERIAL_ID, GeneratedChunk,
+    SOLID_MATERIAL_ID, chunk_generator::voxel_index,
+};
 use rand::{RngExt, SeedableRng};
 use rand_chacha::ChaCha8Rng;
-use std::collections::VecDeque;
+use std::{collections::VecDeque, ops::Range};
 
-/// Generates the solid cells of a three-dimensional cuboid maze.
-/// Generates solid boundary voxels around the largest connected open region.
-pub fn generate_maze(seed: u64, radius: i16) -> Vec<GeneratedVoxel> {
-    assert!(radius >= 2, "radius must be greater than 1");
+/// A finite seeded maze. The voxel volume starts at `[0, 0, 0]`; space outside it is empty.
+pub struct MazeGenerator {
+    walls: Vec<Vec<Vec<bool>>>,
+}
 
-    let size = usize::try_from(radius * 2 + 1).expect("maze size must be positive");
-    let maze = generate_occupancy(seed, size);
-    let mut voxels = Vec::new();
-
-    for (x, plane) in maze.iter().enumerate() {
-        for (y, row) in plane.iter().enumerate() {
-            for (z, is_wall) in row.iter().copied().enumerate() {
-                if !is_wall {
-                    voxels.push(GeneratedVoxel {
-                        position: [x as i32, y as i32, z as i32],
-                        material_id: 1,
-                    });
-                }
-            }
+impl MazeGenerator {
+    /// Builds the entire maze once so chunk queries preserve global connectivity.
+    /// Panics if `radius` is smaller than two or the diameter exceeds `i16::MAX`.
+    pub fn new(seed: u64, radius: i16) -> Self {
+        assert!(radius >= 2, "radius must be greater than 1");
+        let size = radius
+            .checked_mul(2)
+            .and_then(|diameter| diameter.checked_add(1))
+            .expect("maze diameter must fit i16") as usize;
+        Self {
+            walls: generate_occupancy(seed, size),
         }
     }
 
-    voxels
+    /// Enumerates the chunks intersecting the finite maze volume.
+    pub fn chunk_coordinates(&self) -> impl Iterator<Item = ChunkCoordinate> {
+        let axis = self.chunk_axis();
+        let end = axis.end;
+        axis.flat_map(move |x| (0..end).flat_map(move |y| (0..end).map(move |z| [x, y, z])))
+    }
+
+    fn chunk_axis(&self) -> Range<i64> {
+        0..self.walls.len().div_ceil(CHUNK_EDGE_LENGTH) as i64
+    }
 }
 
-// Carves a seeded depth-first maze on odd lattice coordinates.
+impl ChunkGenerator for MazeGenerator {
+    fn generate_chunk(&self, coordinate: ChunkCoordinate) -> GeneratedChunk {
+        let axis = self.chunk_axis();
+        if coordinate.iter().any(|position| !axis.contains(position)) {
+            return GeneratedChunk::default();
+        }
+
+        let [origin_x, origin_y, origin_z] =
+            coordinate.map(|position| position as usize * CHUNK_EDGE_LENGTH);
+        let [size_x, size_y, size_z] = [origin_x, origin_y, origin_z]
+            .map(|origin| (self.walls.len() - origin).min(CHUNK_EDGE_LENGTH));
+        let mut voxels = vec![EMPTY_MATERIAL_ID; CHUNK_EDGE_LENGTH.pow(3)];
+        for x in 0..size_x {
+            for y in 0..size_y {
+                for z in 0..size_z {
+                    // Preserve the original maze output: open cells become solid voxels.
+                    if !self.walls[origin_x + x][origin_y + y][origin_z + z] {
+                        voxels[voxel_index([x, y, z])] = SOLID_MATERIAL_ID;
+                    }
+                }
+            }
+        }
+        GeneratedChunk::from_voxels(voxels)
+            .expect("the maze generator always emits one complete chunk")
+    }
+}
+
+// Smooths seeded occupancy before retaining the largest open region and adding openings.
 fn generate_occupancy(seed: u64, size: usize) -> Vec<Vec<Vec<bool>>> {
     assert!(size >= 3);
 

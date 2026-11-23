@@ -1,34 +1,25 @@
 //! Converts procedurally generated chunks into local-coordinate storage.
 
 use crate::local_coordinate::data::{CHUNK_EDGE_LENGTH, Chunk, LocalCoordinate};
-use crate::{AtomicVoxelRegistry, ChunkCoordinate};
+use crate::{AtomicVoxelRegistry, ChunkCoordinate, GeneratedChunk};
 use bevy::prelude::IVec3;
-use roundo_infrastructure::dsa::algorithm::pcg::infinite_spheres::{
-    CHUNK_EDGE_LENGTH as GENERATED_CHUNK_EDGE_LENGTH, EMPTY_MATERIAL_ID, GeneratedChunk,
-};
 
 /// Materializes registered nonempty voxels from a generated chunk.
 pub(crate) fn replace_generated_chunk(
     local_coordinate: &mut LocalCoordinate,
+    coordinate: ChunkCoordinate,
     chunk: &GeneratedChunk,
     voxels: &AtomicVoxelRegistry,
 ) -> bool {
-    let Some(chunk_position) = local_chunk_position(chunk.coordinate) else {
+    let Some(chunk_position) = local_chunk_position(coordinate) else {
         return false;
     };
 
-    // Generated array order is x-major, followed by y and z.
     let mut stored_chunk = Chunk::default();
-    for (index, id) in chunk.voxels().iter().enumerate() {
-        if *id == EMPTY_MATERIAL_ID {
-            continue;
-        }
-        let x = index % GENERATED_CHUNK_EDGE_LENGTH;
-        let y = index / GENERATED_CHUNK_EDGE_LENGTH % GENERATED_CHUNK_EDGE_LENGTH;
-        let z = index / GENERATED_CHUNK_EDGE_LENGTH.pow(2);
+    for (local, material) in chunk.nonempty_voxels() {
         stored_chunk.set_voxel(
-            IVec3::new(x as i32, y as i32, z as i32),
-            voxels.generated_voxel(*id),
+            IVec3::from_array(local.map(|axis| axis as i32)),
+            voxels.generated_voxel(material),
         );
     }
     local_coordinate.replace_chunk(chunk_position, stored_chunk);
@@ -40,8 +31,7 @@ pub(crate) fn remove_generated_chunk(
     local_coordinate: &mut LocalCoordinate,
     coordinate: ChunkCoordinate,
 ) -> bool {
-    local_chunk_position(coordinate)
-        .is_some_and(|position| local_coordinate.remove_chunk(position))
+    local_chunk_position(coordinate).is_some_and(|position| local_coordinate.remove_chunk(position))
 }
 
 /// Converts wide generator coordinates only when every axis is representable locally.

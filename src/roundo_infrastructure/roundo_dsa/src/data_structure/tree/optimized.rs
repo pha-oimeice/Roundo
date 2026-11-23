@@ -1,4 +1,3 @@
-use serde::{Deserialize, Serialize};
 use std::{collections::VecDeque, ops::Deref};
 
 use super::{
@@ -67,7 +66,7 @@ impl PackedSvo {
 ///
 /// `data` is the value inherited by every missing child region. A node with no
 /// children therefore represents one uniform region at its current depth.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BreadthFirstLosslessSvoNode<T> {
     pub first_child: u32,
     pub child_mask: u8,
@@ -78,7 +77,7 @@ pub struct BreadthFirstLosslessSvoNode<T> {
 ///
 /// Source topology is intentionally not preserved: uniform regions are collapsed and
 /// children equal to their parent's inherited value are omitted.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BreadthFirstLosslessSvo<T> {
     nodes: Box<[BreadthFirstLosslessSvoNode<T>]>,
     root_index: u32,

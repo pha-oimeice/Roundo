@@ -1,13 +1,11 @@
 //! Deterministic, neighbor-independent chunk generation for an infinite world.
 
-use std::{f64::consts::TAU, sync::Arc};
+use super::{
+    CHUNK_EDGE_LENGTH, ChunkCoordinate, ChunkGenerator, EMPTY_MATERIAL_ID, GeneratedChunk,
+    SOLID_MATERIAL_ID, chunk_generator::voxel_index,
+};
+use std::f64::consts::TAU;
 
-/// Fixed voxel count along each generated chunk axis.
-pub const CHUNK_EDGE_LENGTH: usize = 16;
-/// Material emitted outside every generated sphere.
-pub const EMPTY_MATERIAL_ID: u16 = 0;
-/// Material emitted for voxel centers inside at least one sphere.
-pub const SOLID_MATERIAL_ID: u16 = 1;
 /// Multiplier applied to each cell's deterministic sphere-radius sample.
 pub const DEFAULT_SPHERE_RADIUS_SCALE: f64 = 10.0;
 
@@ -15,59 +13,6 @@ const SPHERE_CELL_EDGE_LENGTH: i64 = 64;
 const MAXIMUM_SAMPLED_NORMAL_MAGNITUDE: f64 = 8.7;
 const MAXIMUM_SPHERE_RADIUS: f64 =
     (MAXIMUM_SAMPLED_NORMAL_MAGNITUDE + 1.0) * DEFAULT_SPHERE_RADIUS_SCALE;
-
-/// Dense immutable algorithm output for one fixed-size chunk.
-///
-/// Cloning shares voxel storage through `Arc`; [`Self::into_voxels`] always
-/// materializes an independent vector.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct GeneratedChunk {
-    /// Signed chunk-unit coordinate `[x, y, z]`.
-    pub coordinate: [i64; 3],
-    voxels: Arc<[u16]>,
-}
-
-impl GeneratedChunk {
-    /// Allocates a complete chunk initialized to [`EMPTY_MATERIAL_ID`].
-    pub fn empty(coordinate: [i64; 3]) -> Self {
-        Self {
-            coordinate,
-            voxels: vec![EMPTY_MATERIAL_ID; CHUNK_EDGE_LENGTH.pow(3)].into(),
-        }
-    }
-
-    /// Returns one material at a chunk-local position, or `None` out of bounds.
-    pub fn voxel(&self, local_position: [usize; 3]) -> Option<u16> {
-        voxel_index(local_position).map(|index| self.voxels[index])
-    }
-
-    /// Takes ownership of dense x-major voxel storage when its length is exact.
-    ///
-    /// `None` drops the supplied vector; this API does not return invalid input.
-    pub fn from_voxels(coordinate: [i64; 3], voxels: Vec<u16>) -> Option<Self> {
-        (voxels.len() == CHUNK_EDGE_LENGTH.pow(3)).then(|| Self {
-            coordinate,
-            voxels: voxels.into(),
-        })
-    }
-
-    /// Borrows dense storage ordered with x fastest, followed by y and z.
-    pub fn voxels(&self) -> &[u16] {
-        &self.voxels
-    }
-
-    /// Copies dense storage into an independently owned vector.
-    pub fn into_voxels(self) -> Vec<u16> {
-        self.voxels.as_ref().to_vec()
-    }
-
-    /// Scans the complete chunk for absence of nonempty material IDs.
-    pub fn is_empty(&self) -> bool {
-        self.voxels
-            .iter()
-            .all(|material| *material == EMPTY_MATERIAL_ID)
-    }
-}
 
 /// Pure, order-independent mapping from chunk coordinate to generated voxels.
 ///
@@ -92,39 +37,6 @@ impl InfiniteSphereGenerator {
         }
     }
 
-    /// Generates any chunk without reading or generating adjacent chunks.
-    ///
-    /// Equal generator fields and coordinates produce the same voxel sequence
-    /// regardless of prior calls. Coordinate multiplication saturates at
-    /// `i64` bounds before conversion to generation space.
-    pub fn generate_chunk(&self, x: i64, y: i64, z: i64) -> GeneratedChunk {
-        let coordinate = [x, y, z];
-        let chunk_min =
-            coordinate.map(|value| value.saturating_mul(CHUNK_EDGE_LENGTH as i64) as f64);
-        let chunk_max = chunk_min.map(|value| value + CHUNK_EDGE_LENGTH as f64);
-        let maximum_radius = (MAXIMUM_SAMPLED_NORMAL_MAGNITUDE + 1.0) * self.radius_scale.max(0.0);
-        let minimum_cell: [i64; 3] = std::array::from_fn(|axis| {
-            ((chunk_min[axis] - maximum_radius) / SPHERE_CELL_EDGE_LENGTH as f64).floor() as i64
-        });
-        let maximum_cell: [i64; 3] = std::array::from_fn(|axis| {
-            ((chunk_max[axis] + maximum_radius) / SPHERE_CELL_EDGE_LENGTH as f64).floor() as i64
-        });
-        let mut chunk = GeneratedChunk::empty(coordinate);
-
-        for cell_x in minimum_cell[0]..=maximum_cell[0] {
-            for cell_y in minimum_cell[1]..=maximum_cell[1] {
-                for cell_z in minimum_cell[2]..=maximum_cell[2] {
-                    let sphere = self.sphere_in_cell([cell_x, cell_y, cell_z]);
-                    if sphere_intersects_box(sphere, chunk_min, chunk_max) {
-                        rasterize_sphere(Arc::make_mut(&mut chunk.voxels), chunk_min, sphere);
-                    }
-                }
-            }
-        }
-
-        chunk
-    }
-
     fn sphere_in_cell(&self, cell: [i64; 3]) -> Sphere {
         let mut random = DeterministicRandom::new(hash_cell(self.seed, cell));
         let cell_origin = cell.map(|value| value.saturating_mul(SPHERE_CELL_EDGE_LENGTH) as f64);
@@ -137,15 +49,45 @@ impl InfiniteSphereGenerator {
     }
 }
 
+impl ChunkGenerator for InfiniteSphereGenerator {
+    /// Generates any chunk without reading or generating adjacent chunks.
+    ///
+    /// Equal generator fields and coordinates produce the same voxel sequence
+    /// regardless of prior calls. Coordinate multiplication saturates at
+    /// `i64` bounds before conversion to generation space.
+    fn generate_chunk(&self, coordinate: ChunkCoordinate) -> GeneratedChunk {
+        let chunk_min =
+            coordinate.map(|value| value.saturating_mul(CHUNK_EDGE_LENGTH as i64) as f64);
+        let chunk_max = chunk_min.map(|value| value + CHUNK_EDGE_LENGTH as f64);
+        let maximum_radius = (MAXIMUM_SAMPLED_NORMAL_MAGNITUDE + 1.0) * self.radius_scale.max(0.0);
+        let minimum_cell: [i64; 3] = std::array::from_fn(|axis| {
+            ((chunk_min[axis] - maximum_radius) / SPHERE_CELL_EDGE_LENGTH as f64).floor() as i64
+        });
+        let maximum_cell: [i64; 3] = std::array::from_fn(|axis| {
+            ((chunk_max[axis] + maximum_radius) / SPHERE_CELL_EDGE_LENGTH as f64).floor() as i64
+        });
+        let mut voxels = vec![EMPTY_MATERIAL_ID; CHUNK_EDGE_LENGTH.pow(3)];
+
+        for cell_x in minimum_cell[0]..=maximum_cell[0] {
+            for cell_y in minimum_cell[1]..=maximum_cell[1] {
+                for cell_z in minimum_cell[2]..=maximum_cell[2] {
+                    let sphere = self.sphere_in_cell([cell_x, cell_y, cell_z]);
+                    if sphere_intersects_box(sphere, chunk_min, chunk_max) {
+                        rasterize_sphere(&mut voxels, chunk_min, sphere);
+                    }
+                }
+            }
+        }
+
+        GeneratedChunk::from_voxels(voxels)
+            .expect("the sphere generator always emits one complete chunk")
+    }
+}
+
 impl Default for InfiniteSphereGenerator {
     fn default() -> Self {
         Self::new(0)
     }
-}
-
-/// Generates one chunk with the default seed and radius scale.
-pub fn generate_chunk(x: i64, y: i64, z: i64) -> GeneratedChunk {
-    InfiniteSphereGenerator::default().generate_chunk(x, y, z)
 }
 
 #[derive(Clone, Copy)]
@@ -177,8 +119,7 @@ fn rasterize_sphere(voxels: &mut [u16], chunk_min: [f64; 3], sphere: Sphere) {
                     .map(|axis| (voxel_center[axis] - sphere.center[axis]).powi(2))
                     .sum::<f64>();
                 if distance_squared <= radius_squared {
-                    voxels[voxel_index([x, y, z]).expect("bounded local position")] =
-                        SOLID_MATERIAL_ID;
+                    voxels[voxel_index([x, y, z])] = SOLID_MATERIAL_ID;
                 }
             }
         }
@@ -198,13 +139,6 @@ fn sphere_intersects_box(sphere: Sphere, minimum: [f64; 3], maximum: [f64; 3]) -
         })
         .sum::<f64>();
     distance_squared <= sphere.radius * sphere.radius
-}
-
-fn voxel_index([x, y, z]: [usize; 3]) -> Option<usize> {
-    if x >= CHUNK_EDGE_LENGTH || y >= CHUNK_EDGE_LENGTH || z >= CHUNK_EDGE_LENGTH {
-        return None;
-    }
-    Some(x + y * CHUNK_EDGE_LENGTH + z * CHUNK_EDGE_LENGTH * CHUNK_EDGE_LENGTH)
 }
 
 fn box_muller(random: &mut DeterministicRandom) -> f64 {

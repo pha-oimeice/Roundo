@@ -8,22 +8,24 @@ use crate::local_coordinate::{
     data::LocalCoordinate,
     pcg::{remove_generated_chunk, replace_generated_chunk},
     physics::{
-        LocalCoordinatePhysicsInterests, LocalCoordinatePhysicsPlugin,
-        LocalCoordinatePhysicsSet,
+        LocalCoordinatePhysicsInterests, LocalCoordinatePhysicsPlugin, LocalCoordinatePhysicsSet,
     },
 };
 use crate::{
-    ChunkCoordinate, ChunkId, GeneratedChunk, LocalCoordinateId, LocalCoordinateIdentity,
-    SuperflatGenerator,
+    ChunkCoordinate, ChunkGenerator, ChunkId, GeneratedChunk, LocalCoordinateId,
+    LocalCoordinateIdentity, SuperflatGenerator,
 };
 use avian3d::prelude::RigidBody;
 use bevy::prelude::{
-    App, Commands, Component, IntoScheduleConfigs, Plugin, Query, Res, ResMut, Resource,
-    Startup, SystemSet, Update,
+    App, Commands, Component, IntoScheduleConfigs, Plugin, Query, Res, ResMut, Resource, Startup,
+    SystemSet, Update,
 };
 use generation::{ChunkGenerationJob, ChunkGenerationWorker};
 use roundo_contracts::SceneId;
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::{
+    collections::{HashMap, HashSet, VecDeque},
+    sync::Arc,
+};
 use systems::GenerationPlan;
 
 pub const DEFAULT_PCG_LOCAL_COORDINATE_ID: LocalCoordinateId = LocalCoordinateId(1);
@@ -47,16 +49,11 @@ pub struct LocalCoordinateServerPlugin {
 impl LocalCoordinateServerPlugin {
     /// Creates a plugin with one scene-S1 superflat coordinate at height zero.
     pub fn new() -> Self {
-        Self {
-            generated_coordinates: vec![PcgLocalCoordinate::new(
-                DEFAULT_PCG_LOCAL_COORDINATE_ID,
-                SuperflatGenerator::new(0),
-            )],
-        }
+        Self::with_generator(SuperflatGenerator::default())
     }
 
     /// Creates a plugin whose only generated coordinate uses `generator`.
-    pub fn with_generator(generator: SuperflatGenerator) -> Self {
+    pub fn with_generator(generator: impl ChunkGenerator + Send + Sync + 'static) -> Self {
         Self {
             generated_coordinates: vec![PcgLocalCoordinate::new(
                 DEFAULT_PCG_LOCAL_COORDINATE_ID,
@@ -72,14 +69,14 @@ impl LocalCoordinateServerPlugin {
     pub fn with_generated_coordinate(
         mut self,
         local_coordinate_id: LocalCoordinateId,
-        generator: SuperflatGenerator,
+        generator: impl ChunkGenerator + Send + Sync + 'static,
     ) -> Self {
         if let Some(existing) = self
             .generated_coordinates
             .iter_mut()
             .find(|coordinate| coordinate.id == local_coordinate_id)
         {
-            existing.generator = generator;
+            existing.generator = Arc::new(generator);
         } else {
             self.generated_coordinates
                 .push(PcgLocalCoordinate::new(local_coordinate_id, generator));
@@ -94,20 +91,25 @@ impl Default for LocalCoordinateServerPlugin {
     }
 }
 
+type WorldChunkGenerator = Arc<dyn ChunkGenerator + Send + Sync>;
+
 /// Marks an authoritative coordinate backed by deterministic procedural generation.
-#[derive(Component, Clone, Copy, Debug)]
+#[derive(Component, Clone)]
 pub struct PcgLocalCoordinate {
     pub id: LocalCoordinateId,
-    pub generator: SuperflatGenerator,
+    generator: WorldChunkGenerator,
     pub scene_id: SceneId,
 }
 
 impl PcgLocalCoordinate {
     /// Creates a generated coordinate in [`SceneId::S1`].
-    pub const fn new(id: LocalCoordinateId, generator: SuperflatGenerator) -> Self {
+    pub fn new(
+        id: LocalCoordinateId,
+        generator: impl ChunkGenerator + Send + Sync + 'static,
+    ) -> Self {
         Self {
             id,
-            generator,
+            generator: Arc::new(generator),
             scene_id: SceneId::S1,
         }
     }

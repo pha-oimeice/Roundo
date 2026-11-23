@@ -1,21 +1,21 @@
 //! Dedicated worker for deterministic procedural chunk generation.
 
-use crate::{ChunkCoordinate, GeneratedChunk, LocalCoordinateId, SuperflatGenerator};
+use super::WorldChunkGenerator;
+use crate::{ChunkId, GeneratedChunk};
 use roundo_infrastructure::toolbox::{
     CrossbeamThreadPipe, CrossbeamThreadPipeEndpointA, CrossbeamThreadPipeEndpointB,
 };
 
 /// Immutable generation request transferred off the ECS thread.
 pub(super) struct ChunkGenerationJob {
-    pub local_coordinate_id: LocalCoordinateId,
-    pub coordinate: ChunkCoordinate,
-    pub generator: SuperflatGenerator,
+    pub id: ChunkId,
+    pub generator: WorldChunkGenerator,
     pub installation: Option<crate::CoordinateIncarnation>,
 }
 
 /// Generated chunk paired with its owning local coordinate.
 pub(super) struct ChunkGenerationResult {
-    pub local_coordinate_id: LocalCoordinateId,
+    pub id: ChunkId,
     pub chunk: GeneratedChunk,
     pub installation: Option<crate::CoordinateIncarnation>,
 }
@@ -51,14 +51,10 @@ impl ChunkGenerationWorker {
 // Channel closure terminates the worker when its World is dropped.
 fn run_worker(pipe: CrossbeamThreadPipeEndpointB<ChunkGenerationJob, ChunkGenerationResult>) {
     while let Some(job) = pipe.receive() {
-        let chunk = job.generator.generate_chunk(
-            job.coordinate[0],
-            job.coordinate[1],
-            job.coordinate[2],
-        );
+        let chunk = job.generator.generate_chunk(job.id.coordinate);
         if pipe
             .try_send(ChunkGenerationResult {
-                local_coordinate_id: job.local_coordinate_id,
+                id: job.id,
                 chunk,
                 installation: job.installation,
             })
