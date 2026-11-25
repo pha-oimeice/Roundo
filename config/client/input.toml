@@ -25,7 +25,7 @@ functions = ["roundo.move-backward"]
 
 # Client-owned shortcut resources.
 [input_slots.look]
-display_name = "视角"
+display_name = "Look"
 functions = ["roundo.look"]
 
 [[input_bindings]]

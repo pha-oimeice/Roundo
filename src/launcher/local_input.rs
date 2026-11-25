@@ -29,19 +29,19 @@ impl Function {
             MOVE_UP_FUNCTION => Ok(Self::Jump),
             LOOK_FUNCTION => Ok(Self::Look),
             MOVE_DOWN_FUNCTION => Ok(Self::DetachedDown),
-            _ => Err(format!("未知的本地输入功能 `{name}`")),
+            _ => Err(format!("Unknown local input function `{name}`")),
         }
     }
 
     fn label(self) -> &'static str {
         match self {
-            Self::Left => "左移",
-            Self::Right => "右移",
-            Self::Forward => "前进",
-            Self::Backward => "后退",
-            Self::Jump => "跳跃",
-            Self::Look => "视角",
-            Self::DetachedDown => "下降（脱离相机专用，角色不使用）",
+            Self::Left => "Move Left",
+            Self::Right => "Move Right",
+            Self::Forward => "Move Forward",
+            Self::Backward => "Move Backward",
+            Self::Jump => "Jump",
+            Self::Look => "Look",
+            Self::DetachedDown => "Descend (detached camera only)",
         }
     }
 }
@@ -80,12 +80,12 @@ impl LocalBindings {
         for edge in &settings.input_bindings {
             let slot = slots
                 .get_mut(&edge.slot)
-                .ok_or_else(|| format!("输入绑定引用了不存在的槽位 `{}`", edge.slot))?;
+                .ok_or_else(|| format!("Input binding references unknown slot `{}`", edge.slot))?;
             let binding = physical_binding(edge.key);
             for &function in &slot.functions {
                 if (function == Function::Look) != (edge.key == ClientInputKey::MouseMotion) {
                     return Err(format!(
-                        "槽位 `{}` 的输入 `{binding}` 不适用于功能 `{}`",
+                        "Input `{binding}` in slot `{}` is not valid for function `{}`",
                         edge.slot,
                         function.label(),
                     ));
@@ -128,12 +128,12 @@ impl LocalBindings {
                 .collect::<Vec<_>>()
                 .join(" / ");
             let functions = if functions.is_empty() {
-                "未分配功能"
+                "No function assigned"
             } else {
                 &functions
             };
-            let keys = if keys.is_empty() { "未绑定" } else { &keys };
-            format!("{} · {functions}：{keys}", slot.name)
+            let keys = if keys.is_empty() { "Unbound" } else { &keys };
+            format!("{} · {functions}: {keys}", slot.name)
         })
     }
 

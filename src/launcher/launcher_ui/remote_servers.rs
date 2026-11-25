@@ -1,6 +1,7 @@
 use super::{
     LauncherFont, SIDEBAR,
     directory::{DirectoryDisclosure, directory_scene, toggle_directory_details},
+    form::{TextField, set_button_enabled},
     launcher_label_with_font,
 };
 use bevy::{
@@ -16,6 +17,15 @@ use bevy::{
     text::{EditableText, TextEdit, TextEditChange},
     ui::InteractionDisabled,
     ui_widgets::Activate,
+};
+
+const NEW_SERVER_NAME: TextField = TextField {
+    label: "Name",
+    required: true,
+};
+const NEW_SERVER_ADDRESS: TextField = TextField {
+    label: "Address",
+    required: true,
 };
 
 pub(super) struct RemoteDirectoryPlugin;
@@ -69,7 +79,7 @@ pub(super) fn remote_server_list_scene(font: Handle<Font>) -> impl Scene {
         bsn! {
             AddServer
             @FeathersButton { @caption: bsn! { @caption("+") } }
-            AccessibleLabel("新增远程服务器")
+            AccessibleLabel("Add a remote server")
             on(toggle_add_form)
         },
         bsn! { FormSlot },
@@ -99,7 +109,7 @@ fn toggle_add_form(
     }
 }
 
-fn server_field(font: Handle<Font>, label: &'static str) -> impl Scene {
+fn server_field(font: Handle<Font>, label: impl Into<String>) -> impl Scene {
     bsn! {
         Node { align_items: AlignItems::Center, column_gap: px(8) }
         Children [ @launcher_label_with_font(font, label, 16.0) ]
@@ -115,33 +125,34 @@ fn server_input_container(font: Handle<Font>) -> impl Scene {
 }
 
 fn add_form_scene(font: Handle<Font>) -> impl Scene {
+    let initially_disabled = NEW_SERVER_NAME.required || NEW_SERVER_ADDRESS.required;
     bsn! {
         AddForm
         Node { flex_direction: FlexDirection::Column, row_gap: px(8), padding: {UiRect::all(px(12))} }
         BackgroundColor(SIDEBAR)
         Children [
-            @launcher_label_with_font(font.clone(), "新增远程服务器", 18.0)
+            @launcher_label_with_font(font.clone(), "Add a remote server", 18.0)
             --
-            @server_field(font.clone(), "Name:")
+            @server_field(font.clone(), NEW_SERVER_NAME.display_label())
             Children [
                 @server_input_container(font.clone())
                 Children [
                     @FeathersTextInput
                     Node { min_width: px(0) }
-                    AccessibleLabel("服务器名称")
+                    AccessibleLabel("Server name")
                     NewName
                     AutoFocus
                     on(sync_submit)
                 ]
             ]
             --
-            @server_field(font.clone(), "Address:")
+            @server_field(font.clone(), NEW_SERVER_ADDRESS.display_label())
             Children [
                 @server_input_container(font.clone())
                 Children [
                     @FeathersTextInput
                     Node { min_width: px(0) }
-                    AccessibleLabel("服务器地址")
+                    AccessibleLabel("Server address")
                     NewAddress
                     on(sync_submit)
                 ]
@@ -149,14 +160,14 @@ fn add_form_scene(font: Handle<Font>) -> impl Scene {
             --
             Node { justify_content: JustifyContent::FlexEnd, column_gap: px(8) }
             Children [
-                @FeathersButton { @caption: bsn! { @caption("取消") } }
+                @FeathersButton { @caption: bsn! { @caption("Cancel") } }
                 InheritableFont { font: {font.clone()}, font_size: FontSize::Px(16.0) }
                 on(cancel_add)
                 --
-                @FeathersButton { @caption: bsn! { @caption("添加") }, @variant: ButtonVariant::Primary }
+                @FeathersButton { @caption: bsn! { @caption("Add") }, @variant: ButtonVariant::Primary }
                 InheritableFont { font: {font.clone()}, font_size: FontSize::Px(16.0) }
                 Submit
-                InteractionDisabled
+                @{initially_disabled.then(|| bsn! { InteractionDisabled })}
                 on(add_row)
             ]
         ]
@@ -164,10 +175,10 @@ fn add_form_scene(font: Handle<Font>) -> impl Scene {
 }
 
 fn form_values(name: &EditableText, address: &EditableText) -> Option<(String, String)> {
-    let name = name.value().to_string();
-    let address = address.value().to_string();
-    let (name, address) = (name.trim(), address.trim());
-    (!name.is_empty() && !address.is_empty()).then(|| (name.to_owned(), address.to_owned()))
+    Some((
+        NEW_SERVER_NAME.read(name)?,
+        NEW_SERVER_ADDRESS.read(address)?,
+    ))
 }
 
 fn sync_submit(
@@ -178,15 +189,12 @@ fn sync_submit(
     mut commands: Commands,
 ) {
     let (button, disabled) = *button;
-    match (form_values(&name, &address).is_some(), disabled) {
-        (true, true) => {
-            commands.entity(button).remove::<InteractionDisabled>();
-        }
-        (false, false) => {
-            commands.entity(button).insert(InteractionDisabled);
-        }
-        _ => {}
-    }
+    set_button_enabled(
+        &mut commands,
+        button,
+        disabled,
+        form_values(&name, &address).is_some(),
+    );
 }
 
 fn cancel_add(
@@ -258,7 +266,7 @@ fn row_scene(font: Handle<Font>, name: String, address: String) -> impl Scene {
                         #ServerName
                         @FeathersTextInput
                         Node { min_width: px(0) }
-                        AccessibleLabel("服务器名称")
+                        AccessibleLabel("Server name")
                         EditableText { pending_edits: {vec![name_edit]} }
                     ]
                 ]
@@ -270,12 +278,12 @@ fn row_scene(font: Handle<Font>, name: String, address: String) -> impl Scene {
                         #ServerAddress
                         @FeathersTextInput
                         Node { min_width: px(0) }
-                        AccessibleLabel("服务器地址")
+                        AccessibleLabel("Server address")
                         EditableText { pending_edits: {vec![address_edit]} }
                     ]
                 ]
                 --
-                @FeathersButton { @caption: bsn! { @caption("删除") } }
+                @FeathersButton { @caption: bsn! { @caption("Remove") } }
                 InheritableFont { font: {font.clone()}, font_size: FontSize::Px(16.0) }
                 Node { align_self: AlignSelf::FlexEnd }
                 RemoveServer(#RemoteRow)

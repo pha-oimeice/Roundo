@@ -30,7 +30,7 @@ use svo_upload::SvoUploads;
 
 use crate::{
     CHUNK_EDGE_LENGTH, ChunkId, LocalCoordinate, LocalCoordinateId, LocalCoordinateIdentity,
-    VoxelChunkSvo,
+    VoxelChunkSvo, local_coordinate::RenderChunkCache,
 };
 use bevy::{
     core_pipeline::{
@@ -125,16 +125,21 @@ impl bevy::prelude::Plugin for WorldRenderPlugin {
         app.init_resource::<WorldRenderSettings>()
             .add_plugins(ExtractResourcePlugin::<WorldRenderSettings>::default());
 
-        let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
+        if app.get_sub_app(RenderApp).is_none() {
             return;
-        };
-        render_app
+        }
+        app.init_resource::<RenderChunkCache>();
+        app.sub_app_mut(RenderApp)
             .init_resource::<ExtractedChunks>()
             .init_resource::<WorldResidency>()
             .init_resource::<WorldViewPipelines>()
             .init_resource::<WorldShaderInitialization>()
             .add_systems(RenderStartup, init_world_pipelines)
-            .add_systems(ExtractSchedule, extract_loaded_chunks)
+            // Don't advance the extraction baseline until residency can consume it.
+            .add_systems(
+                ExtractSchedule,
+                extract_loaded_chunks.run_if(world_shaders_ready),
+            )
             .add_systems(
                 Render,
                 (

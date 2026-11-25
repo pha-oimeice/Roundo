@@ -67,7 +67,7 @@ impl Plugin for LocalGamePlugin {
     fn build(&self, app: &mut App) {
         let bindings =
             LocalBindings::resolve(app.world().resource::<ClientConfigStore>().settings())
-                .unwrap_or_else(|error| panic!("无效的 client/input.toml：{error}"));
+                .unwrap_or_else(|error| panic!("Invalid client/input.toml: {error}"));
         let physics =
             PhysicsDemandBudget::new(1, REGION_CAPACITY, REGION_CAPACITY, REGION_CAPACITY)
                 .expect("one local terrain region");

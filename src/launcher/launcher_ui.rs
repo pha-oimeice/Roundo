@@ -29,6 +29,7 @@ use roundo_infrastructure::user_config::ClientSettingsConfig;
 use super::{bundled_assets_root, config_store::ClientConfigStore, local_input::LocalBindings};
 
 mod directory;
+mod form;
 mod local_saves;
 mod remote_servers;
 
@@ -60,7 +61,7 @@ impl Panel {
     fn menu_title(self) -> &'static str {
         match self {
             Self::Start => "Start",
-            Self::Option => "Option",
+            Self::Option => "Options",
         }
     }
 
@@ -311,11 +312,11 @@ fn launcher_options_tabs_scene(
                 --
                 @launcher_tab_header_scene(font.clone(), "Display", false, #DisplaySettings)
                 --
-                @launcher_tab_header_scene(font.clone(), "Graphic", false, #GraphicSettings)
+                @launcher_tab_header_scene(font.clone(), "Graphics", false, #GraphicSettings)
                 --
                 @launcher_tab_header_scene(font.clone(), "Audio", false, #AudioSettings)
                 --
-                @launcher_tab_header_scene(font.clone(), "Control", false, #ControlSettings)
+                @launcher_tab_header_scene(font.clone(), "Controls", false, #ControlSettings)
                 --
                 @launcher_tab_header_scene(font.clone(), "Misc", false, #MiscSettings)
             ]
@@ -323,20 +324,20 @@ fn launcher_options_tabs_scene(
             @content_header_divider_scene()
             --
             #GeneralSettings
-            @launcher_label_with_font(font.clone(), "暂无通用设置。", 18.0)
+            @launcher_label_with_font(font.clone(), "No general settings available.", 18.0)
             --
             #DisplaySettings
-            @launcher_label_with_font(font.clone(), "暂无显示设置。", 18.0)
+            @launcher_label_with_font(font.clone(), "No display settings available.", 18.0)
             Node { display: Display::None }
             Visibility::Hidden
             --
             #GraphicSettings
-            @launcher_label_with_font(font.clone(), {format!("几何 LOD 像素误差（只读）：{lod}")}, 18.0)
+            @launcher_label_with_font(font.clone(), {format!("Geometry LOD pixel error (read-only): {lod}")}, 18.0)
             Node { display: Display::None }
             Visibility::Hidden
             --
             #AudioSettings
-            @launcher_label_with_font(font.clone(), "暂无音频设置。", 18.0)
+            @launcher_label_with_font(font.clone(), "No audio settings available.", 18.0)
             Node { display: Display::None }
             Visibility::Hidden
             --
@@ -346,7 +347,7 @@ fn launcher_options_tabs_scene(
             Visibility::Hidden
             --
             #MiscSettings
-            @launcher_label_with_font(font, "暂无其他设置。", 18.0)
+            @launcher_label_with_font(font, "No other settings available.", 18.0)
             Node { display: Display::None }
             Visibility::Hidden
         ]
@@ -360,11 +361,11 @@ fn control_settings_scene(bindings: &LocalBindings, font: &Handle<Font>) -> impl
         .map(|row| launcher_label_with_font(font.clone(), row, 18.0))
         .collect::<Vec<_>>();
     let contents = bsn_list! {
-        @launcher_label_with_font(font.clone(), "本地角色按键绑定（只读）", 22.0)
+        @launcher_label_with_font(font.clone(), "Local character controls (read-only)", 22.0)
         --
         {rows}
         --
-        @launcher_label_with_font(font, "Esc：释放鼠标、打开返回菜单（系统保留）", 18.0)
+        @launcher_label_with_font(font, "Esc: Release the mouse and open the pause menu (reserved)", 18.0)
     };
     launcher_scroll_area_scene(contents)
 }
@@ -470,16 +471,16 @@ fn quit_confirmation_dialog_scene(parent: Entity, font: Handle<Font>) -> impl Sc
     let confirm_font = font.clone();
     let contents = bsn_list! {
         Node { flex_direction: FlexDirection::Column, padding: {UiRect::all(px(12))} }
-        Children [ @launcher_label_with_font(font.clone(), "确定要退出 Roundo 吗？", 22.0) ]
+        Children [ @launcher_label_with_font(font.clone(), "Are you sure you want to quit Roundo?", 22.0) ]
         --
         @FeathersDialogFooter
         Children [
-            @FeathersButton { @caption: bsn! { @caption("取消") } }
+            @FeathersButton { @caption: bsn! { @caption("Cancel") } }
             InheritableFont { font: {font.clone()}, font_size: FontSize::Px(16.0) }
             AutoFocus
             on(request_quit_dialog_close_on_cancel)
             --
-            @FeathersButton { @caption: bsn! { @caption("确认退出") }, @variant: ButtonVariant::Primary }
+            @FeathersButton { @caption: bsn! { @caption("Quit") }, @variant: ButtonVariant::Primary }
             InheritableFont { font: confirm_font, font_size: FontSize::Px(16.0) }
             on(exit_application_on_quit_confirmation)
         ]

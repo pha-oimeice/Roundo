@@ -24,7 +24,7 @@ display_name = "Move Backward"
 
 [[resource]]
 name = "look"
-display_name = "视角"
+display_name = "Look"
 
 [functions]
 "roundo.move-up" = "move-up"

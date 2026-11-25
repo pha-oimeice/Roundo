@@ -2,6 +2,7 @@ use super::super::local_game::{LocalControl, LocalScreen};
 use super::{
     LauncherFont, LauncherRoot, SIDEBAR,
     directory::{DirectoryDisclosure, directory_scene, toggle_directory_details},
+    form::{TextField, set_button_enabled},
     launcher_label_with_font,
 };
 use bevy::{
@@ -20,6 +21,11 @@ use bevy::{
 };
 use chrono::{DateTime, Utc};
 use std::time::{Duration, Instant, SystemTime};
+
+const SAVE_NAME: TextField = TextField {
+    label: "Name",
+    required: true,
+};
 
 pub(super) struct LocalSavesPlugin;
 
@@ -112,7 +118,7 @@ pub(super) fn local_save_list_scene(font: Handle<Font>) -> impl Scene {
         bsn! {
             AddSaveButton
             @FeathersButton { @caption: bsn! { @caption("+") } }
-            AccessibleLabel("新增存档")
+            AccessibleLabel("Create a save")
             on(toggle_save_form)
         },
         bsn! { SaveFormSlot },
@@ -203,18 +209,18 @@ fn save_form_scene(font: Handle<Font>) -> impl Scene {
         Node { flex_direction: FlexDirection::Column, row_gap: px(12), padding: {UiRect::all(px(12))} }
         BackgroundColor(SIDEBAR)
         Children [
-            @launcher_label_with_font(font.clone(), "新增存档", 18.0)
+            @launcher_label_with_font(font.clone(), "Create a save", 18.0)
             --
             Node { align_items: AlignItems::Center, column_gap: px(12) }
             Children [
-                @launcher_label_with_font(font.clone(), "名称（必填）", 16.0)
+                @launcher_label_with_font(font.clone(), SAVE_NAME.display_label(), 16.0)
                 --
                 @FeathersTextInputContainer
                 InheritableFont { font: {font.clone()}, font_size: FontSize::Px(16.0) }
                 Node { min_width: px(0) }
                 Children [
                     @FeathersTextInput
-                    AccessibleLabel("存档名称")
+                    AccessibleLabel("Save name")
                     SaveNameInput
                     Node { min_width: px(0) }
                     AutoFocus
@@ -224,14 +230,14 @@ fn save_form_scene(font: Handle<Font>) -> impl Scene {
             --
             Node { justify_content: JustifyContent::FlexEnd, column_gap: px(8) }
             Children [
-                @FeathersButton { @caption: bsn! { @caption("取消") } }
+                @FeathersButton { @caption: bsn! { @caption("Cancel") } }
                 InheritableFont { font: {font.clone()}, font_size: FontSize::Px(16.0) }
                 on(cancel_save_form)
                 --
-                @FeathersButton { @caption: bsn! { @caption("创建") }, @variant: ButtonVariant::Primary }
+                @FeathersButton { @caption: bsn! { @caption("Create") }, @variant: ButtonVariant::Primary }
                 InheritableFont { font: {font.clone()}, font_size: FontSize::Px(16.0) }
                 CreateSaveButton
-                InteractionDisabled
+                @{SAVE_NAME.required.then(|| bsn! { InteractionDisabled })}
                 on(create_save)
             ]
         ]
@@ -246,21 +252,12 @@ fn update_create_button(
 ) {
     let text = input.get(event.event_target()).expect("save name input");
     let (button, disabled) = *button;
-    set_button_enabled(&mut commands, button, disabled, save_name(text).is_some());
-}
-
-fn set_button_enabled(commands: &mut Commands, button: Entity, disabled: bool, enabled: bool) {
-    if enabled && disabled {
-        commands.entity(button).remove::<InteractionDisabled>();
-    } else if !enabled && !disabled {
-        commands.entity(button).insert(InteractionDisabled);
-    }
-}
-
-fn save_name(input: &EditableText) -> Option<String> {
-    let value = input.value().to_string();
-    let trimmed = value.trim();
-    (!trimmed.is_empty()).then(|| trimmed.to_owned())
+    set_button_enabled(
+        &mut commands,
+        button,
+        disabled,
+        SAVE_NAME.read(text).is_some(),
+    );
 }
 
 fn cancel_save_form(
@@ -293,7 +290,7 @@ fn create_save(
     mut focus: ResMut<InputFocus>,
     mut commands: Commands,
 ) {
-    let Some(name) = save_name(&input) else {
+    let Some(name) = SAVE_NAME.read(&input) else {
         return;
     };
     let save = LocalSave {
@@ -310,7 +307,7 @@ fn create_save(
 fn runtime_label(runtime: Duration) -> String {
     let seconds = runtime.as_secs();
     format!(
-        "运行时间：{:02}:{:02}:{:02}",
+        "Play time: {:02}:{:02}:{:02}",
         seconds / 3600,
         seconds / 60 % 60,
         seconds % 60
@@ -321,7 +318,7 @@ fn save_row_scene(font: Handle<Font>, save: &LocalSave) -> impl Scene + use<> {
     let name = save.name.clone();
     let initial_name = TextEdit::Insert(save.name.clone().into());
     let created_at = DateTime::<Utc>::from(save.created_at);
-    let created = format!("创建时间：{}", created_at.format("%Y-%m-%d %H:%M:%S UTC"));
+    let created = format!("Created: {}", created_at.format("%Y-%m-%d %H:%M:%S UTC"));
     let runtime = runtime_label(save.runtime);
     bsn! {
         #SaveRow
@@ -357,7 +354,7 @@ fn save_row_scene(font: Handle<Font>, save: &LocalSave) -> impl Scene + use<> {
             Children [
                 Node { align_items: AlignItems::Center, column_gap: px(8) }
                 Children [
-                    @launcher_label_with_font(font.clone(), "Name:", 16.0)
+                    @launcher_label_with_font(font.clone(), SAVE_NAME.display_label(), 16.0)
                     --
                     @FeathersTextInputContainer
                     InheritableFont { font: {font.clone()}, font_size: FontSize::Px(16.0) }
@@ -365,7 +362,7 @@ fn save_row_scene(font: Handle<Font>, save: &LocalSave) -> impl Scene + use<> {
                     Children [
                         #RenameField
                         @FeathersTextInput
-                        AccessibleLabel("存档名称")
+                        AccessibleLabel("Save name")
                         Node { min_width: px(0) }
                         EditableText { pending_edits: {vec![initial_name]} }
                         RenameInput { row: #SaveRow, button: #RenameSubmit }
@@ -373,7 +370,7 @@ fn save_row_scene(font: Handle<Font>, save: &LocalSave) -> impl Scene + use<> {
                     ]
                     --
                     #RenameSubmit
-                    @FeathersButton { @caption: bsn! { @caption("保存") } }
+                    @FeathersButton { @caption: bsn! { @caption("Save") } }
                     InheritableFont { font: {font.clone()}, font_size: FontSize::Px(16.0) }
                     InteractionDisabled
                     SaveRowAction(#SaveRow)
@@ -386,9 +383,9 @@ fn save_row_scene(font: Handle<Font>, save: &LocalSave) -> impl Scene + use<> {
                 #SaveRuntime
                 @launcher_label_with_font(font.clone(), runtime, 16.0)
                 --
-                @launcher_label_with_font(font.clone(), "Size：—（无存档文件）", 16.0)
+                @launcher_label_with_font(font.clone(), "Size: Not available (no save file)", 16.0)
                 --
-                @FeathersButton { @caption: bsn! { @caption("删除") } }
+                @FeathersButton { @caption: bsn! { @caption("Delete") } }
                 InheritableFont { font: {font.clone()}, font_size: FontSize::Px(16.0) }
                 Node { align_self: AlignSelf::FlexEnd }
                 SaveRowAction(#SaveRow)
@@ -408,7 +405,7 @@ fn update_rename_button(
     let (text, editor) = inputs.get(event.event_target()).expect("save rename input");
     let save = saves.get(editor.row).expect("save row for rename input");
     let disabled = buttons.get(editor.button).expect("save rename button");
-    let change = save_name(text).is_some_and(|name| name != save.name);
+    let change = SAVE_NAME.read(text).is_some_and(|name| name != save.name);
     set_button_enabled(&mut commands, editor.button, disabled, change);
 }
 
@@ -422,7 +419,7 @@ fn rename_save(
     let (button, action, disabled) = buttons.get(event.entity).expect("save rename button");
     let mut input = inputs.get_mut(button.0).expect("save rename input");
     let mut save = saves.get_mut(action.0).expect("save row for rename button");
-    let Some(name) = save_name(&input) else {
+    let Some(name) = SAVE_NAME.read(&input) else {
         return;
     };
     if name == save.name {
@@ -488,7 +485,7 @@ fn show_game_view(
     *launcher.1 = Visibility::Hidden;
     focus.clear();
 
-    let title = format!("当前存档：{}", save.name);
+    let title = format!("Current save: {}", save.name);
     let font = font.0.clone();
     commands.spawn_scene(bsn! {
         LocalGameView
@@ -498,17 +495,17 @@ fn show_game_view(
         Children [
             @launcher_label_with_font(font.clone(), title, 18.0)
             --
-            @launcher_label_with_font(font.clone(), "正在生成地形…", 16.0)
+            @launcher_label_with_font(font.clone(), "Generating terrain…", 16.0)
             LocalGameStatus
             --
-            @FeathersButton { @caption: bsn! { @caption("继续游戏") }, @variant: ButtonVariant::Primary }
+            @FeathersButton { @caption: bsn! { @caption("Resume Game") }, @variant: ButtonVariant::Primary }
             InheritableFont { font: {font.clone()}, font_size: FontSize::Px(16.0) }
             ResumeGameButton
             Node { display: Display::None }
             Visibility::Hidden
             on(resume_game)
             --
-            @FeathersButton { @caption: bsn! { @caption("返回启动器") } }
+            @FeathersButton { @caption: bsn! { @caption("Back to Launcher") } }
             InheritableFont { font: {font.clone()}, font_size: FontSize::Px(16.0) }
             AutoFocus
             on(|_: On<Activate>, mut next: ResMut<NextState<LocalScreen>>| {
@@ -552,7 +549,7 @@ fn sync_game_view(
             *menu.1 = Visibility::Inherited;
             resume.1.display = Display::Flex;
             *resume.2 = Visibility::Inherited;
-            status.0 = "角色输入已暂停".into();
+            status.0 = "Character controls are paused".into();
             focus.set(resume.0, FocusCause::Auto);
         }
         LocalControl::Loading => {}

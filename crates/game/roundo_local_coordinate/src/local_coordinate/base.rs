@@ -5,8 +5,8 @@ use crate::local_coordinate::transform::configure_transform_derivation;
 use crate::local_coordinate::virtual_chunk::{VirtualChunkIndex, rebuild_virtual_chunk_index};
 use crate::{AtomicVoxelRegistry, EMPTY_VOXEL_ID};
 use bevy::prelude::{
-    App, Commands, FixedUpdate, IntoScheduleConfigs, MessageReader, Plugin, Query, SystemSet,
-    Update,
+    App, Commands, FixedUpdate, IntoScheduleConfigs, MessageReader, Plugin, Query, Resource,
+    SystemSet, Update, resource_exists,
 };
 use bevy::transform::TransformPlugin;
 
@@ -16,17 +16,20 @@ pub struct LocalCoordinateBasePlugin;
 /// Installs read-side coordinate derivation without authoritative CRUD filtering.
 struct LocalCoordinateReadPlugin;
 
+#[derive(Resource, Default)]
+pub(crate) struct RenderChunkCache;
+
 /// Presents voxel data produced in the same World, without a separate chunk store.
 pub struct LocalCoordinatePresentationPlugin;
 
 impl Plugin for LocalCoordinatePresentationPlugin {
     fn build(&self, app: &mut App) {
         use super::physics::{LocalCoordinatePhysicsPlugin, LocalCoordinatePhysicsSet};
-        app.add_plugins((LocalCoordinateBasePlugin, LocalCoordinatePhysicsPlugin))
+        app.init_resource::<RenderChunkCache>()
+            .add_plugins((LocalCoordinateBasePlugin, LocalCoordinatePhysicsPlugin))
             .add_systems(
                 Update,
-                (cache_render_chunks, clear_chunk_changes)
-                    .chain()
+                clear_chunk_changes
                     .after(LocalCoordinateSet::RebuildIndex)
                     .after(LocalCoordinatePhysicsSet::Sync),
             );
@@ -96,6 +99,13 @@ impl Plugin for LocalCoordinateReadPlugin {
             .add_systems(
                 Update,
                 rebuild_virtual_chunk_index.in_set(LocalCoordinateSet::RebuildIndex),
+            )
+            .add_systems(
+                Update,
+                cache_render_chunks
+                    .run_if(resource_exists::<RenderChunkCache>)
+                    .after(LocalCoordinateSet::RebuildIndex)
+                    .before(clear_chunk_changes),
             );
     }
 }

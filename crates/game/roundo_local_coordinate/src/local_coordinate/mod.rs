@@ -42,6 +42,7 @@ pub use world_interaction::{
 pub use attributes::{
     CompleteEnvironmentDefaults, LocalCoordinateTransform, SparseEnvironmentOverride,
 };
+pub(crate) use base::RenderChunkCache;
 pub use base::LocalCoordinateSet;
 pub use data::{
     AtomicVoxel, AtomicVoxelId, EMPTY_VOXEL_ID, GlobalAtomicVoxelData, LocalAtomicVoxelData,
