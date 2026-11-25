@@ -26,7 +26,7 @@ use bevy::{
 };
 use roundo_infrastructure::user_config::ClientSettingsConfig;
 
-use super::{bundled_assets_root, config_store::ClientConfigStore};
+use super::{bundled_assets_root, config_store::ClientConfigStore, local_input::LocalBindings};
 
 mod directory;
 mod local_saves;
@@ -112,8 +112,11 @@ fn spawn_launcher_main_menu(world: &mut World) {
         .add(Font::from_bytes(font_data));
     world.insert_resource(LauncherFont(font.clone()));
     let start = launcher_start_tabs_scene(&font);
-    let options =
-        launcher_options_tabs_scene(world.resource::<ClientConfigStore>().settings(), &font);
+    let options = launcher_options_tabs_scene(
+        world.resource::<ClientConfigStore>().settings(),
+        world.resource::<LocalBindings>(),
+        &font,
+    );
     world
         .spawn_scene(bsn! {
             #Launcher
@@ -292,9 +295,10 @@ fn show_selected_launcher_tab_body(
 
 fn launcher_options_tabs_scene(
     settings: &ClientSettingsConfig,
+    bindings: &LocalBindings,
     font: &Handle<Font>,
 ) -> impl Scene + use<> {
-    let control = read_only_control_settings_scene(settings, font);
+    let control = control_settings_scene(bindings, font);
     let lod = settings.world.geometry_lod_pixel_error;
     let font = font.clone();
     bsn! {
@@ -349,26 +353,18 @@ fn launcher_options_tabs_scene(
     }
 }
 
-fn read_only_control_settings_scene(
-    settings: &ClientSettingsConfig,
-    font: &Handle<Font>,
-) -> impl Scene + use<> {
+fn control_settings_scene(bindings: &LocalBindings, font: &Handle<Font>) -> impl Scene + use<> {
     let font = font.clone();
-    let bindings = settings
-        .input_bindings
-        .iter()
-        .map(|binding| {
-            launcher_label_with_font(
-                font.clone(),
-                format!("{}: {:?}", binding.slot, binding.key),
-                18.0,
-            )
-        })
+    let rows = bindings
+        .control_rows()
+        .map(|row| launcher_label_with_font(font.clone(), row, 18.0))
         .collect::<Vec<_>>();
     let contents = bsn_list! {
-        @launcher_label_with_font(font, "已配置的按键绑定（只读，未启用）", 22.0)
+        @launcher_label_with_font(font.clone(), "本地角色按键绑定（只读）", 22.0)
         --
-        {bindings}
+        {rows}
+        --
+        @launcher_label_with_font(font, "Esc：释放鼠标、打开返回菜单（系统保留）", 18.0)
     };
     launcher_scroll_area_scene(contents)
 }

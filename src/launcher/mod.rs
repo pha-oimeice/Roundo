@@ -1,4 +1,4 @@
-//! Windowed single-player host. Game state lives in the main World without a transport.
+//! Graphical launcher and local game host.
 
 use std::path::PathBuf;
 
@@ -17,6 +17,8 @@ use roundo_rendering::RoundoRenderingPlugin;
 mod config;
 mod config_store;
 mod launcher_ui;
+mod local_game;
+mod local_input;
 
 fn bundled_assets_root() -> PathBuf {
     get_exe_root_path().join("assets")
@@ -24,9 +26,9 @@ fn bundled_assets_root() -> PathBuf {
 
 /// Loads client configuration and installs the launcher and 3D rendering.
 /// The supplied App must not already have a Bevy runner.
-pub(super) struct RoundoSinglePlayerPlugin;
+pub(super) struct RoundoLauncherPlugin;
 
-impl Plugin for RoundoSinglePlayerPlugin {
+impl Plugin for RoundoLauncherPlugin {
     fn build(&self, app: &mut App) {
         let config = config_store::ClientConfigStore::new(config::load_config());
         let settings = config.settings();
@@ -57,8 +59,8 @@ impl Plugin for RoundoSinglePlayerPlugin {
             ..Default::default()
         })
         .insert_resource(config)
-        .add_systems(Startup, || info!("Roundo single-player started"))
+        .add_systems(Startup, || info!("Roundo launcher started"))
         .add_systems(Update, config_store::sync_runtime_settings)
-        .add_plugins(launcher_ui::LauncherUiPlugin);
+        .add_plugins((local_game::LocalGamePlugin, launcher_ui::LauncherUiPlugin));
     }
 }

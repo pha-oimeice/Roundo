@@ -1,20 +1,10 @@
 mod launcher;
-mod single_player;
 
 use bevy::{app::AppExit, log::LogPlugin, prelude::App};
-use single_player::RoundoSinglePlayerPlugin;
+use launcher::RoundoLauncherPlugin;
 
 fn main() -> AppExit {
-    match launcher::should_launch() {
-        Ok(true) => {}
-        Ok(false) => return AppExit::Success,
-        Err(error) => {
-            eprintln!("{error}");
-            return AppExit::error();
-        }
-    }
-
     App::new()
-        .add_plugins((LogPlugin::default(), RoundoSinglePlayerPlugin))
+        .add_plugins((LogPlugin::default(), RoundoLauncherPlugin))
         .run()
 }

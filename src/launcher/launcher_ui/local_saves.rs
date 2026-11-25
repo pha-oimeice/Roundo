@@ -1,3 +1,4 @@
+use super::super::local_game::{LocalControl, LocalScreen};
 use super::{
     LauncherFont, LauncherRoot, SIDEBAR,
     directory::{DirectoryDisclosure, directory_scene, toggle_directory_details},
@@ -24,23 +25,16 @@ pub(super) struct LocalSavesPlugin;
 
 impl Plugin for LocalSavesPlugin {
     fn build(&self, app: &mut App) {
-        app.init_state::<LocalScreen>()
-            .init_resource::<LocalSession>()
+        app.init_resource::<LocalSession>()
             .init_resource::<SaveFilter>()
             .add_systems(
                 Update,
                 sync_save_rows.run_if(in_state(LocalScreen::Launcher)),
             )
             .add_systems(OnEnter(LocalScreen::Game), show_game_view)
+            .add_systems(Update, sync_game_view.run_if(in_state(LocalScreen::Game)))
             .add_systems(OnExit(LocalScreen::Game), restore_launcher);
     }
-}
-
-#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq, States)]
-enum LocalScreen {
-    #[default]
-    Launcher,
-    Game,
 }
 
 // The launcher owns the in-memory rows, including while it is hidden in Game.
@@ -104,6 +98,12 @@ struct SaveRowAction(Entity);
 
 #[derive(Clone, Component, Default)]
 struct LocalGameView;
+
+#[derive(Clone, Component, Default)]
+struct LocalGameStatus;
+
+#[derive(Clone, Component, Default)]
+struct ResumeGameButton;
 
 pub(super) fn local_save_list_scene(font: Handle<Font>) -> impl Scene {
     directory_scene(
@@ -498,6 +498,16 @@ fn show_game_view(
         Children [
             @launcher_label_with_font(font.clone(), title, 18.0)
             --
+            @launcher_label_with_font(font.clone(), "正在生成地形…", 16.0)
+            LocalGameStatus
+            --
+            @FeathersButton { @caption: bsn! { @caption("继续游戏") }, @variant: ButtonVariant::Primary }
+            InheritableFont { font: {font.clone()}, font_size: FontSize::Px(16.0) }
+            ResumeGameButton
+            Node { display: Display::None }
+            Visibility::Hidden
+            on(resume_game)
+            --
             @FeathersButton { @caption: bsn! { @caption("返回启动器") } }
             InheritableFont { font: {font.clone()}, font_size: FontSize::Px(16.0) }
             AutoFocus
@@ -506,6 +516,47 @@ fn show_game_view(
             })
         ]
     });
+}
+
+fn resume_game(_: On<Activate>, mut control: ResMut<LocalControl>, mut focus: ResMut<InputFocus>) {
+    if *control == LocalControl::Menu {
+        *control = LocalControl::Playing;
+        focus.clear();
+    }
+}
+
+fn sync_game_view(
+    control: Res<LocalControl>,
+    mut menu: Single<
+        (&mut Node, &mut Visibility),
+        (With<LocalGameView>, Without<ResumeGameButton>),
+    >,
+    mut resume: Single<
+        (Entity, &mut Node, &mut Visibility),
+        (With<ResumeGameButton>, Without<LocalGameView>),
+    >,
+    mut status: Single<&mut Text, With<LocalGameStatus>>,
+    mut focus: ResMut<InputFocus>,
+) {
+    if !control.is_changed() {
+        return;
+    }
+    match *control {
+        LocalControl::Playing => {
+            menu.0.display = Display::None;
+            *menu.1 = Visibility::Hidden;
+            focus.clear();
+        }
+        LocalControl::Menu => {
+            menu.0.display = Display::Flex;
+            *menu.1 = Visibility::Inherited;
+            resume.1.display = Display::Flex;
+            *resume.2 = Visibility::Inherited;
+            status.0 = "角色输入已暂停".into();
+            focus.set(resume.0, FocusCause::Auto);
+        }
+        LocalControl::Loading => {}
+    }
 }
 
 fn restore_launcher(

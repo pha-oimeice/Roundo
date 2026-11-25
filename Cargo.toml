@@ -1,13 +1,17 @@
 [package]
-name = "roundo_bin"
+name = "roundo"
 version.workspace = true
 edition.workspace = true
 
 [dependencies]
+avian3d.workspace = true
 bevy.workspace = true
+bevy_enhanced_input.workspace = true
 chrono.workspace = true
+roundo_creature.workspace = true
 roundo_infrastructure.workspace = true
 roundo_local_coordinate.workspace = true
+roundo_marionette.workspace = true
 roundo_rendering.workspace = true
 
 [features]
@@ -68,6 +72,7 @@ strip = "debuginfo"
 [workspace.dependencies]
 avian3d = "0.8"
 bevy = { version = "0.20.1", default-features = false, features = ["bevy_scene", "bevy_state", "bevy_winit", "bevy_render", "bevy_pbr", "bevy_text", "bevy_audio", "bevy_ui_render", "bevy_feathers", "custom_cursor", "complex_script_segmentation", "tonemapping_luts", "zstd_rust", "x11"] }
+bevy_enhanced_input = "0.27.2"
 chrono = { version = "0.4", default-features = false, features = ["std"] }
 crossbeam = "0.8"
 log = "0.4"
@@ -105,6 +110,7 @@ roundo_creature = { path = "crates/game/roundo_creature" }
 roundo_life = { path = "crates/game/roundo_life" }
 roundo_inventory = { path = "crates/game/roundo_inventory" }
 roundo_items = { path = "crates/game/roundo_items" }
+roundo_marionette = { path = "crates/game/roundo_marionette" }
 roundo_rendering = { path = "crates/roundo_rendering" }
 roundo_player = { path = "crates/game/roundo_player" }
 roundo_local_coordinate = { path = "crates/game/roundo_local_coordinate" }
