@@ -5,6 +5,7 @@ use bevy::{
     input::InputSystems,
     prelude::*,
     transform::TransformSystems,
+    ui::IsDefaultUiCamera,
     window::{CursorGrabMode, CursorOptions, PrimaryWindow},
 };
 use bevy_enhanced_input::prelude::*;
@@ -23,7 +24,9 @@ use roundo_rendering::DebugCamera;
 
 use super::{
     config_store::ClientConfigStore,
-    local_input::{LocalBindings, LocalCharacter, LocalIntent, sample_actions},
+    local_input::{
+        LocalBindings, LocalCharacter, LocalIntent, refresh_character_bindings, sample_actions,
+    },
 };
 
 pub(super) struct LocalGamePlugin;
@@ -90,7 +93,8 @@ impl Plugin for LocalGamePlugin {
             .add_systems(
                 PreUpdate,
                 (
-                    sync_capture
+                    (refresh_character_bindings, sync_capture)
+                        .chain()
                         .after(InputSystems)
                         .before(EnhancedInputSystems::Update),
                     sample_actions.after(EnhancedInputSystems::Apply),
@@ -236,6 +240,7 @@ fn spawn_character(
         Name::new("Local First-Person View"),
         LocalView,
         Camera3d::default(),
+        IsDefaultUiCamera,
         Transform::from_translation(
             Vec3::Y * (prototype.aabb.size().y - prototype.contact_tolerance),
         ),

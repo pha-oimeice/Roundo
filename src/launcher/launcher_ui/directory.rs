@@ -1,9 +1,6 @@
-use super::{DIVIDER, launcher_label_with_font, launcher_scroll_area_scene};
+use super::{DIVIDER, launcher_scroll_area_scene};
 use bevy::{
-    ecs::template::FromTemplate,
-    feathers::{controls::FeathersTextInputContainer, font_styles::InheritableFont},
-    prelude::*,
-    scene::Scene,
+    ecs::template::FromTemplate, feathers::font_styles::InheritableFont, prelude::*, scene::Scene,
     ui_widgets::Activate,
 };
 
@@ -12,7 +9,7 @@ pub(super) fn directory_scene(
     rows: impl Scene,
     add_button: impl Scene,
     form_slot: impl Scene,
-    filter_input: impl Scene,
+    search: impl Scene,
 ) -> impl Scene {
     let scroll = launcher_scroll_area_scene(bsn_list! {
         @{rows}
@@ -37,15 +34,7 @@ pub(super) fn directory_scene(
             @{scroll}
             Node { padding: {UiRect::right(px(12))} }
             --
-            @FeathersTextInputContainer
-            Node { width: percent(100), max_width: px(420), min_height: px(36), flex_grow: 0.0, flex_shrink: 0.0, align_self: AlignSelf::FlexStart }
-            InheritableFont { font: {font.clone()}, font_size: FontSize::Px(16.0) }
-            Children [
-                @launcher_label_with_font(font.clone(), "Filter", 16.0)
-                --
-                @{filter_input}
-                Node { min_width: px(0) }
-            ]
+            @{search}
         ]
     }
 }

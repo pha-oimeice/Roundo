@@ -2,6 +2,7 @@
 
 use bevy::{
     app::AppExit,
+    camera::visibility::VisibilitySystems,
     ecs::template::{EntityTemplate, FromTemplate, OptionTemplate},
     feathers::{
         FeathersPlugins,
@@ -14,85 +15,85 @@ use bevy::{
         font_styles::InheritableFont,
         theme::UiTheme,
     },
-    input_focus::{AutoFocus, FocusCause, InputFocus, tab_navigation::TabGroup},
-    math::Rot2,
+    input_focus::{AutoFocus, FocusCause, FocusGained, InputFocus, tab_navigation::TabGroup},
+    picking::{
+        events::{PointerClick, PointerDragEnd, PointerPress, PointerRelease},
+        pointer::PointerButton,
+    },
     prelude::*,
     scene::{Scene, SceneList},
     text::FontSourceTemplate,
     ui_widgets::{
-        Activate, ControlOrientation, RequestClose, ScrollArea, SelectedTab, Tab, TabActivation,
-        TabList, ValueChange,
+        Activate, ControlOrientation, RequestClose, ScrollArea, ScrollIntoView, SelectedTab, Tab,
+        TabActivation, TabList, ValueChange,
     },
 };
 use roundo_infrastructure::user_config::ClientSettingsConfig;
 
-use super::{bundled_assets_root, config_store::ClientConfigStore, local_input::LocalBindings};
+use super::{
+    bundled_assets_root,
+    config_store::ClientConfigStore,
+    local_game::{LocalControl, LocalScreen},
+};
 
+mod controls;
 mod directory;
 mod form;
 mod local_saves;
+mod pause_menu;
 mod remote_servers;
+mod search;
 
 pub(crate) struct LauncherUiPlugin;
 
 #[derive(Resource)]
 struct LauncherFont(Handle<Font>);
 
+#[derive(Resource)]
+struct MenuEmojiFont(Handle<Font>);
+
 impl Plugin for LauncherUiPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins((
             FeathersPlugins,
+            controls::ControlsPlugin,
             local_saves::LocalSavesPlugin,
+            pause_menu::PauseMenuPlugin,
             remote_servers::RemoteDirectoryPlugin,
         ))
         .insert_resource(UiTheme(create_dark_theme()))
-        .add_systems(PostStartup, spawn_launcher_main_menu);
-    }
-}
-
-#[derive(Clone, Copy, Component, Default, PartialEq, Eq)]
-enum Panel {
-    #[default]
-    Start,
-    Option,
-}
-
-impl Panel {
-    fn menu_title(self) -> &'static str {
-        match self {
-            Self::Start => "Start",
-            Self::Option => "Options",
-        }
-    }
-
-    fn display_when_selected(self, selected: Self) -> Display {
-        if self == selected {
-            Display::Flex
-        } else {
-            Display::None
-        }
+        .add_systems(PostStartup, spawn_launcher_main_menu)
+        .add_systems(OnExit(LocalScreen::Game), close_option_window)
+        .add_systems(
+            PostUpdate,
+            reset_hidden_option_tabs.after(VisibilitySystems::VisibilityPropagate),
+        );
     }
 }
 
 #[derive(Clone, Component, Default)]
-struct PanelButton(Panel);
+struct LauncherStartPanel;
+
+#[derive(Clone, Component, Default)]
+struct OptionWindow;
 
 #[derive(Component, FromTemplate)]
 struct LauncherTabBody(Entity);
 
+#[derive(Component, FromTemplate)]
+struct OptionTabList(Entity);
+
 #[derive(Clone, Component, Default)]
 struct LauncherRoot;
 
-#[derive(Clone, Component, Default)]
-struct QuitButton;
-
-#[derive(Clone, Component, Default)]
-struct QuitDialog;
+#[derive(Component, FromTemplate)]
+struct QuitDialog(Entity);
 
 const BACKGROUND: Color = Color::srgb_u8(16, 21, 29);
 const SIDEBAR: Color = Color::srgb_u8(24, 32, 43);
 const DIVIDER: Color = Color::srgb_u8(58, 72, 89);
-const QUIT_RED: Color = Color::srgb_u8(241, 82, 88);
+const OPTION_TITLE: &str = "Option";
+const QUIT_EMOJI: &str = "🚪";
 const ACTIVE_TAB_BACKGROUND: Color = Color::srgb_u8(48, 66, 86);
 
 const FONT_DATA_PATH: &str = "fonts/NotoSansSC.ttf";
@@ -100,48 +101,68 @@ const ROUNDO_TITLE_FONT_SIZE_PX: f32 = 60.0;
 const NAVIGATION_BUTTON_FONT_SIZE_PX: f32 = 24.0;
 const LAUNCHER_TAB_FONT_SIZE_PX: f32 = 20.0;
 
-fn spawn_launcher_main_menu(world: &mut World) {
-    let font_path = bundled_assets_root().join(FONT_DATA_PATH);
+fn load_bundled_font(world: &mut World, path: &str) -> Handle<Font> {
+    let font_path = bundled_assets_root().join(path);
     let font_data = std::fs::read(&font_path).unwrap_or_else(|error| {
         panic!(
-            "failed to read launcher font {}: {error}",
+            "failed to read bundled font {}: {error}",
             font_path.display()
         )
     });
-    let font = world
+    world
         .resource_mut::<Assets<Font>>()
-        .add(Font::from_bytes(font_data));
+        .add(Font::from_bytes(font_data))
+}
+
+fn spawn_launcher_main_menu(world: &mut World) {
+    let font = load_bundled_font(world, FONT_DATA_PATH);
     world.insert_resource(LauncherFont(font.clone()));
-    let start = launcher_start_tabs_scene(&font);
-    let options = launcher_options_tabs_scene(
+    let emoji_font = load_bundled_font(world, "fonts/NotoEmoji-Menu.ttf");
+    world.insert_resource(MenuEmojiFont(emoji_font.clone()));
+    let start = launcher_start_tabs_scene(&font, &emoji_font);
+    let options = option_window_scene(
         world.resource::<ClientConfigStore>().settings(),
-        world.resource::<LocalBindings>(),
         &font,
+        &emoji_font,
     );
     world
         .spawn_scene(bsn! {
-            #Launcher
+            @launcher_root_layout_scene()
             LauncherRoot
-            Node { width: percent(100), height: percent(100), padding: {UiRect::all(px(24))} }
             BackgroundColor(BACKGROUND)
             TabGroup
             Children [
-                Node { width: percent(100), height: percent(100), padding: {UiRect::all(px(1))}, column_gap: px(1) }
+                @launcher_frame_layout_scene()
                 BackgroundColor(DIVIDER)
                 Children [
-                    @launcher_content_slot_scene(start, options)
+                    @launcher_content_slot_scene()
+                    Children [
+                        LauncherStartPanel
+                        Node { flex_direction: FlexDirection::Column, flex_grow: 1.0, min_height: px(0) }
+                        Children [ @{start} ]
+                    ]
                     --
                     @launcher_navigation_sidebar_scene(font.clone())
                 ]
                 --
-                @quit_confirmation_button_scene(font)
+                @quit_confirmation_button_scene(font, emoji_font)
             ]
         })
         .expect("spawn launcher scene");
+    world
+        .spawn_scene(options)
+        .expect("spawn shared Option window");
 }
 
-fn launcher_content_slot_scene(start: impl Scene, options: impl Scene) -> impl Scene {
-    let initial = Panel::default();
+fn launcher_root_layout_scene() -> impl Scene {
+    bsn! { Node { width: percent(100), height: percent(100), padding: {UiRect::all(px(24))} } }
+}
+
+fn launcher_frame_layout_scene() -> impl Scene {
+    bsn! { Node { width: percent(100), height: percent(100), padding: {UiRect::all(px(1))}, column_gap: px(1) } }
+}
+
+fn launcher_content_slot_scene() -> impl Scene {
     bsn! {
         Node {
             flex_direction: FlexDirection::Column,
@@ -152,31 +173,6 @@ fn launcher_content_slot_scene(start: impl Scene, options: impl Scene) -> impl S
             row_gap: px(16),
         }
         BackgroundColor(BACKGROUND)
-        Children [
-            @switchable_content_panel_scene(Panel::Start, initial)
-            Children [ @{start} ]
-            --
-            @switchable_content_panel_scene(Panel::Option, initial)
-            Children [ @{options} ]
-        ]
-    }
-}
-
-fn switchable_content_panel_scene(panel: Panel, initial: Panel) -> impl Scene {
-    let visibility = if panel == initial {
-        Visibility::Inherited
-    } else {
-        Visibility::Hidden
-    };
-    bsn! {
-        panel
-        visibility
-        Node {
-            display: {panel.display_when_selected(initial)},
-            flex_direction: FlexDirection::Column,
-            flex_grow: 1.0,
-            min_height: px(0),
-        }
     }
 }
 
@@ -194,9 +190,9 @@ fn content_header_divider_scene() -> impl Scene {
     }
 }
 
-fn launcher_start_tabs_scene(font: &Handle<Font>) -> impl Scene + use<> {
-    let local = local_saves::local_save_list_scene(font.clone());
-    let remote = remote_servers::remote_server_list_scene(font.clone());
+fn launcher_start_tabs_scene(font: &Handle<Font>, emoji_font: &Handle<Font>) -> impl Scene + use<> {
+    let local = local_saves::local_save_list_scene(font.clone(), emoji_font.clone());
+    let remote = remote_servers::remote_server_list_scene(font.clone(), emoji_font.clone());
     let font = font.clone();
     bsn! {
         @launcher_tabbed_content_layout_scene()
@@ -230,7 +226,7 @@ fn launcher_tabbed_content_layout_scene() -> impl Scene {
 
 fn launcher_tab_list_scene(initial_tab: EntityTemplate) -> impl Scene {
     bsn! {
-        Node { column_gap: px(8), row_gap: px(8), flex_shrink: 0.0, flex_wrap: FlexWrap::Wrap }
+        Node { column_gap: px(8), flex_shrink: 0.0 }
         TabList { activation: TabActivation::Automatic }
         SelectedTab({OptionTemplate::Some(initial_tab)})
         on(show_selected_launcher_tab_body)
@@ -254,7 +250,7 @@ fn launcher_tab_header_scene(
         FocusIndicator
         Node {
             min_width: px(88),
-            height: px(42),
+            height: px(42), flex_shrink: 0.0,
             align_items: AlignItems::Center,
             justify_content: JustifyContent::Center,
             padding: {UiRect::horizontal(px(12))},
@@ -278,6 +274,9 @@ fn show_selected_launcher_tab_body(
         .value
         .filter(|tab| children.contains(tab) && tabs.contains(*tab))
         .expect("selection must name a tab in this launcher tab list");
+    if selection.0 == Some(selected) {
+        return;
+    }
     selection.0 = Some(selected);
     for tab in children.iter() {
         let (body, mut background) = tabs.get_mut(tab).expect("launcher tab header");
@@ -294,109 +293,211 @@ fn show_selected_launcher_tab_body(
     }
 }
 
-fn launcher_options_tabs_scene(
+fn option_window_scene(
     settings: &ClientSettingsConfig,
-    bindings: &LocalBindings,
     font: &Handle<Font>,
+    emoji: &Handle<Font>,
 ) -> impl Scene + use<> {
-    let control = control_settings_scene(bindings, font);
-    let lod = settings.world.geometry_lod_pixel_error;
+    let tabs = option_tabs_scene(settings, font, emoji);
+    bsn! {
+        @launcher_root_layout_scene()
+        Node { position_type: PositionType::Absolute, top: px(0), left: px(0) }
+        Pickable::IGNORE
+        TabGroup
+        Children [
+            @launcher_frame_layout_scene()
+            OptionWindow
+            GlobalZIndex(1)
+            Node { display: Display::None }
+            Visibility::Hidden
+            Pickable::IGNORE
+            Children [
+                @launcher_content_slot_scene()
+                Children [ @{tabs} ]
+                --
+                @launcher_sidebar_size_scene()
+                Pickable::IGNORE
+            ]
+        ]
+    }
+}
+
+fn option_tabs_scene(
+    settings: &ClientSettingsConfig,
+    font: &Handle<Font>,
+    emoji: &Handle<Font>,
+) -> impl Scene + use<> {
+    let [general, display, graphics, audio, controls, misc] =
+        option_tab_bodies(settings, font, emoji);
     let font = font.clone();
     bsn! {
         @launcher_tabbed_content_layout_scene()
         Children [
-            @launcher_tab_list_scene(#GeneralTab)
+            Node { flex_direction: FlexDirection::Column, flex_shrink: 0.0, padding: {UiRect::bottom(px(10))} }
             Children [
-                #GeneralTab
-                @launcher_tab_header_scene(font.clone(), "General", true, #GeneralSettings)
+                #OptionTabList
+                @launcher_tab_list_scene(#GeneralTab)
+                OptionTabList(#GeneralTab)
+                Node { min_width: px(0), overflow: {Overflow { y: OverflowAxis::Clip, ..Overflow::scroll_x() }} }
+                ScrollArea
+                on(reveal_focused_tab)
+                Children [
+                    #GeneralTab
+                    @launcher_tab_header_scene(font.clone(), "General", true, #GeneralSettings)
+                    --
+                    @launcher_tab_header_scene(font.clone(), "Display", false, #DisplaySettings)
+                    --
+                    @launcher_tab_header_scene(font.clone(), "Graphics", false, #GraphicSettings)
+                    --
+                    @launcher_tab_header_scene(font.clone(), "Audio", false, #AudioSettings)
+                    --
+                    @launcher_tab_header_scene(font.clone(), "Controls", false, #ControlSettings)
+                    --
+                    @launcher_tab_header_scene(font, "Misc", false, #MiscSettings)
+                ]
                 --
-                @launcher_tab_header_scene(font.clone(), "Display", false, #DisplaySettings)
-                --
-                @launcher_tab_header_scene(font.clone(), "Graphics", false, #GraphicSettings)
-                --
-                @launcher_tab_header_scene(font.clone(), "Audio", false, #AudioSettings)
-                --
-                @launcher_tab_header_scene(font.clone(), "Controls", false, #ControlSettings)
-                --
-                @launcher_tab_header_scene(font.clone(), "Misc", false, #MiscSettings)
+                @FeathersScrollbar { @target: #OptionTabList, @orientation: ControlOrientation::Horizontal }
+                Node { position_type: PositionType::Absolute, left: px(0), right: px(0), bottom: px(0), height: px(8) }
             ]
             --
             @content_header_divider_scene()
             --
-            #GeneralSettings
-            @launcher_label_with_font(font.clone(), "No general settings available.", 18.0)
+            #GeneralSettings @{general}
             --
-            #DisplaySettings
-            @launcher_label_with_font(font.clone(), "No display settings available.", 18.0)
-            Node { display: Display::None }
-            Visibility::Hidden
+            #DisplaySettings @{display}
             --
-            #GraphicSettings
-            @launcher_label_with_font(font.clone(), {format!("Geometry LOD pixel error (read-only): {lod}")}, 18.0)
-            Node { display: Display::None }
-            Visibility::Hidden
+            #GraphicSettings @{graphics}
             --
-            #AudioSettings
-            @launcher_label_with_font(font.clone(), "No audio settings available.", 18.0)
-            Node { display: Display::None }
-            Visibility::Hidden
+            #AudioSettings @{audio}
             --
-            #ControlSettings
-            @{control}
-            Node { display: Display::None }
-            Visibility::Hidden
+            #ControlSettings @{controls}
             --
-            #MiscSettings
-            @launcher_label_with_font(font, "No other settings available.", 18.0)
-            Node { display: Display::None }
-            Visibility::Hidden
+            #MiscSettings @{misc}
         ]
     }
 }
 
-fn control_settings_scene(bindings: &LocalBindings, font: &Handle<Font>) -> impl Scene + use<> {
-    let font = font.clone();
-    let rows = bindings
-        .control_rows()
-        .map(|row| launcher_label_with_font(font.clone(), row, 18.0))
-        .collect::<Vec<_>>();
-    let contents = bsn_list! {
-        @launcher_label_with_font(font.clone(), "Local character controls (read-only)", 22.0)
-        --
-        {rows}
-        --
-        @launcher_label_with_font(font, "Esc: Release the mouse and open the pause menu (reserved)", 18.0)
+fn option_tab_bodies(
+    settings: &ClientSettingsConfig,
+    font: &Handle<Font>,
+    emoji: &Handle<Font>,
+) -> [impl Scene + use<>; 6] {
+    let label = |text: String| -> Box<dyn Scene> {
+        Box::new(launcher_label_with_font(font.clone(), text, 18.0))
     };
-    launcher_scroll_area_scene(contents)
+    let lod = settings.world.geometry_lod_pixel_error;
+    let controls: Box<dyn Scene> = Box::new(controls::controls_scene(
+        settings,
+        font.clone(),
+        emoji.clone(),
+    ));
+    let contents = [
+        (true, label("No general settings available.".into())),
+        (false, label("No display settings available.".into())),
+        (
+            false,
+            label(format!("Geometry LOD pixel error (read-only): {lod}")),
+        ),
+        (false, label("No audio settings available.".into())),
+        (false, controls),
+        (false, label("No other settings available.".into())),
+    ];
+    contents.map(|(initially_selected, content)| {
+        let (display, visibility) = if initially_selected {
+            (Display::Flex, Visibility::Inherited)
+        } else {
+            (Display::None, Visibility::Hidden)
+        };
+        bsn! {
+            Node { display, flex_direction: FlexDirection::Column, flex_grow: 1.0, min_height: px(0) }
+            visibility
+            Children [ @{content} ]
+        }
+    })
+}
+
+fn reveal_focused_tab(event: On<FocusGained>, mut commands: Commands) {
+    if event.cause == FocusCause::Navigated {
+        commands.trigger(ScrollIntoView {
+            entity: event.entity,
+        });
+    }
+}
+
+fn reset_hidden_option_tabs(
+    mut lists: Query<
+        (
+            Entity,
+            &InheritedVisibility,
+            &OptionTabList,
+            &SelectedTab,
+            &mut ScrollPosition,
+        ),
+        Changed<InheritedVisibility>,
+    >,
+    mut commands: Commands,
+) {
+    for (entity, visibility, default_tab, selection, mut scroll) in &mut lists {
+        if !visibility.get() {
+            scroll.0 = Vec2::ZERO;
+            if selection.0 != Some(default_tab.0) {
+                commands.trigger(ValueChange::<Option<Entity>> {
+                    source: entity,
+                    value: Some(default_tab.0),
+                    is_final: true,
+                });
+            }
+        }
+    }
 }
 
 fn launcher_scroll_area_scene(contents: impl SceneList) -> impl Scene {
     bsn! {
-        #LauncherScroll
-        Node {
-            flex_direction: FlexDirection::Column,
-            flex_grow: 1.0,
-            min_height: px(0),
-            overflow: Overflow::scroll_y(),
-            row_gap: px(12),
-        }
-        ScrollArea
+        @vertical_scroll_frame_scene()
         Children [
-            @FeathersScrollbar { @target: #LauncherScroll, @orientation: ControlOrientation::Vertical }
-            Node { position_type: PositionType::Absolute, right: px(0), top: px(0), height: percent(100), width: px(8) }
+            #LauncherScroll
+            @vertical_scroll_viewport_scene()
+            Node { row_gap: px(12) }
+            Children [ {contents} ]
             --
-            {contents}
+            @vertical_scrollbar_scene(#LauncherScroll)
         ]
     }
 }
 
-fn launcher_navigation_sidebar_scene(font: Handle<Font>) -> impl Scene {
+fn vertical_scroll_frame_scene() -> impl Scene {
+    bsn! {
+        Node { flex_grow: 1.0, min_width: px(0), min_height: px(0), padding: {UiRect::right(px(10))} }
+    }
+}
+
+fn vertical_scroll_viewport_scene() -> impl Scene {
     bsn! {
         Node {
+            flex_direction: FlexDirection::Column, flex_grow: 1.0,
+            min_width: px(0), min_height: px(0),
+            overflow: {Overflow { x: OverflowAxis::Clip, ..Overflow::scroll_y() }},
+        }
+        ScrollArea
+    }
+}
+
+fn vertical_scrollbar_scene(target: EntityTemplate) -> impl Scene {
+    bsn! {
+        @FeathersScrollbar { @target: target, @orientation: ControlOrientation::Vertical }
+        Node { position_type: PositionType::Absolute, right: px(0), top: px(0), bottom: px(0), width: px(8) }
+    }
+}
+
+fn launcher_sidebar_size_scene() -> impl Scene {
+    bsn! { Node { width: percent(23), min_width: px(208), flex_shrink: 0.0 } }
+}
+
+fn launcher_navigation_sidebar_scene(font: Handle<Font>) -> impl Scene {
+    bsn! {
+        @launcher_sidebar_size_scene()
+        Node {
             flex_direction: FlexDirection::Column,
-            width: percent(23),
-            min_width: px(208),
-            flex_shrink: 0.0,
             align_items: AlignItems::Center,
             justify_content: JustifyContent::SpaceBetween,
             padding: {UiRect { bottom: px(82), ..UiRect::all(px(24)) }},
@@ -414,60 +515,70 @@ fn launcher_navigation_sidebar_scene(font: Handle<Font>) -> impl Scene {
                 row_gap: px(12),
             }
             Children [
-                @panel_navigation_button_scene(Panel::Start)
+                @launcher_navigation_button_scene("Start")
+                on(show_launcher_start)
                 --
-                @panel_navigation_button_scene(Panel::Option)
+                @launcher_navigation_button_scene(OPTION_TITLE)
+                on(open_option_window)
             ]
         ]
     }
 }
 
-fn panel_navigation_button_scene(panel: Panel) -> impl Scene {
-    let title = panel.menu_title();
+fn launcher_navigation_button_scene(title: &'static str) -> impl Scene {
     bsn! {
         @FeathersButton { @caption: bsn! { @caption(title) } }
         InheritableFont { font_size: FontSize::Px(NAVIGATION_BUTTON_FONT_SIZE_PX) }
         Node { width: percent(100), height: px(48) }
-        PanelButton(panel)
-        on(show_content_panel_for_navigation_button)
     }
 }
 
-fn quit_confirmation_button_scene(font: Handle<Font>) -> impl Scene {
+// Feathers buttons accept all pointer buttons. Filter on the hit target before events reach the widget.
+fn primary_pointer_target_scene() -> impl Scene {
     bsn! {
-        #Quit
-        QuitButton
-        @FeathersButton {
-            @caption: bsn! {
-                Node { width: px(22), height: px(22), align_items: AlignItems::Center, justify_content: JustifyContent::Center }
-                Pickable::IGNORE
-                Children [
-                    @quit_icon_diagonal_stroke_scene(45.0)
-                    --
-                    @quit_icon_diagonal_stroke_scene(-45.0)
-                ]
-            }
-        }
-        Node { position_type: PositionType::Absolute, right: px(40), bottom: px(40), width: px(44), height: px(44) }
-        on(move |_: On<Activate>, mut commands: Commands, root: Single<Entity, With<LauncherRoot>>, dialogs: Query<(), With<QuitDialog>>| {
+        Node { position_type: PositionType::Absolute, top: px(0), right: px(0), bottom: px(0), left: px(0) }
+        on(|mut event: On<PointerPress>| {
+            if event.button != PointerButton::Primary { event.propagate(false); }
+        })
+        on(|mut event: On<PointerRelease>| {
+            if event.button != PointerButton::Primary { event.propagate(false); }
+        })
+        on(|mut event: On<PointerClick>| {
+            if event.button != PointerButton::Primary { event.propagate(false); }
+        })
+        on(|mut event: On<PointerDragEnd>| {
+            if event.button != PointerButton::Primary { event.propagate(false); }
+        })
+    }
+}
+
+fn menu_emoji_scene(font: Handle<Font>, emoji: &'static str, size: f32) -> impl Scene {
+    bsn! {
+        Text({emoji.to_owned()})
+        TextFont { font: {FontSourceTemplate::Handle(font.into())}, font_size: FontSize::Px(size) }
+        Pickable::IGNORE
+    }
+}
+
+fn quit_confirmation_button_scene(font: Handle<Font>, emoji_font: Handle<Font>) -> impl Scene {
+    bsn! {
+        @FeathersButton
+        AccessibleLabel("Quit")
+        Node { position_type: PositionType::Absolute, right: px(40), bottom: px(40), width: px(44), height: px(44), padding: UiRect::ZERO }
+        Children [ @menu_emoji_scene(emoji_font, QUIT_EMOJI, 24.0) ]
+        on(move |event: On<Activate>, mut commands: Commands, root: Single<Entity, With<LauncherRoot>>, dialogs: Query<(), With<QuitDialog>>| {
             if dialogs.is_empty() {
-                commands.spawn_scene(quit_confirmation_dialog_scene(*root, font.clone()));
+                commands.spawn_scene(quit_confirmation_dialog_scene(*root, event.entity, font.clone()));
             }
         })
     }
 }
 
-fn quit_icon_diagonal_stroke_scene(angle: f32) -> impl Scene {
-    let transform = UiTransform::from_rotation(Rot2::degrees(angle));
-    bsn! {
-        Node { position_type: PositionType::Absolute, width: px(20), height: px(4), border_radius: {BorderRadius::all(px(2))} }
-        transform
-        BackgroundColor(QUIT_RED)
-        Pickable::IGNORE
-    }
-}
-
-fn quit_confirmation_dialog_scene(parent: Entity, font: Handle<Font>) -> impl Scene {
+fn quit_confirmation_dialog_scene(
+    parent: Entity,
+    opener: Entity,
+    font: Handle<Font>,
+) -> impl Scene {
     let confirm_font = font.clone();
     let contents = bsn_list! {
         Node { flex_direction: FlexDirection::Column, padding: {UiRect::all(px(12))} }
@@ -488,7 +599,7 @@ fn quit_confirmation_dialog_scene(parent: Entity, font: Handle<Font>) -> impl Sc
     let contents: Box<dyn SceneList> = Box::new(contents);
     bsn! {
         @FeathersDialog { @contents: contents, @width: px(360) }
-        QuitDialog
+        QuitDialog(opener)
         ChildOf(parent)
         BackgroundColor({Color::srgba(0.0, 0.0, 0.0, 0.6)})
         on(dismiss_quit_dialog_and_restore_button_focus)
@@ -505,33 +616,67 @@ fn dismiss_quit_dialog_and_restore_button_focus(
     mut event: On<RequestClose>,
     mut commands: Commands,
     mut focus: ResMut<InputFocus>,
-    dialog: Single<Entity, With<QuitDialog>>,
-    button: Single<Entity, With<QuitButton>>,
+    dialog: Single<(Entity, &QuitDialog)>,
 ) {
     event.propagate(false);
-    commands.entity(*dialog).try_despawn();
-    focus.set(*button, FocusCause::Auto);
+    let (dialog, opener) = *dialog;
+    commands.entity(dialog).try_despawn();
+    focus.set(opener.0, FocusCause::Auto);
 }
 
 fn exit_application_on_quit_confirmation(_: On<Activate>, mut exit: MessageWriter<AppExit>) {
     exit.write(AppExit::Success);
 }
 
-fn show_content_panel_for_navigation_button(
-    event: On<Activate>,
-    buttons: Query<&PanelButton>,
-    mut panels: Query<(&Panel, &mut Node, &mut Visibility)>,
+fn open_option_window(
+    _: On<Activate>,
+    screen: Res<State<LocalScreen>>,
+    control: Res<LocalControl>,
+    mut option: Single<(&mut Node, &mut Visibility), With<OptionWindow>>,
+    mut start: Single<
+        (&mut Node, &mut Visibility),
+        (With<LauncherStartPanel>, Without<OptionWindow>),
+    >,
 ) {
-    let selected = buttons
-        .get(event.entity)
-        .expect("launcher navigation button")
-        .0;
-    for (panel, mut node, mut visibility) in &mut panels {
-        node.display = panel.display_when_selected(selected);
-        *visibility = if *panel == selected {
-            Visibility::Inherited
-        } else {
-            Visibility::Hidden
-        };
+    if option.0.display != Display::None {
+        return;
+    }
+    match screen.get() {
+        LocalScreen::Launcher => {
+            start.0.display = Display::None;
+            *start.1 = Visibility::Hidden;
+            option.0.flex_direction = FlexDirection::Row;
+            option.0.right = Val::Auto;
+        }
+        LocalScreen::Game if *control == LocalControl::Menu => {
+            // Move the same window beside the pause rail without changing its layout size.
+            option.0.flex_direction = FlexDirection::RowReverse;
+            option.0.right = px(pause_menu::SIDEBAR_WIDTH_PX);
+        }
+        LocalScreen::Game => return,
+    }
+    option.0.display = Display::Flex;
+    *option.1 = Visibility::Inherited;
+}
+
+fn show_launcher_start(
+    _: On<Activate>,
+    option: Single<(&mut Node, &mut Visibility), With<OptionWindow>>,
+    mut start: Single<
+        (&mut Node, &mut Visibility),
+        (With<LauncherStartPanel>, Without<OptionWindow>),
+    >,
+) {
+    if start.0.display == Display::None {
+        close_option_window(option);
+        start.0.display = Display::Flex;
+        *start.1 = Visibility::Inherited;
+    }
+}
+
+fn close_option_window(mut option: Single<(&mut Node, &mut Visibility), With<OptionWindow>>) {
+    if option.0.display != Display::None {
+        option.0.display = Display::None;
+        *option.1 = Visibility::Hidden;
     }
 }

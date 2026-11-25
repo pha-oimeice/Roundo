@@ -1,0 +1,220 @@
+use Key::*;
+use roundo_infrastructure::user_config::ClientInputKey as Key;
+
+#[derive(Clone, Copy)]
+pub(super) struct PhysicalKey {
+    pub(super) input: Option<Key>,
+    pub(super) label: &'static str,
+    pub(super) rect: [f32; 4],
+}
+
+const fn keyboard(input: Key, label: &'static str, x: f32, y: f32, w: f32, h: f32) -> PhysicalKey {
+    PhysicalKey {
+        input: Some(input),
+        label,
+        rect: keyboard_rect(x, y, w, h),
+    }
+}
+
+const fn keyboard_rect(x: f32, y: f32, w: f32, h: f32) -> [f32; 4] {
+    [
+        x * 100.0 / 23.0,
+        y * 100.0 / 6.5,
+        (w - 0.09) * 100.0 / 23.0,
+        (h - 0.10) * 100.0 / 6.5,
+    ]
+}
+
+const fn key(input: Key, label: &'static str, x: f32, y: f32) -> PhysicalKey {
+    keyboard(input, label, x, y, 1.0, 1.0)
+}
+
+pub(super) const KEYBOARD: &[PhysicalKey] = &[
+    PhysicalKey {
+        input: None,
+        label: "Esc",
+        rect: keyboard_rect(0., 0., 1., 1.),
+    },
+    key(F1, "F1", 2., 0.),
+    key(F2, "F2", 3., 0.),
+    key(F3, "F3", 4., 0.),
+    key(F4, "F4", 5., 0.),
+    key(F5, "F5", 6.5, 0.),
+    key(F6, "F6", 7.5, 0.),
+    key(F7, "F7", 8.5, 0.),
+    key(F8, "F8", 9.5, 0.),
+    key(F9, "F9", 11., 0.),
+    key(F10, "F10", 12., 0.),
+    key(F11, "F11", 13., 0.),
+    key(F12, "F12", 14., 0.),
+    key(PrintScreen, "Prt", 15.5, 0.),
+    key(ScrollLock, "Scr", 16.5, 0.),
+    key(Pause, "Pau", 17.5, 0.),
+    key(Backquote, "`", 0., 1.5),
+    key(Digit1, "1", 1., 1.5),
+    key(Digit2, "2", 2., 1.5),
+    key(Digit3, "3", 3., 1.5),
+    key(Digit4, "4", 4., 1.5),
+    key(Digit5, "5", 5., 1.5),
+    key(Digit6, "6", 6., 1.5),
+    key(Digit7, "7", 7., 1.5),
+    key(Digit8, "8", 8., 1.5),
+    key(Digit9, "9", 9., 1.5),
+    key(Digit0, "0", 10., 1.5),
+    key(Minus, "-", 11., 1.5),
+    key(Equal, "=", 12., 1.5),
+    keyboard(Backspace, "Back", 13., 1.5, 2., 1.),
+    key(Insert, "Ins", 15.5, 1.5),
+    key(Home, "Home", 16.5, 1.5),
+    key(PageUp, "PgUp", 17.5, 1.5),
+    key(NumLock, "Num", 19., 1.5),
+    key(NumpadDivide, "/", 20., 1.5),
+    key(NumpadMultiply, "*", 21., 1.5),
+    key(NumpadSubtract, "-", 22., 1.5),
+    keyboard(Tab, "Tab", 0., 2.5, 1.5, 1.),
+    key(KeyQ, "Q", 1.5, 2.5),
+    key(KeyW, "W", 2.5, 2.5),
+    key(KeyE, "E", 3.5, 2.5),
+    key(KeyR, "R", 4.5, 2.5),
+    key(KeyT, "T", 5.5, 2.5),
+    key(KeyY, "Y", 6.5, 2.5),
+    key(KeyU, "U", 7.5, 2.5),
+    key(KeyI, "I", 8.5, 2.5),
+    key(KeyO, "O", 9.5, 2.5),
+    key(KeyP, "P", 10.5, 2.5),
+    key(BracketLeft, "[", 11.5, 2.5),
+    key(BracketRight, "]", 12.5, 2.5),
+    keyboard(Backslash, "\\", 13.5, 2.5, 1.5, 1.),
+    key(Delete, "Del", 15.5, 2.5),
+    key(End, "End", 16.5, 2.5),
+    key(PageDown, "PgDn", 17.5, 2.5),
+    key(Numpad7, "7", 19., 2.5),
+    key(Numpad8, "8", 20., 2.5),
+    key(Numpad9, "9", 21., 2.5),
+    keyboard(NumpadAdd, "+", 22., 2.5, 1., 2.),
+    keyboard(CapsLock, "Caps", 0., 3.5, 1.75, 1.),
+    key(KeyA, "A", 1.75, 3.5),
+    key(KeyS, "S", 2.75, 3.5),
+    key(KeyD, "D", 3.75, 3.5),
+    key(KeyF, "F", 4.75, 3.5),
+    key(KeyG, "G", 5.75, 3.5),
+    key(KeyH, "H", 6.75, 3.5),
+    key(KeyJ, "J", 7.75, 3.5),
+    key(KeyK, "K", 8.75, 3.5),
+    key(KeyL, "L", 9.75, 3.5),
+    key(Semicolon, ";", 10.75, 3.5),
+    key(Quote, "'", 11.75, 3.5),
+    keyboard(Enter, "Enter", 12.75, 3.5, 2.25, 1.),
+    key(Numpad4, "4", 19., 3.5),
+    key(Numpad5, "5", 20., 3.5),
+    key(Numpad6, "6", 21., 3.5),
+    keyboard(ShiftLeft, "Shift", 0., 4.5, 2.25, 1.),
+    key(KeyZ, "Z", 2.25, 4.5),
+    key(KeyX, "X", 3.25, 4.5),
+    key(KeyC, "C", 4.25, 4.5),
+    key(KeyV, "V", 5.25, 4.5),
+    key(KeyB, "B", 6.25, 4.5),
+    key(KeyN, "N", 7.25, 4.5),
+    key(KeyM, "M", 8.25, 4.5),
+    key(Comma, ",", 9.25, 4.5),
+    key(Period, ".", 10.25, 4.5),
+    key(Slash, "/", 11.25, 4.5),
+    keyboard(ShiftRight, "Shift", 12.25, 4.5, 2.75, 1.),
+    key(ArrowUp, "↑", 16.5, 4.5),
+    key(Numpad1, "1", 19., 4.5),
+    key(Numpad2, "2", 20., 4.5),
+    key(Numpad3, "3", 21., 4.5),
+    keyboard(NumpadEnter, "Ent", 22., 4.5, 1., 2.),
+    keyboard(ControlLeft, "Ctrl", 0., 5.5, 1.25, 1.),
+    keyboard(SuperLeft, "Super", 1.25, 5.5, 1.25, 1.),
+    keyboard(AltLeft, "Alt", 2.5, 5.5, 1.25, 1.),
+    keyboard(Space, "Space", 3.75, 5.5, 6.25, 1.),
+    keyboard(AltRight, "Alt", 10., 5.5, 1.25, 1.),
+    keyboard(SuperRight, "Super", 11.25, 5.5, 1.25, 1.),
+    keyboard(ContextMenu, "Menu", 12.5, 5.5, 1.25, 1.),
+    keyboard(ControlRight, "Ctrl", 13.75, 5.5, 1.25, 1.),
+    key(ArrowLeft, "←", 15.5, 5.5),
+    key(ArrowDown, "↓", 16.5, 5.5),
+    key(ArrowRight, "→", 17.5, 5.5),
+    keyboard(Numpad0, "0", 19., 5.5, 2., 1.),
+    key(NumpadDecimal, ".", 21., 5.5),
+];
+
+pub(super) const MOUSE: &[PhysicalKey] = &[
+    PhysicalKey {
+        input: Some(MouseLeft),
+        label: "Left",
+        rect: [30., 5., 16., 40.],
+    },
+    PhysicalKey {
+        input: Some(MouseMiddle),
+        label: "Middle",
+        rect: [46., 5., 8., 40.],
+    },
+    PhysicalKey {
+        input: Some(MouseRight),
+        label: "Right",
+        rect: [54., 5., 16., 40.],
+    },
+    PhysicalKey {
+        input: Some(MouseMotion),
+        label: "Motion",
+        rect: [30., 45., 40., 50.],
+    },
+    PhysicalKey {
+        input: Some(MouseForward),
+        label: "Forward",
+        rect: [17., 45., 13., 25.],
+    },
+    PhysicalKey {
+        input: Some(MouseBack),
+        label: "Back",
+        rect: [17., 70., 13., 25.],
+    },
+];
+
+pub(super) fn key_label(input: Key) -> &'static str {
+    match input {
+        ShiftLeft => "Left Shift",
+        ShiftRight => "Right Shift",
+        AltLeft => "Left Alt",
+        AltRight => "Right Alt",
+        ControlLeft => "Left Ctrl",
+        ControlRight => "Right Ctrl",
+        SuperLeft => "Left Super",
+        SuperRight => "Right Super",
+        ArrowUp => "Up",
+        ArrowDown => "Down",
+        ArrowLeft => "Left Arrow",
+        ArrowRight => "Right Arrow",
+        Numpad0 => "Numpad 0",
+        Numpad1 => "Numpad 1",
+        Numpad2 => "Numpad 2",
+        Numpad3 => "Numpad 3",
+        Numpad4 => "Numpad 4",
+        Numpad5 => "Numpad 5",
+        Numpad6 => "Numpad 6",
+        Numpad7 => "Numpad 7",
+        Numpad8 => "Numpad 8",
+        Numpad9 => "Numpad 9",
+        NumpadAdd => "Numpad +",
+        NumpadSubtract => "Numpad -",
+        NumpadMultiply => "Numpad *",
+        NumpadDivide => "Numpad /",
+        NumpadDecimal => "Numpad .",
+        NumpadEnter => "Numpad Enter",
+        MouseLeft => "Mouse Left",
+        MouseMiddle => "Mouse Middle",
+        MouseRight => "Mouse Right",
+        MouseForward => "Mouse Forward",
+        MouseBack => "Mouse Back",
+        MouseMotion => "Mouse Motion",
+        _ => {
+            KEYBOARD
+                .iter()
+                .find(|key| key.input == Some(input))
+                .expect("configured key has a keyboard position")
+                .label
+        }
+    }
+}

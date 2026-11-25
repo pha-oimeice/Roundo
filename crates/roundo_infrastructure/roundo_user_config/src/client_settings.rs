@@ -28,6 +28,7 @@ pub struct ClientSettingsConfig {
     pub world: ClientWorldSettingsConfig,
     /// Client-owned resource identities, independent of editable display names.
     pub input_slots: BTreeMap<String, ClientInputSlotConfig>,
+    pub input_categories: Vec<ClientInputCategoryConfig>,
     /// Physical inputs reference existing slots; a slot may have many bindings.
     pub input_bindings: Vec<ClientInputBindingConfig>,
 }
@@ -103,6 +104,12 @@ pub struct ClientInputSlotConfig {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ClientInputCategoryConfig {
+    pub name: String,
+    pub actions: Vec<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ClientInputBindingConfig {
     pub slot: String,
     pub key: ClientInputKey,
@@ -174,9 +181,61 @@ pub enum ClientInputKey {
     ArrowDown,
     ArrowRight,
     F1,
+    F2,
+    F3,
+    F4,
+    F5,
+    F6,
+    F7,
+    F8,
+    F9,
+    F10,
+    F11,
+    F12,
+    PrintScreen,
+    ScrollLock,
+    Pause,
+    Minus,
+    Equal,
+    BracketLeft,
+    BracketRight,
+    Backslash,
+    Semicolon,
+    Quote,
+    Comma,
+    Period,
+    Slash,
+    SuperLeft,
+    SuperRight,
+    ContextMenu,
+    Insert,
+    Home,
+    PageUp,
+    Delete,
+    End,
+    PageDown,
+    NumLock,
+    NumpadDivide,
+    NumpadMultiply,
+    NumpadSubtract,
+    NumpadAdd,
+    NumpadEnter,
+    NumpadDecimal,
+    Numpad0,
+    Numpad1,
+    Numpad2,
+    Numpad3,
+    Numpad4,
+    Numpad5,
+    Numpad6,
+    Numpad7,
+    Numpad8,
+    Numpad9,
     MouseLeft,
     MouseRight,
     MouseMiddle,
+    MouseBack,
+    MouseForward,
     MouseMotion,
 }
 

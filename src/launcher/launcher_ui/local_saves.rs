@@ -4,6 +4,7 @@ use super::{
     directory::{DirectoryDisclosure, directory_scene, toggle_directory_details},
     form::{TextField, set_button_enabled},
     launcher_label_with_font,
+    search::{SearchQuery, search_field_scene},
 };
 use bevy::{
     ecs::template::FromTemplate,
@@ -32,13 +33,15 @@ pub(super) struct LocalSavesPlugin;
 impl Plugin for LocalSavesPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<LocalSession>()
-            .init_resource::<SaveFilter>()
             .add_systems(
                 Update,
                 sync_save_rows.run_if(in_state(LocalScreen::Launcher)),
             )
-            .add_systems(OnEnter(LocalScreen::Game), show_game_view)
-            .add_systems(Update, sync_game_view.run_if(in_state(LocalScreen::Game)))
+            .add_systems(OnEnter(LocalScreen::Game), show_loading_view)
+            .add_systems(
+                Update,
+                sync_loading_view.run_if(in_state(LocalScreen::Game)),
+            )
             .add_systems(OnExit(LocalScreen::Game), restore_launcher);
     }
 }
@@ -59,9 +62,6 @@ struct ActiveLocalSave {
 
 #[derive(Resource, Default)]
 struct LocalSession(Option<ActiveLocalSave>);
-
-#[derive(Resource, Default)]
-struct SaveFilter(String);
 
 #[derive(Clone, Component, Default)]
 struct SaveFilterInput;
@@ -103,17 +103,11 @@ struct CreateSaveButton;
 struct SaveRowAction(Entity);
 
 #[derive(Clone, Component, Default)]
-struct LocalGameView;
+struct LocalLoadingView;
 
-#[derive(Clone, Component, Default)]
-struct LocalGameStatus;
-
-#[derive(Clone, Component, Default)]
-struct ResumeGameButton;
-
-pub(super) fn local_save_list_scene(font: Handle<Font>) -> impl Scene {
+pub(super) fn local_save_list_scene(font: Handle<Font>, emoji_font: Handle<Font>) -> impl Scene {
     directory_scene(
-        font,
+        font.clone(),
         bsn! { SaveList },
         bsn! {
             AddSaveButton
@@ -122,29 +116,17 @@ pub(super) fn local_save_list_scene(font: Handle<Font>) -> impl Scene {
             on(toggle_save_form)
         },
         bsn! { SaveFormSlot },
-        bsn! {
-            @FeathersTextInput
-            AccessibleLabel("Filter saves by name")
-            SaveFilterInput
-            on(update_save_filter)
-        },
+        search_field_scene(
+            font,
+            emoji_font,
+            "Filter saves by name",
+            bsn! { SaveFilterInput },
+        ),
     )
 }
 
-fn update_save_filter(
-    _: On<TextEditChange>,
-    input: Single<&EditableText, With<SaveFilterInput>>,
-    mut filter: ResMut<SaveFilter>,
-) {
-    let needle = input.value().to_string().to_lowercase();
-    if filter.0 != needle {
-        filter.0 = needle;
-    }
-}
-
 fn sync_save_rows(
-    filter: Res<SaveFilter>,
-    filter_input: Single<Entity, With<SaveFilterInput>>,
+    filter: Single<(Entity, Ref<SearchQuery>), With<SaveFilterInput>>,
     mut rows: Query<(
         Entity,
         Ref<LocalSave>,
@@ -156,6 +138,7 @@ fn sync_save_rows(
     parents: Query<&ChildOf>,
     mut focus: ResMut<InputFocus>,
 ) {
+    let (filter_input, filter) = filter.into_inner();
     for (row, save, fields, mut node, mut visibility) in &mut rows {
         if save.is_changed() {
             labels.get_mut(fields.title).expect("save title").0 = save.name.clone();
@@ -164,7 +147,7 @@ fn sync_save_rows(
             continue;
         }
 
-        let matches = filter.0.is_empty() || save.name.to_lowercase().contains(&filter.0);
+        let matches = filter.matches(&save.name);
         let (display, row_visibility) = if matches {
             (Display::Flex, Visibility::Inherited)
         } else {
@@ -179,7 +162,7 @@ fn sync_save_rows(
                     .iter_ancestors(focused)
                     .any(|ancestor| ancestor == row)
             {
-                focus.set(*filter_input, FocusCause::Auto);
+                focus.set(filter_input, FocusCause::Auto);
             }
         }
     }
@@ -466,7 +449,7 @@ fn load_save(
     }
 }
 
-fn show_game_view(
+fn show_loading_view(
     session: Res<LocalSession>,
     saves: Query<&LocalSave>,
     mut launcher: Single<(&mut Node, &mut Visibility), With<LauncherRoot>>,
@@ -488,7 +471,7 @@ fn show_game_view(
     let title = format!("Current save: {}", save.name);
     let font = font.0.clone();
     commands.spawn_scene(bsn! {
-        LocalGameView
+        LocalLoadingView
         TabGroup
         Node { position_type: PositionType::Absolute, top: px(24), right: px(24), flex_direction: FlexDirection::Column, row_gap: px(8), padding: {UiRect::all(px(12))} }
         BackgroundColor(SIDEBAR)
@@ -496,63 +479,26 @@ fn show_game_view(
             @launcher_label_with_font(font.clone(), title, 18.0)
             --
             @launcher_label_with_font(font.clone(), "Generating terrain…", 16.0)
-            LocalGameStatus
-            --
-            @FeathersButton { @caption: bsn! { @caption("Resume Game") }, @variant: ButtonVariant::Primary }
-            InheritableFont { font: {font.clone()}, font_size: FontSize::Px(16.0) }
-            ResumeGameButton
-            Node { display: Display::None }
-            Visibility::Hidden
-            on(resume_game)
             --
             @FeathersButton { @caption: bsn! { @caption("Back to Launcher") } }
             InheritableFont { font: {font.clone()}, font_size: FontSize::Px(16.0) }
             AutoFocus
-            on(|_: On<Activate>, mut next: ResMut<NextState<LocalScreen>>| {
-                next.set(LocalScreen::Launcher);
-            })
+            on(return_to_launcher)
         ]
     });
 }
 
-fn resume_game(_: On<Activate>, mut control: ResMut<LocalControl>, mut focus: ResMut<InputFocus>) {
-    if *control == LocalControl::Menu {
-        *control = LocalControl::Playing;
-        focus.clear();
-    }
+pub(super) fn return_to_launcher(_: On<Activate>, mut next: ResMut<NextState<LocalScreen>>) {
+    next.set(LocalScreen::Launcher);
 }
 
-fn sync_game_view(
+fn sync_loading_view(
     control: Res<LocalControl>,
-    mut menu: Single<
-        (&mut Node, &mut Visibility),
-        (With<LocalGameView>, Without<ResumeGameButton>),
-    >,
-    mut resume: Single<
-        (Entity, &mut Node, &mut Visibility),
-        (With<ResumeGameButton>, Without<LocalGameView>),
-    >,
-    mut status: Single<&mut Text, With<LocalGameStatus>>,
-    mut focus: ResMut<InputFocus>,
+    mut loading: Single<(&mut Node, &mut Visibility), With<LocalLoadingView>>,
 ) {
-    if !control.is_changed() {
-        return;
-    }
-    match *control {
-        LocalControl::Playing => {
-            menu.0.display = Display::None;
-            *menu.1 = Visibility::Hidden;
-            focus.clear();
-        }
-        LocalControl::Menu => {
-            menu.0.display = Display::Flex;
-            *menu.1 = Visibility::Inherited;
-            resume.1.display = Display::Flex;
-            *resume.2 = Visibility::Inherited;
-            status.0 = "Character controls are paused".into();
-            focus.set(resume.0, FocusCause::Auto);
-        }
-        LocalControl::Loading => {}
+    if control.is_changed() && *control != LocalControl::Loading {
+        loading.0.display = Display::None;
+        *loading.1 = Visibility::Hidden;
     }
 }
 
@@ -560,12 +506,12 @@ fn restore_launcher(
     mut session: ResMut<LocalSession>,
     mut saves: Query<&mut LocalSave>,
     mut launcher: Single<(&mut Node, &mut Visibility), With<LauncherRoot>>,
-    game_view: Single<Entity, With<LocalGameView>>,
+    loading: Single<Entity, With<LocalLoadingView>>,
     add_button: Single<Entity, With<AddSaveButton>>,
     mut focus: ResMut<InputFocus>,
     mut commands: Commands,
 ) {
-    commands.entity(*game_view).despawn();
+    commands.entity(*loading).despawn();
     let active = session
         .0
         .take()

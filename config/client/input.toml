@@ -28,6 +28,15 @@ functions = ["roundo.move-backward"]
 display_name = "Look"
 functions = ["roundo.look"]
 
+# Each action (input slot ID) must occur exactly once across these groups.
+[[input_categories]]
+name = "Movement"
+actions = ["roundo.move-forward", "roundo.move-backward", "roundo.move-left", "roundo.move-right", "roundo.move-up", "roundo.move-down"]
+
+[[input_categories]]
+name = "View"
+actions = ["look"]
+
 [[input_bindings]]
 slot = "look"
 key = "mouse_motion"

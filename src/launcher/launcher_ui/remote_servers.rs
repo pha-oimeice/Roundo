@@ -3,6 +3,7 @@ use super::{
     directory::{DirectoryDisclosure, directory_scene, toggle_directory_details},
     form::{TextField, set_button_enabled},
     launcher_label_with_font,
+    search::{SearchQuery, search_field_scene},
 };
 use bevy::{
     ecs::template::FromTemplate,
@@ -72,9 +73,9 @@ struct RemoteRow {
 #[derive(Component, FromTemplate)]
 struct RemoveServer(Entity);
 
-pub(super) fn remote_server_list_scene(font: Handle<Font>) -> impl Scene {
+pub(super) fn remote_server_list_scene(font: Handle<Font>, emoji: Handle<Font>) -> impl Scene {
     directory_scene(
-        font,
+        font.clone(),
         bsn! { RemoteList },
         bsn! {
             AddServer
@@ -83,11 +84,12 @@ pub(super) fn remote_server_list_scene(font: Handle<Font>) -> impl Scene {
             on(toggle_add_form)
         },
         bsn! { FormSlot },
-        bsn! {
-            @FeathersTextInput
-            AccessibleLabel("Filter remote servers by name or address")
-            RemoteFilter
-        },
+        search_field_scene(
+            font,
+            emoji,
+            "Filter remote servers by name or address",
+            bsn! { RemoteFilter },
+        ),
     )
 }
 
@@ -294,7 +296,7 @@ fn row_scene(font: Handle<Font>, name: String, address: String) -> impl Scene {
 }
 
 fn sync_remote_rows(
-    filter: Single<(Entity, Ref<EditableText>), With<RemoteFilter>>,
+    filter: Single<(Entity, Ref<SearchQuery>), With<RemoteFilter>>,
     inputs: Query<Ref<EditableText>>,
     mut rows: Query<(Entity, Ref<RemoteRow>, &mut Node, &mut Visibility)>,
     mut labels: Query<&mut Text>,
@@ -302,7 +304,6 @@ fn sync_remote_rows(
     mut focus: ResMut<InputFocus>,
 ) {
     let (filter_entity, filter) = filter.into_inner();
-    let needle = filter.value().to_string().to_lowercase();
     for (entity, row, mut node, mut visibility) in &mut rows {
         let name = inputs.get(row.name).expect("remote name field");
         let address = inputs.get(row.address).expect("remote address field");
@@ -320,9 +321,7 @@ fn sync_remote_rows(
         if label.0 != title {
             label.0 = title.to_owned();
         }
-        let matches = needle.is_empty()
-            || name.to_lowercase().contains(&needle)
-            || address.to_lowercase().contains(&needle);
+        let matches = filter.matches(&name) || filter.matches(&address);
         let (display, row_visibility) = if matches {
             (Display::Flex, Visibility::Inherited)
         } else {

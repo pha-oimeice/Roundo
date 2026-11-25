@@ -48,14 +48,7 @@ impl Function {
 
 #[derive(Resource)]
 pub(super) struct LocalBindings {
-    slots: BTreeMap<String, Slot>,
     actions: BTreeMap<Function, Vec<Binding>>,
-}
-
-struct Slot {
-    name: String,
-    functions: BTreeSet<Function>,
-    bindings: Vec<Binding>,
 }
 
 impl LocalBindings {
@@ -67,22 +60,15 @@ impl LocalBindings {
                 .iter()
                 .map(|function| Function::resolve(function))
                 .collect::<Result<_, _>>()?;
-            slots.insert(
-                id.clone(),
-                Slot {
-                    name: slot.display_name.clone(),
-                    functions,
-                    bindings: Vec::new(),
-                },
-            );
+            slots.insert(id, (functions, Vec::new()));
         }
 
         for edge in &settings.input_bindings {
-            let slot = slots
+            let (functions, bindings): &mut (BTreeSet<_>, Vec<_>) = slots
                 .get_mut(&edge.slot)
                 .ok_or_else(|| format!("Input binding references unknown slot `{}`", edge.slot))?;
             let binding = physical_binding(edge.key);
-            for &function in &slot.functions {
+            for &function in functions.iter() {
                 if (function == Function::Look) != (edge.key == ClientInputKey::MouseMotion) {
                     return Err(format!(
                         "Input `{binding}` in slot `{}` is not valid for function `{}`",
@@ -91,50 +77,30 @@ impl LocalBindings {
                     ));
                 }
             }
-            if !slot.bindings.contains(&binding) {
-                slot.bindings.push(binding);
+            if bindings.contains(&binding) {
+                return Err(format!(
+                    "Duplicate input `{binding}` in slot `{}`",
+                    edge.slot
+                ));
             }
+            bindings.push(binding);
         }
 
         let mut actions: BTreeMap<_, Vec<_>> = BTreeMap::new();
-        for slot in slots.values() {
-            for &function in &slot.functions {
+        for (functions, inputs) in slots.into_values() {
+            for function in functions {
                 if function == Function::DetachedDown {
                     continue;
                 }
                 let bindings = actions.entry(function).or_default();
-                for &binding in &slot.bindings {
+                for &binding in &inputs {
                     if !bindings.contains(&binding) {
                         bindings.push(binding);
                     }
                 }
             }
         }
-        Ok(Self { slots, actions })
-    }
-
-    pub(super) fn control_rows(&self) -> impl Iterator<Item = String> + '_ {
-        self.slots.values().map(|slot| {
-            let functions = slot
-                .functions
-                .iter()
-                .map(|function| function.label())
-                .collect::<Vec<_>>()
-                .join(" / ");
-            let keys = slot
-                .bindings
-                .iter()
-                .map(ToString::to_string)
-                .collect::<Vec<_>>()
-                .join(" / ");
-            let functions = if functions.is_empty() {
-                "No function assigned"
-            } else {
-                &functions
-            };
-            let keys = if keys.is_empty() { "Unbound" } else { &keys };
-            format!("{} · {functions}: {keys}", slot.name)
-        })
+        Ok(Self { actions })
     }
 
     pub(super) fn attach(&self, commands: &mut Commands, character: Entity) {
@@ -158,6 +124,21 @@ impl LocalBindings {
                 commands.spawn((binding, BindingOf(action)));
             }
         }
+    }
+}
+
+pub(super) fn refresh_character_bindings(
+    bindings: Res<LocalBindings>,
+    character: Option<Single<Entity, With<LocalCharacter>>>,
+    mut commands: Commands,
+) {
+    if bindings.is_changed()
+        && let Some(character) = character
+    {
+        commands
+            .entity(*character)
+            .despawn_related::<Actions<LocalCharacter>>();
+        bindings.attach(&mut commands, *character);
     }
 }
 
@@ -233,7 +214,7 @@ pub(super) fn sample_actions(
     intent.capturing = true;
 }
 
-fn physical_binding(key: ClientInputKey) -> Binding {
+pub(super) fn physical_binding(key: ClientInputKey) -> Binding {
     use ClientInputKey::*;
     match key {
         Digit0 => KeyCode::Digit0,
@@ -289,9 +270,61 @@ fn physical_binding(key: ClientInputKey) -> Binding {
         ArrowDown => KeyCode::ArrowDown,
         ArrowRight => KeyCode::ArrowRight,
         F1 => KeyCode::F1,
+        F2 => KeyCode::F2,
+        F3 => KeyCode::F3,
+        F4 => KeyCode::F4,
+        F5 => KeyCode::F5,
+        F6 => KeyCode::F6,
+        F7 => KeyCode::F7,
+        F8 => KeyCode::F8,
+        F9 => KeyCode::F9,
+        F10 => KeyCode::F10,
+        F11 => KeyCode::F11,
+        F12 => KeyCode::F12,
+        PrintScreen => KeyCode::PrintScreen,
+        ScrollLock => KeyCode::ScrollLock,
+        Pause => KeyCode::Pause,
+        Minus => KeyCode::Minus,
+        Equal => KeyCode::Equal,
+        BracketLeft => KeyCode::BracketLeft,
+        BracketRight => KeyCode::BracketRight,
+        Backslash => KeyCode::Backslash,
+        Semicolon => KeyCode::Semicolon,
+        Quote => KeyCode::Quote,
+        Comma => KeyCode::Comma,
+        Period => KeyCode::Period,
+        Slash => KeyCode::Slash,
+        SuperLeft => KeyCode::SuperLeft,
+        SuperRight => KeyCode::SuperRight,
+        ContextMenu => KeyCode::ContextMenu,
+        Insert => KeyCode::Insert,
+        Home => KeyCode::Home,
+        PageUp => KeyCode::PageUp,
+        Delete => KeyCode::Delete,
+        End => KeyCode::End,
+        PageDown => KeyCode::PageDown,
+        NumLock => KeyCode::NumLock,
+        NumpadDivide => KeyCode::NumpadDivide,
+        NumpadMultiply => KeyCode::NumpadMultiply,
+        NumpadSubtract => KeyCode::NumpadSubtract,
+        NumpadAdd => KeyCode::NumpadAdd,
+        NumpadEnter => KeyCode::NumpadEnter,
+        NumpadDecimal => KeyCode::NumpadDecimal,
+        Numpad0 => KeyCode::Numpad0,
+        Numpad1 => KeyCode::Numpad1,
+        Numpad2 => KeyCode::Numpad2,
+        Numpad3 => KeyCode::Numpad3,
+        Numpad4 => KeyCode::Numpad4,
+        Numpad5 => KeyCode::Numpad5,
+        Numpad6 => KeyCode::Numpad6,
+        Numpad7 => KeyCode::Numpad7,
+        Numpad8 => KeyCode::Numpad8,
+        Numpad9 => KeyCode::Numpad9,
         MouseLeft => return MouseButton::Left.into(),
         MouseRight => return MouseButton::Right.into(),
         MouseMiddle => return MouseButton::Middle.into(),
+        MouseBack => return MouseButton::Back.into(),
+        MouseForward => return MouseButton::Forward.into(),
         MouseMotion => return Binding::mouse_motion(),
     }
     .into()
