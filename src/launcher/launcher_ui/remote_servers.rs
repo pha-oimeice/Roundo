@@ -1,7 +1,8 @@
 use super::{
     LauncherFont, SIDEBAR,
     directory::{DirectoryDisclosure, directory_scene, toggle_directory_details},
-    form::{TextField, set_button_enabled},
+    form::TextField,
+    highlight::set_button_enabled,
     launcher_label_with_font,
     search::{SearchQuery, search_field_scene},
 };

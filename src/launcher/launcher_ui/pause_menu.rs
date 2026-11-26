@@ -13,7 +13,7 @@ use super::super::local_game::{LocalControl, LocalScreen};
 use super::{
     BACKGROUND, DIVIDER, LauncherFont, MenuEmojiFont, OPTION_TITLE, OptionWindow, QUIT_EMOJI,
     SIDEBAR, close_option_window, controls::ControlsCapture, local_saves::return_to_launcher,
-    menu_emoji_scene, open_option_window, primary_pointer_target_scene,
+    menu_back_pressed, menu_emoji_scene, open_option_window, primary_pointer_target_scene,
 };
 
 pub(super) const SIDEBAR_WIDTH_PX: f32 = 80.0;
@@ -195,7 +195,7 @@ fn back_from_pause_option(
 ) {
     if *control == LocalControl::Menu
         && option.0.display != Display::None
-        && (keys.just_pressed(KeyCode::Escape) || mouse.just_pressed(MouseButton::Right))
+        && menu_back_pressed(&keys, &mouse)
     {
         close_option_window(option);
         focus.set(*option_button, FocusCause::Auto);

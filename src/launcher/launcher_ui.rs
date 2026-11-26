@@ -3,7 +3,10 @@
 use bevy::{
     app::AppExit,
     camera::visibility::VisibilitySystems,
-    ecs::template::{EntityTemplate, FromTemplate, OptionTemplate},
+    ecs::{
+        message::MessageCursor,
+        template::{EntityTemplate, FromTemplate, OptionTemplate},
+    },
     feathers::{
         FeathersPlugins,
         controls::{
@@ -15,10 +18,13 @@ use bevy::{
         font_styles::InheritableFont,
         theme::UiTheme,
     },
-    input_focus::{AutoFocus, FocusCause, FocusGained, InputFocus, tab_navigation::TabGroup},
+    input_focus::{
+        AutoFocus, FocusCause, FocusGained, InputFocus, InputFocusSystems, tab_navigation::TabGroup,
+    },
     picking::{
+        PickingSystems,
         events::{PointerClick, PointerDragEnd, PointerPress, PointerRelease},
-        pointer::PointerButton,
+        pointer::{PointerAction, PointerButton, PointerId, PointerInput},
     },
     prelude::*,
     scene::{Scene, SceneList},
@@ -39,6 +45,7 @@ use super::{
 mod controls;
 mod directory;
 mod form;
+mod highlight;
 mod local_saves;
 mod pause_menu;
 mod remote_servers;
@@ -62,17 +69,38 @@ impl Plugin for LauncherUiPlugin {
             remote_servers::RemoteDirectoryPlugin,
         ))
         .insert_resource(UiTheme(create_dark_theme()))
+        .add_observer(highlight::preserve_button_cursor)
         .add_systems(PostStartup, spawn_launcher_main_menu)
+        .add_systems(
+            First,
+            reserve_secondary_click.in_set(PickingSystems::PostInput),
+        )
+        .add_systems(
+            Update,
+            back_from_launcher_panel
+                .after(controls::ControlsCapture)
+                .run_if(in_state(LocalScreen::Launcher)),
+        )
         .add_systems(OnExit(LocalScreen::Game), close_option_window)
         .add_systems(
             PostUpdate,
-            reset_hidden_option_tabs.after(VisibilitySystems::VisibilityPropagate),
+            (
+                reset_hidden_option_tabs.after(VisibilitySystems::VisibilityPropagate),
+                // Bevy derives each tab's Selected marker before focus change events.
+                highlight::paint_highlights.after(InputFocusSystems::FocusChangeEvents),
+            ),
         );
     }
 }
 
 #[derive(Clone, Component, Default)]
 struct LauncherStartPanel;
+
+#[derive(Clone, Component, Default)]
+struct LauncherStartButton;
+
+#[derive(Clone, Component, Default)]
+struct LauncherOptionButton;
 
 #[derive(Clone, Component, Default)]
 struct OptionWindow;
@@ -94,7 +122,6 @@ const SIDEBAR: Color = Color::srgb_u8(24, 32, 43);
 const DIVIDER: Color = Color::srgb_u8(58, 72, 89);
 const OPTION_TITLE: &str = "Option";
 const QUIT_EMOJI: &str = "🚪";
-const ACTIVE_TAB_BACKGROUND: Color = Color::srgb_u8(48, 66, 86);
 
 const FONT_DATA_PATH: &str = "fonts/NotoSansSC.ttf";
 const ROUNDO_TITLE_FONT_SIZE_PX: f32 = 60.0;
@@ -138,7 +165,8 @@ fn spawn_launcher_main_menu(world: &mut World) {
                     @launcher_content_slot_scene()
                     Children [
                         LauncherStartPanel
-                        Node { flex_direction: FlexDirection::Column, flex_grow: 1.0, min_height: px(0) }
+                        Node { display: Display::None, flex_direction: FlexDirection::Column, flex_grow: 1.0, min_height: px(0) }
+                        Visibility::Hidden
                         Children [ @{start} ]
                     ]
                     --
@@ -200,9 +228,9 @@ fn launcher_start_tabs_scene(font: &Handle<Font>, emoji_font: &Handle<Font>) -> 
             @launcher_tab_list_scene(#LocalTab)
             Children [
                 #LocalTab
-                @launcher_tab_header_scene(font.clone(), "Local", true, #LocalDirectory)
+                @launcher_tab_header_scene(font.clone(), "Local", #LocalDirectory)
                 --
-                @launcher_tab_header_scene(font, "Remote", false, #RemoteDirectory)
+                @launcher_tab_header_scene(font, "Remote", #RemoteDirectory)
             ]
             --
             @content_header_divider_scene()
@@ -236,18 +264,13 @@ fn launcher_tab_list_scene(initial_tab: EntityTemplate) -> impl Scene {
 fn launcher_tab_header_scene(
     font: Handle<Font>,
     title: &'static str,
-    initially_selected: bool,
     body: EntityTemplate,
 ) -> impl Scene {
-    let background = if initially_selected {
-        ACTIVE_TAB_BACKGROUND
-    } else {
-        SIDEBAR
-    };
     bsn! {
         Tab
         LauncherTabBody(body)
         FocusIndicator
+        highlight::Highlight
         Node {
             min_width: px(88),
             height: px(42), flex_shrink: 0.0,
@@ -255,7 +278,6 @@ fn launcher_tab_header_scene(
             justify_content: JustifyContent::Center,
             padding: {UiRect::horizontal(px(12))},
         }
-        BackgroundColor(background)
         Children [
             @launcher_label_with_font(font, title, LAUNCHER_TAB_FONT_SIZE_PX)
             Pickable::IGNORE
@@ -266,7 +288,7 @@ fn launcher_tab_header_scene(
 fn show_selected_launcher_tab_body(
     event: On<ValueChange<Option<Entity>>>,
     mut tab_lists: Query<(&Children, &mut SelectedTab), With<TabList>>,
-    mut tabs: Query<(&LauncherTabBody, &mut BackgroundColor), With<Tab>>,
+    tabs: Query<&LauncherTabBody, With<Tab>>,
     mut bodies: Query<(&mut Node, &mut Visibility), Without<Tab>>,
 ) {
     let (children, mut selection) = tab_lists.get_mut(event.source).expect("launcher tab list");
@@ -279,14 +301,12 @@ fn show_selected_launcher_tab_body(
     }
     selection.0 = Some(selected);
     for tab in children.iter() {
-        let (body, mut background) = tabs.get_mut(tab).expect("launcher tab header");
+        let body = tabs.get(tab).expect("launcher tab header");
         let (mut node, mut visibility) = bodies.get_mut(body.0).expect("launcher tab body");
         if tab == selected {
-            background.0 = ACTIVE_TAB_BACKGROUND;
             node.display = Display::Flex;
             *visibility = Visibility::Inherited;
         } else {
-            background.0 = SIDEBAR;
             node.display = Display::None;
             *visibility = Visibility::Hidden;
         }
@@ -343,17 +363,17 @@ fn option_tabs_scene(
                 on(reveal_focused_tab)
                 Children [
                     #GeneralTab
-                    @launcher_tab_header_scene(font.clone(), "General", true, #GeneralSettings)
+                    @launcher_tab_header_scene(font.clone(), "General", #GeneralSettings)
                     --
-                    @launcher_tab_header_scene(font.clone(), "Display", false, #DisplaySettings)
+                    @launcher_tab_header_scene(font.clone(), "Display", #DisplaySettings)
                     --
-                    @launcher_tab_header_scene(font.clone(), "Graphics", false, #GraphicSettings)
+                    @launcher_tab_header_scene(font.clone(), "Graphics", #GraphicSettings)
                     --
-                    @launcher_tab_header_scene(font.clone(), "Audio", false, #AudioSettings)
+                    @launcher_tab_header_scene(font.clone(), "Audio", #AudioSettings)
                     --
-                    @launcher_tab_header_scene(font.clone(), "Controls", false, #ControlSettings)
+                    @launcher_tab_header_scene(font.clone(), "Controls", #ControlSettings)
                     --
-                    @launcher_tab_header_scene(font, "Misc", false, #MiscSettings)
+                    @launcher_tab_header_scene(font, "Misc", #MiscSettings)
                 ]
                 --
                 @FeathersScrollbar { @target: #OptionTabList, @orientation: ControlOrientation::Horizontal }
@@ -516,9 +536,11 @@ fn launcher_navigation_sidebar_scene(font: Handle<Font>) -> impl Scene {
             }
             Children [
                 @launcher_navigation_button_scene("Start")
+                LauncherStartButton
                 on(show_launcher_start)
                 --
                 @launcher_navigation_button_scene(OPTION_TITLE)
+                LauncherOptionButton
                 on(open_option_window)
             ]
         ]
@@ -606,6 +628,65 @@ fn quit_confirmation_dialog_scene(
     }
 }
 
+fn reserve_secondary_click(
+    mut pointer_inputs: ResMut<Messages<PointerInput>>,
+    mut cursor: Local<MessageCursor<PointerInput>>,
+) {
+    let is_mouse_secondary = |input: &PointerInput| {
+        input.pointer_id == PointerId::Mouse
+            && matches!(
+                input.action,
+                PointerAction::Press(PointerButton::Secondary)
+                    | PointerAction::Release(PointerButton::Secondary)
+            )
+    };
+    let mut scan = cursor.clone();
+    if scan.read(&pointer_inputs).any(is_mouse_secondary) {
+        // Leave raw mouse input for Back and rebinding. Requeue only new picking input.
+        let inputs: Vec<_> = cursor
+            .read(&pointer_inputs)
+            .filter(|input| !is_mouse_secondary(input))
+            .cloned()
+            .collect();
+        pointer_inputs.clear();
+        pointer_inputs.write_batch(inputs);
+    }
+    cursor.clear(&pointer_inputs);
+}
+
+fn menu_back_pressed(keys: &ButtonInput<KeyCode>, mouse: &ButtonInput<MouseButton>) -> bool {
+    keys.just_pressed(KeyCode::Escape) || mouse.just_pressed(MouseButton::Right)
+}
+
+fn back_from_launcher_panel(
+    keys: Res<ButtonInput<KeyCode>>,
+    mouse: Res<ButtonInput<MouseButton>>,
+    dialog: Option<Single<Entity, With<QuitDialog>>>,
+    option: Single<(&mut Node, &mut Visibility), With<OptionWindow>>,
+    mut start: Single<
+        (&mut Node, &mut Visibility),
+        (With<LauncherStartPanel>, Without<OptionWindow>),
+    >,
+    option_button: Single<Entity, With<LauncherOptionButton>>,
+    start_button: Single<Entity, With<LauncherStartButton>>,
+    mut focus: ResMut<InputFocus>,
+    mut commands: Commands,
+) {
+    if !menu_back_pressed(&keys, &mouse) {
+        return;
+    }
+    if let Some(dialog) = dialog {
+        commands.trigger(RequestClose { source: *dialog });
+    } else if option.0.display != Display::None {
+        close_option_window(option);
+        focus.set(*option_button, FocusCause::Auto);
+    } else if start.0.display != Display::None {
+        start.0.display = Display::None;
+        *start.1 = Visibility::Hidden;
+        focus.set(*start_button, FocusCause::Auto);
+    }
+}
+
 fn request_quit_dialog_close_on_cancel(event: On<Activate>, mut commands: Commands) {
     commands.trigger(RequestClose {
         source: event.entity,
@@ -616,9 +697,14 @@ fn dismiss_quit_dialog_and_restore_button_focus(
     mut event: On<RequestClose>,
     mut commands: Commands,
     mut focus: ResMut<InputFocus>,
+    mut keys: ResMut<ButtonInput<KeyCode>>,
+    mut mouse: ResMut<ButtonInput<MouseButton>>,
     dialog: Single<(Entity, &QuitDialog)>,
 ) {
     event.propagate(false);
+    // Feathers can dismiss the dialog in PreUpdate; do not also back out of its panel.
+    keys.clear_just_pressed(KeyCode::Escape);
+    mouse.clear_just_pressed(MouseButton::Right);
     let (dialog, opener) = *dialog;
     commands.entity(dialog).try_despawn();
     focus.set(opener.0, FocusCause::Auto);

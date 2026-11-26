@@ -16,7 +16,8 @@ use bevy::{
     picking::{events::PointerClick, pointer::PointerButton},
     prelude::*,
     scene::Scene,
-    ui::{FixedNode, OverrideClip},
+    text::{FontSourceTemplate, Underline},
+    ui::{FixedNode, InteractionDisabled, OverrideClip},
     ui_widgets::{Activate, Button, SelectedTab, Tab, TabActivation, TabList, ValueChange},
 };
 use bevy_enhanced_input::prelude::Binding;
@@ -28,13 +29,20 @@ use super::super::{
     local_input::{LocalBindings, physical_binding},
 };
 use super::{
-    ACTIVE_TAB_BACKGROUND, BACKGROUND, DIVIDER, LauncherFont, SIDEBAR, launcher_label_with_font,
-    launcher_scroll_area_scene, primary_pointer_target_scene,
+    BACKGROUND, DIVIDER, LauncherFont,
+    highlight::{Highlight, set_button_enabled},
+    launcher_label_with_font, launcher_scroll_area_scene, primary_pointer_target_scene,
     search::{SearchQuery, search_field_scene},
 };
 
 mod device_layout;
-use device_layout::{KEYBOARD, MOUSE, PhysicalKey, key_label};
+mod mouse_diagram;
+use device_layout::{KEYBOARD, PhysicalKey, key_label};
+
+const DEVICE_WINDOW_ASPECT: f32 = 45.5 / 14.95;
+const BOUND_KEY_BORDER: Color = Color::srgb_u8(89, 113, 143);
+const UNBOUND_KEY_BORDER: Color = Color::srgb_u8(44, 56, 71);
+const UNBOUND_KEY_TEXT: Color = Color::srgb_u8(134, 148, 166);
 
 pub(super) struct ControlsPlugin;
 
@@ -94,6 +102,9 @@ struct DevicePanel(Device);
 struct DeviceKey(Option<Key>);
 
 #[derive(Clone, Component, Default)]
+struct DeviceKeyLabel;
+
+#[derive(Clone, Component, Default)]
 struct ControlsPage;
 
 #[derive(Clone, Component, Default)]
@@ -101,6 +112,9 @@ struct ActionSearch;
 
 #[derive(Clone, Component, Default)]
 struct BindingRows;
+
+#[derive(Clone, Component, Default)]
+struct BindingRow;
 
 #[derive(Clone, Component, Default)]
 struct AddBinding;
@@ -142,6 +156,7 @@ pub(super) fn controls_scene(
     let bindings = launcher_scroll_area_scene(bsn_list! {
         BindingRows
         Node { flex_direction: FlexDirection::Row, flex_wrap: FlexWrap::Wrap, flex_shrink: 0.0, column_gap: px(6), row_gap: px(6) }
+        Children [ @add_binding_button_scene(font.clone()) ]
     });
     bsn! {
         ControlsPage
@@ -154,6 +169,8 @@ pub(super) fn controls_scene(
             }
             BorderColor::all(DIVIDER)
             Children [
+                @controls_heading_scene(font.clone(), "Inputs")
+                --
                 @{action_list}
                 on(clear_action_on_blank)
                 --
@@ -164,7 +181,9 @@ pub(super) fn controls_scene(
             Children [
                 Node {
                     flex_direction: FlexDirection::Column, row_gap: px(6),
-                    height: percent(58), min_height: px(0), padding: {UiRect::all(px(6))},
+                    width: percent(100), max_width: vh(50.0 * DEVICE_WINDOW_ASPECT),
+                    aspect_ratio: {Some(DEVICE_WINDOW_ASPECT)}, flex_shrink: 0.0,
+                    min_height: px(0), padding: {UiRect::all(px(6))},
                     border: {UiRect::all(px(1))},
                 }
                 BorderColor::all(DIVIDER)
@@ -179,25 +198,25 @@ pub(super) fn controls_scene(
                         @device_tab(font.clone(), Device::Gamepad, "Gamepad")
                     ]
                     --
-                    @device_panel(font.clone(), Device::Keyboard, KEYBOARD)
+                    @device_panel(Device::Keyboard)
+                    Children [ {KEYBOARD.iter().map(|&key| key_scene(font.clone(), key)).collect::<Vec<_>>()} ]
                     --
-                    @device_panel(font.clone(), Device::Mouse, MOUSE)
+                    @device_panel(Device::Mouse)
+                    Children [ @mouse_diagram::scene() ]
                     --
-                    @device_panel(font.clone(), Device::Gamepad, &[])
+                    @device_panel(Device::Gamepad)
                 ]
                 --
-                Node { flex_grow: 1.0, flex_basis: px(0), min_height: px(0), column_gap: px(8), align_items: AlignItems::Stretch }
+                Node {
+                    flex_grow: 1.0, flex_basis: px(0), min_height: px(0),
+                    flex_direction: FlexDirection::Column, row_gap: px(6),
+                    padding: {UiRect::all(px(6))}, border: {UiRect::all(px(1))},
+                }
+                BorderColor::all(DIVIDER)
                 Children [
-                    @{bindings}
+                    @controls_heading_scene(font.clone(), "Bindings")
                     --
-                    @control_button("+")
-                    AccessibleLabel("Add an input binding")
-                    AddBinding
-                    Node { display: Display::None, width: px(38), height: px(34), align_self: AlignSelf::FlexStart }
-                    Visibility::Hidden
-                    BackgroundColor(SIDEBAR)
-                    on(begin_add)
-                    Children [ @control_label(font.clone(), "+", 22.0) ]
+                    @{bindings}
                 ]
                 --
                 @launcher_label_with_font(font.clone(), "", 13.0)
@@ -209,15 +228,31 @@ pub(super) fn controls_scene(
     }
 }
 
+fn controls_heading_scene(font: Handle<Font>, title: &'static str) -> impl Scene {
+    bsn! {
+        @control_label(font, title, 16.0)
+        Underline
+        Node { align_self: AlignSelf::FlexStart, flex_shrink: 0.0 }
+    }
+}
+
 fn control_button(name: impl Into<String>) -> impl Scene {
+    control_button_with_hit_insets(name, UiRect::ZERO)
+}
+
+fn control_button_with_hit_insets(name: impl Into<String>, insets: UiRect) -> impl Scene {
     bsn! {
         Button
         TabIndex(0)
         FocusIndicator
+        Highlight
         AccessibleLabel({name.into()})
         Pickable::IGNORE
         Node { align_items: AlignItems::Center, justify_content: JustifyContent::Center, flex_shrink: 0.0 }
-        Children [ @primary_pointer_target_scene() ]
+        Children [
+            @primary_pointer_target_scene()
+            Node { left: {insets.left}, right: {insets.right}, top: {insets.top}, bottom: {insets.bottom} }
+        ]
     }
 }
 
@@ -264,12 +299,11 @@ fn action_scene(font: Handle<Font>, id: String, name: String) -> impl Scene {
     bsn! {
         @control_button(name.clone())
         ActionRow(id)
+        Highlight { idle: Color::NONE }
         Node {
             height: px(30), padding: {UiRect::horizontal(px(6))}, justify_content: JustifyContent::FlexStart,
-            border: {UiRect::all(px(1))}, border_radius: {BorderRadius::all(px(12))},
-            overflow: {Overflow::clip()},
+            border_radius: {BorderRadius::all(px(12))}, overflow: {Overflow::clip()},
         }
-        BorderColor::all(Color::NONE)
         on(toggle_action)
         Children [ @control_label(font, name, 15.0) ]
     }
@@ -289,20 +323,16 @@ fn device_tab(font: Handle<Font>, device: Device, title: &'static str) -> impl S
         Tab
         device
         FocusIndicator
+        Highlight
         Node {
             height: px(27), padding: {UiRect::horizontal(px(6))},
             align_items: AlignItems::Center, justify_content: JustifyContent::Center,
         }
-        BackgroundColor(SIDEBAR)
         Children [ @control_label(font, title, 12.0) ]
     }
 }
 
-fn device_panel(font: Handle<Font>, device: Device, keys: &[PhysicalKey]) -> impl Scene {
-    let keys = keys
-        .iter()
-        .map(|key| key_scene(font.clone(), *key))
-        .collect::<Vec<_>>();
+fn device_panel(device: Device) -> impl Scene {
     let display = if device == Device::Keyboard {
         Display::Flex
     } else {
@@ -311,7 +341,6 @@ fn device_panel(font: Handle<Font>, device: Device, keys: &[PhysicalKey]) -> imp
     bsn! {
         DevicePanel(device)
         Node { display, flex_grow: 1.0, flex_basis: px(0), min_width: px(0), min_height: px(0), overflow: {Overflow::clip()} }
-        Children [ {keys} ]
     }
 }
 
@@ -330,19 +359,26 @@ fn key_scene(font: Handle<Font>, key: PhysicalKey) -> impl Scene {
         overflow: Overflow::clip(),
         ..Default::default()
     };
-    let interactive = key.input.map(|input| {
-        bsn! {
-            @control_button(key_label(input))
-            DeviceKey({Some(input)})
+    let behavior: Box<dyn Scene> = if let Some(input) = key.input {
+        Box::new(bsn! {
+            @control_button_with_hit_insets(key_label(input), UiRect::all(px(-1)))
             on(toggle_key_filter)
-        }
-    });
+        })
+    } else {
+        Box::new(bsn! { Highlight })
+    };
     bsn! {
-        @{interactive}
+        @{behavior}
+        DeviceKey({key.input})
         node
-        BackgroundColor(SIDEBAR)
         BorderColor::all(DIVIDER)
-        Children [ @control_label(font, key.label, 10.0) ]
+        Children [
+            Text({key.label.to_owned()})
+            TextFont { font: {FontSourceTemplate::Handle(font.into())}, font_size: FontSize::Px(10.0) }
+            TextLayout::no_wrap()
+            Pickable::IGNORE
+            DeviceKeyLabel
+        ]
     }
 }
 
@@ -397,15 +433,10 @@ fn toggle_category(
     }
 }
 
-fn toggle_action(
-    event: On<Activate>,
-    rows: Query<&ActionRow>,
-    config: Res<ClientConfigStore>,
-    mut state: ResMut<ControlsState>,
-) {
+fn toggle_action(event: On<Activate>, rows: Query<&ActionRow>, mut state: ResMut<ControlsState>) {
     let id = &rows.get(event.entity).expect("action row").0;
     if state.action.as_ref() == Some(id) {
-        clear_action(&mut state, config.settings());
+        clear_action(&mut state);
     } else {
         state.action = Some(id.clone());
         state.filtered_collapsed.clear();
@@ -413,25 +444,15 @@ fn toggle_action(
     }
 }
 
-fn clear_action_on_blank(
-    event: On<PointerClick>,
-    config: Res<ClientConfigStore>,
-    mut state: ResMut<ControlsState>,
-) {
+fn clear_action_on_blank(event: On<PointerClick>, mut state: ResMut<ControlsState>) {
     if event.button == PointerButton::Primary && state.action.is_some() {
-        clear_action(&mut state, config.settings());
+        clear_action(&mut state);
     }
 }
 
-fn clear_action(state: &mut ControlsState, settings: &ClientSettingsConfig) {
+fn clear_action(state: &mut ControlsState) {
     state.action = None;
     state.filtered_collapsed.clear();
-    if state
-        .key
-        .is_some_and(|key| !settings.input_bindings.iter().any(|edge| edge.key == key))
-    {
-        state.key = None;
-    }
     state.error.clear();
 }
 
@@ -461,26 +482,13 @@ fn is_action_list_filtered(state: &ControlsState, search: &SearchQuery) -> bool 
 
 fn toggle_key_filter(
     event: On<Activate>,
-    keys: Query<&DeviceKey>,
-    config: Res<ClientConfigStore>,
+    keys: Query<(&DeviceKey, Has<InteractionDisabled>)>,
     mut state: ResMut<ControlsState>,
 ) {
-    let key = keys
-        .get(event.entity)
-        .expect("device key")
-        .0
-        .expect("interactive physical key");
-    if state.key == Some(key) {
-        state.key = None;
-        state.filtered_collapsed.clear();
-    } else if state.action.is_some()
-        || config
-            .settings()
-            .input_bindings
-            .iter()
-            .any(|edge| edge.key == key)
-    {
-        state.key = Some(key);
+    let (key, disabled) = keys.get(event.entity).expect("device key");
+    if !disabled {
+        let key = key.0.expect("interactive physical key");
+        state.key = (state.key != Some(key)).then_some(key);
         state.filtered_collapsed.clear();
     }
 }
@@ -517,19 +525,21 @@ fn capture_binding(
     let Some(capture) = state.capture.as_ref() else {
         return;
     };
+    // Back shortcuts belong to the capture overlay, even while it is arming.
+    mouse.clear_just_pressed(MouseButton::Right);
+    let escape = keyboard.clear_just_pressed(KeyCode::Escape);
     if !capture.ready {
         state.capture.as_mut().expect("capture started").ready = true;
         return;
     }
-    // A captured right click must not also close the Option window.
-    mouse.clear_just_pressed(MouseButton::Right);
-    let replacement = if keyboard.clear_just_pressed(KeyCode::Escape) {
+    let replacement = if escape {
         None
     } else {
         let key = KEYBOARD
             .iter()
-            .chain(MOUSE)
             .filter_map(|key| key.input)
+            .chain(mouse_diagram::physical_keys())
+            .chain([Key::MouseMotion])
             .find(|key| match physical_binding(*key) {
                 Binding::Keyboard { key, .. } => keyboard.just_pressed(key),
                 Binding::MouseButton { button, .. } => mouse.just_released(button),
@@ -575,23 +585,29 @@ fn update_controls(
     ),
     font: Res<LauncherFont>,
     mut elements: Query<(Entity, &mut Node, &mut Visibility)>,
-    actions: Query<(Entity, &ActionRow, &mut BorderColor)>,
+    actions: Query<(Entity, &ActionRow)>,
     layout: (
         Query<(Entity, &Category)>,
         Query<(Entity, &ActionGroup)>,
         Query<(Entity, &DevicePanel)>,
     ),
     mut indicators: Query<(&CategoryIndicator, &mut Text)>,
-    mut tabs: Query<(&Device, &mut BackgroundColor), Without<DeviceKey>>,
-    mut keys: Query<
-        (&DeviceKey, &mut BackgroundColor, &mut BorderColor),
-        (Without<Device>, Without<ActionRow>),
-    >,
+    mut keys: Query<(
+        Entity,
+        &DeviceKey,
+        Has<InteractionDisabled>,
+        &mut Highlight,
+        &mut BorderColor,
+    )>,
+    mut key_labels: Query<(&ChildOf, &mut TextColor), With<DeviceKeyLabel>>,
     mut debug_texts: ParamSet<(
         Single<&mut Text, (With<BindingStatus>, Without<CategoryIndicator>)>,
         Single<&mut Text, (With<CapturePrompt>, Without<CategoryIndicator>)>,
     )>,
-    rows: Single<Entity, With<BindingRows>>,
+    rows: (
+        Single<Entity, With<BindingRows>>,
+        Query<Entity, With<BindingRow>>,
+    ),
     buttons: (
         Single<Entity, With<AddBinding>>,
         Single<Entity, With<CaptureOverlay>>,
@@ -611,6 +627,16 @@ fn update_controls(
     }
     let settings = config.settings();
     let (add, overlay) = (*buttons.0, *buttons.1);
+    let bound_keys = settings
+        .input_bindings
+        .iter()
+        .filter(|edge| state.action.as_deref().is_none_or(|id| id == edge.slot))
+        .map(|edge| edge.key)
+        .collect::<BTreeSet<_>>();
+    if state.key.is_some_and(|key| !bound_keys.contains(&key)) {
+        state.key = None;
+        state.filtered_collapsed.clear();
+    }
     let selected = state.action.as_deref();
     let filtered = is_action_list_filtered(&state, &search);
     let collapsed = if filtered {
@@ -628,14 +654,9 @@ fn update_controls(
                         .any(|edge| edge.slot == id && edge.key == key)
                 }))
     };
-    for (entity, action, mut border) in actions {
+    for (entity, action) in actions {
         let (_, mut node, mut visibility) = elements.get_mut(entity).expect("action node");
         show_node(&mut node, &mut visibility, matches(&action.0));
-        *border = BorderColor::all(if selected == Some(action.0.as_str()) {
-            Color::WHITE
-        } else {
-            Color::NONE
-        });
     }
     for (entity, category) in &layout.0 {
         let (_, mut node, mut visibility) = elements.get_mut(entity).expect("category node");
@@ -664,44 +685,47 @@ fn update_controls(
         let (_, mut node, mut visibility) = elements.get_mut(entity).expect("device panel node");
         show_node(&mut node, &mut visibility, panel.0 == state.device);
     }
-    for (device, mut background) in &mut tabs {
-        background.0 = if *device == state.device {
-            ACTIVE_TAB_BACKGROUND
+    let is_bound = |key: &DeviceKey| key.0.is_some_and(|key| bound_keys.contains(&key));
+    for (entity, key, disabled, mut highlight, mut border) in &mut keys {
+        let bound = is_bound(key);
+        set_button_enabled(&mut commands, entity, disabled, bound);
+        highlight.selected = bound && key.0 == state.key;
+        border.set_all(if highlight.selected {
+            Color::WHITE
+        } else if bound {
+            BOUND_KEY_BORDER
         } else {
-            SIDEBAR
-        };
+            UNBOUND_KEY_BORDER
+        });
     }
-    let highlighted: BTreeSet<_> = settings
-        .input_bindings
-        .iter()
-        .filter(|edge| selected.is_none_or(|id| id == edge.slot))
-        .map(|edge| edge.key)
-        .collect();
-    for (key, mut background, mut border) in &mut keys {
-        background.0 = if key.0.is_some_and(|key| highlighted.contains(&key)) {
-            ACTIVE_TAB_BACKGROUND
-        } else {
-            SIDEBAR
-        };
-        *border = BorderColor::all(if key.0.is_some() && state.key == key.0 {
+    for (parent, mut color) in &mut key_labels {
+        let (_, key, _, _, _) = keys
+            .get(parent.parent())
+            .expect("label belongs to a device key");
+        color.0 = if is_bound(key) {
             Color::WHITE
         } else {
-            DIVIDER
-        });
+            UNBOUND_KEY_TEXT
+        };
     }
     let (_, mut node, mut visibility) = elements.get_mut(add).expect("add binding node");
     show_node(&mut node, &mut visibility, selected.is_some());
-    commands.entity(*rows).despawn_related::<Children>();
+    let (list, existing) = rows;
+    for row in &existing {
+        commands.entity(row).despawn();
+    }
     if let Some(id) = selected {
-        for edge in settings
+        let rows: Vec<_> = settings
             .input_bindings
             .iter()
             .filter(|edge| edge.slot == id && state.key.is_none_or(|key| key == edge.key))
-        {
-            commands
-                .spawn_scene(binding_row_scene(font.0.clone(), edge.key))
-                .insert(ChildOf(*rows));
-        }
+            .map(|edge| {
+                commands
+                    .spawn_scene(binding_row_scene(font.0.clone(), edge.key))
+                    .id()
+            })
+            .collect();
+        commands.entity(*list).insert_children(0, &rows);
     }
     debug_texts.p0().0.clone_from(&state.error);
     let (_, mut node, mut visibility) = elements.get_mut(overlay).expect("capture overlay node");
@@ -729,13 +753,25 @@ fn update_controls(
     }
 }
 
+fn add_binding_button_scene(font: Handle<Font>) -> impl Scene {
+    bsn! {
+        @control_button("Add an input binding")
+        AddBinding
+        Node { display: Display::None, width: px(38), height: px(34), border: {UiRect::all(px(1))} }
+        Visibility::Hidden
+        BorderColor::all(DIVIDER)
+        on(begin_add)
+        Children [ @control_label(font, "+", 22.0) ]
+    }
+}
+
 fn binding_row_scene(font: Handle<Font>, key: Key) -> impl Scene {
     let label = key_label(key);
     bsn! {
         @control_button(label)
+        BindingRow
         Node { height: px(34), padding: {UiRect::horizontal(px(10))}, border: {UiRect::all(px(1))} }
         BorderColor::all(DIVIDER)
-        BackgroundColor(SIDEBAR)
         on(move |_: On<Activate>, mut state: ResMut<ControlsState>| {
             start_capture(&mut state, Some(key));
         })

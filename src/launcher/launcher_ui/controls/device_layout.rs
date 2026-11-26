@@ -140,39 +140,6 @@ pub(super) const KEYBOARD: &[PhysicalKey] = &[
     key(NumpadDecimal, ".", 21., 5.5),
 ];
 
-pub(super) const MOUSE: &[PhysicalKey] = &[
-    PhysicalKey {
-        input: Some(MouseLeft),
-        label: "Left",
-        rect: [30., 5., 16., 40.],
-    },
-    PhysicalKey {
-        input: Some(MouseMiddle),
-        label: "Middle",
-        rect: [46., 5., 8., 40.],
-    },
-    PhysicalKey {
-        input: Some(MouseRight),
-        label: "Right",
-        rect: [54., 5., 16., 40.],
-    },
-    PhysicalKey {
-        input: Some(MouseMotion),
-        label: "Motion",
-        rect: [30., 45., 40., 50.],
-    },
-    PhysicalKey {
-        input: Some(MouseForward),
-        label: "Forward",
-        rect: [17., 45., 13., 25.],
-    },
-    PhysicalKey {
-        input: Some(MouseBack),
-        label: "Back",
-        rect: [17., 70., 13., 25.],
-    },
-];
-
 pub(super) fn key_label(input: Key) -> &'static str {
     match input {
         ShiftLeft => "Left Shift",

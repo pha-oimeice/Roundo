@@ -1,4 +1,4 @@
-use bevy::{prelude::*, text::EditableText, ui::InteractionDisabled};
+use bevy::text::EditableText;
 
 pub(super) struct TextField {
     pub(super) label: &'static str,
@@ -18,18 +18,5 @@ impl TextField {
         let value = input.value().to_string();
         let trimmed = value.trim();
         (!self.required || !trimmed.is_empty()).then(|| trimmed.to_owned())
-    }
-}
-
-pub(super) fn set_button_enabled(
-    commands: &mut Commands,
-    button: Entity,
-    disabled: bool,
-    enabled: bool,
-) {
-    if enabled && disabled {
-        commands.entity(button).remove::<InteractionDisabled>();
-    } else if !enabled && !disabled {
-        commands.entity(button).insert(InteractionDisabled);
     }
 }
