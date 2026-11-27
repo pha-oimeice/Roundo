@@ -69,8 +69,9 @@ enum Device {
 #[derive(Resource, Default)]
 struct ControlsState {
     device: Device,
+    selected_category: Option<usize>,
     action: Option<String>,
-    key: Option<Key>,
+    key_filter: Option<Key>,
     collapsed: BTreeSet<usize>,
     filtered_collapsed: BTreeSet<usize>,
     capture: Option<Capture>,
@@ -271,10 +272,10 @@ fn category_scene(
     actions: Vec<impl Scene>,
 ) -> impl Scene {
     bsn! {
-        Category(index)
         Node { flex_direction: FlexDirection::Column, flex_shrink: 0.0 }
         Children [
             @control_button(name.clone())
+            Category(index)
             Node {
                 height: px(34), padding: {UiRect::horizontal(px(4))}, justify_content: JustifyContent::SpaceBetween,
                 border: {UiRect::bottom(px(1))},
@@ -414,15 +415,11 @@ fn capture_overlay_scene(font: Handle<Font>) -> impl Scene {
 fn toggle_category(
     event: On<Activate>,
     categories: Query<&Category>,
-    parents: Query<&ChildOf>,
     search: Single<&SearchQuery, With<ActionSearch>>,
     mut state: ResMut<ControlsState>,
 ) {
-    let parent = parents
-        .get(event.entity)
-        .expect("category header parent")
-        .parent();
-    let index = categories.get(parent).expect("category header group").0;
+    let index = categories.get(event.entity).expect("category header").0;
+    state.selected_category = Some(index);
     let collapsed = if is_action_list_filtered(&state, &search) {
         &mut state.filtered_collapsed
     } else {
@@ -439,7 +436,6 @@ fn toggle_action(event: On<Activate>, rows: Query<&ActionRow>, mut state: ResMut
         clear_action(&mut state);
     } else {
         state.action = Some(id.clone());
-        state.filtered_collapsed.clear();
         state.error.clear();
     }
 }
@@ -452,7 +448,6 @@ fn clear_action_on_blank(event: On<PointerClick>, mut state: ResMut<ControlsStat
 
 fn clear_action(state: &mut ControlsState) {
     state.action = None;
-    state.filtered_collapsed.clear();
     state.error.clear();
 }
 
@@ -471,13 +466,13 @@ fn switch_device(
     if device != state.device {
         selection.0 = Some(tab);
         state.device = device;
-        state.key = None;
+        state.key_filter = None;
         state.filtered_collapsed.clear();
     }
 }
 
 fn is_action_list_filtered(state: &ControlsState, search: &SearchQuery) -> bool {
-    !search.is_empty() || (state.action.is_none() && state.key.is_some())
+    !search.is_empty() || state.key_filter.is_some()
 }
 
 fn toggle_key_filter(
@@ -488,7 +483,7 @@ fn toggle_key_filter(
     let (key, disabled) = keys.get(event.entity).expect("device key");
     if !disabled {
         let key = key.0.expect("interactive physical key");
-        state.key = (state.key != Some(key)).then_some(key);
+        state.key_filter = (state.key_filter != Some(key)).then_some(key);
         state.filtered_collapsed.clear();
     }
 }
@@ -587,16 +582,16 @@ fn update_controls(
     mut elements: Query<(Entity, &mut Node, &mut Visibility)>,
     actions: Query<(Entity, &ActionRow)>,
     layout: (
-        Query<(Entity, &Category)>,
+        Query<(Entity, &Category, &ChildOf)>,
         Query<(Entity, &ActionGroup)>,
         Query<(Entity, &DevicePanel)>,
     ),
     mut indicators: Query<(&CategoryIndicator, &mut Text)>,
+    mut highlights: Query<&mut Highlight>,
     mut keys: Query<(
         Entity,
         &DeviceKey,
         Has<InteractionDisabled>,
-        &mut Highlight,
         &mut BorderColor,
     )>,
     mut key_labels: Query<(&ChildOf, &mut TextColor), With<DeviceKeyLabel>>,
@@ -626,18 +621,21 @@ fn update_controls(
         return;
     }
     let settings = config.settings();
+    let bindings = &settings.input_bindings;
     let (add, overlay) = (*buttons.0, *buttons.1);
-    let bound_keys = settings
-        .input_bindings
-        .iter()
-        .filter(|edge| state.action.as_deref().is_none_or(|id| id == edge.slot))
-        .map(|edge| edge.key)
-        .collect::<BTreeSet<_>>();
-    if state.key.is_some_and(|key| !bound_keys.contains(&key)) {
-        state.key = None;
+    if state
+        .key_filter
+        .is_some_and(|key| !bindings.iter().any(|edge| edge.key == key))
+    {
+        state.key_filter = None;
         state.filtered_collapsed.clear();
     }
     let selected = state.action.as_deref();
+    let bound_keys = bindings
+        .iter()
+        .filter(|edge| selected.is_none_or(|id| edge.slot == id))
+        .map(|edge| edge.key)
+        .collect::<BTreeSet<_>>();
     let filtered = is_action_list_filtered(&state, &search);
     let collapsed = if filtered {
         &state.filtered_collapsed
@@ -646,20 +644,23 @@ fn update_controls(
     };
     let matches = |id: &str| {
         search.matches(&settings.input_slots[id].display_name)
-            && (selected.is_some()
-                || state.key.is_none_or(|key| {
-                    settings
-                        .input_bindings
-                        .iter()
-                        .any(|edge| edge.slot == id && edge.key == key)
-                }))
+            && state.key_filter.is_none_or(|key| {
+                bindings
+                    .iter()
+                    .any(|edge| edge.slot == id && edge.key == key)
+            })
     };
     for (entity, action) in actions {
         let (_, mut node, mut visibility) = elements.get_mut(entity).expect("action node");
         show_node(&mut node, &mut visibility, matches(&action.0));
+        let mut highlight = highlights.get_mut(entity).expect("action highlight");
+        highlight.selected = selected == Some(action.0.as_str());
     }
-    for (entity, category) in &layout.0 {
-        let (_, mut node, mut visibility) = elements.get_mut(entity).expect("category node");
+    for (header, category, parent) in &layout.0 {
+        let (_, mut node, mut visibility) =
+            elements.get_mut(parent.parent()).expect("category node");
+        let mut highlight = highlights.get_mut(header).expect("category highlight");
+        highlight.selected = state.selected_category == Some(category.0);
         let visible = !filtered
             || settings.input_categories[category.0]
                 .actions
@@ -686,11 +687,12 @@ fn update_controls(
         show_node(&mut node, &mut visibility, panel.0 == state.device);
     }
     let is_bound = |key: &DeviceKey| key.0.is_some_and(|key| bound_keys.contains(&key));
-    for (entity, key, disabled, mut highlight, mut border) in &mut keys {
+    for (entity, key, disabled, mut border) in &mut keys {
         let bound = is_bound(key);
         set_button_enabled(&mut commands, entity, disabled, bound);
-        highlight.selected = bound && key.0 == state.key;
-        border.set_all(if highlight.selected {
+        let selected_key = bound && key.0 == state.key_filter;
+        highlights.get_mut(entity).expect("key highlight").selected = selected_key;
+        border.set_all(if selected_key {
             Color::WHITE
         } else if bound {
             BOUND_KEY_BORDER
@@ -699,7 +701,7 @@ fn update_controls(
         });
     }
     for (parent, mut color) in &mut key_labels {
-        let (_, key, _, _, _) = keys
+        let (_, key, _, _) = keys
             .get(parent.parent())
             .expect("label belongs to a device key");
         color.0 = if is_bound(key) {
@@ -715,10 +717,9 @@ fn update_controls(
         commands.entity(row).despawn();
     }
     if let Some(id) = selected {
-        let rows: Vec<_> = settings
-            .input_bindings
+        let rows: Vec<_> = bindings
             .iter()
-            .filter(|edge| edge.slot == id && state.key.is_none_or(|key| key == edge.key))
+            .filter(|edge| edge.slot == id)
             .map(|edge| {
                 commands
                     .spawn_scene(binding_row_scene(font.0.clone(), edge.key))
