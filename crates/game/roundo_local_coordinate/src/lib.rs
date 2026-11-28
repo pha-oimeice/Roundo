@@ -17,11 +17,11 @@ pub use local_coordinate::{
     LocalCoordinate, LocalCoordinateCRUDMessage, LocalCoordinateCRUDMessageEnum,
     LocalCoordinateChunkView, LocalCoordinateIdentity, LocalCoordinatePhysicsInterests,
     LocalCoordinateServerPlugin, LocalCoordinateServerSet, LocalCoordinateServerWorld,
-    LocalCoordinateSet, LocalCoordinateTransform, PcgLocalCoordinate, PhysicsDemandBudget,
-    PhysicsDemandRegion, PositionedAtomicVoxel, SOLID_VOXEL_ID, SparseEnvironmentOverride,
-    VIRTUAL_CHUNK_EDGE_LENGTH, VirtualChunkCoordinate, VirtualChunkEnvironmentMap,
-    VirtualChunkIndex, VoxelEditBudget, VoxelRaycastHit, VoxelRaycaster,
-    WorldInteractionBudgetError, virtual_chunk_coordinate_for_position,
+    LocalCoordinateSet, LocalCoordinateTransform, PcgLocalCoordinate, PcgRenderView,
+    PhysicsDemandBudget, PhysicsDemandRegion, PositionedAtomicVoxel, SOLID_VOXEL_ID,
+    SparseEnvironmentOverride, VIRTUAL_CHUNK_EDGE_LENGTH, VirtualChunkCoordinate,
+    VirtualChunkEnvironmentMap, VirtualChunkIndex, VoxelEditBudget, VoxelRaycastHit,
+    VoxelRaycaster, WorldInteractionBudgetError, virtual_chunk_coordinate_for_position,
 };
 pub use local_coordinate::{
     CoordinateIncarnation, LocalPhysicsDemandFacts, LocalPhysicsDemands, PhysicsDemandId,

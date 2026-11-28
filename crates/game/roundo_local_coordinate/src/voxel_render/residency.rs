@@ -9,6 +9,7 @@ pub(super) fn extract_loaded_chunks(
             &LocalCoordinateIdentity,
             Ref<LocalCoordinate>,
             Ref<GlobalTransform>,
+            Option<&PcgRenderView>,
         )>,
     >,
 ) {
@@ -16,8 +17,9 @@ pub(super) fn extract_loaded_chunks(
     extracted.changes.clear();
     let mut observed_local_coordinates = std::collections::HashSet::new();
 
-    for (identity, local_coordinate, global_transform) in &chunks {
+    for (identity, local_coordinate, global_transform, view) in &chunks {
         let local_coordinate_id = identity.0;
+        let view = view.map(|view| view.for_installation(&local_coordinate, local_coordinate_id));
         observed_local_coordinates.insert(local_coordinate_id);
         let transform_changed = global_transform.is_changed();
         if transform_changed {
@@ -26,12 +28,20 @@ pub(super) fn extract_loaded_chunks(
                 world_from_local: global_transform.to_matrix().to_cols_array(),
             });
         }
-        if !local_coordinate.is_changed() && extracted.tracked.contains_key(&local_coordinate_id) {
+        if !local_coordinate.is_changed()
+            && extracted
+                .tracked
+                .get(&local_coordinate_id)
+                .is_some_and(|tracked| tracked.view == view)
+        {
             continue;
         }
 
-        let tracked_chunks = extracted.tracked.remove(&local_coordinate_id);
-        let previous = tracked_chunks.unwrap_or_default();
+        let previous = extracted
+            .tracked
+            .remove(&local_coordinate_id)
+            .unwrap_or_default()
+            .revisions;
         let mut current = HashMap::new();
         for chunk in local_coordinate.loaded_chunk_views() {
             let coordinate = [
@@ -39,6 +49,9 @@ pub(super) fn extract_loaded_chunks(
                 i64::from(chunk.position.y),
                 i64::from(chunk.position.z),
             ];
+            if view.is_some_and(|view| !view.contains(coordinate)) {
+                continue;
+            }
             current.insert(coordinate, chunk.revision);
             if previous.get(&coordinate) == Some(&chunk.revision) && !transform_changed {
                 continue;
@@ -69,7 +82,13 @@ pub(super) fn extract_loaded_chunks(
                     }));
             }
         }
-        extracted.tracked.insert(local_coordinate_id, current);
+        extracted.tracked.insert(
+            local_coordinate_id,
+            TrackedChunks {
+                view,
+                revisions: current,
+            },
+        );
     }
 
     let removed_local_coordinates = extracted
@@ -82,7 +101,7 @@ pub(super) fn extract_loaded_chunks(
         if let Some(chunks) = extracted.tracked.remove(&local_coordinate_id) {
             extracted
                 .changes
-                .extend(chunks.into_keys().map(|coordinate| {
+                .extend(chunks.revisions.into_keys().map(|coordinate| {
                     ExtractedChunkChange::Remove(ChunkId {
                         local_coordinate_id,
                         coordinate,

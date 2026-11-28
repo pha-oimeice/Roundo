@@ -1,6 +1,9 @@
-//! Procedural coordinates driven by physics demands in the same World.
+//! Procedural coordinates driven by local physics and render interests.
 mod generation;
+mod render_view;
 mod systems;
+
+pub use render_view::PcgRenderView;
 
 use crate::local_coordinate::{
     attributes::LocalCoordinateTransform,

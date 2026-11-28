@@ -1,4 +1,4 @@
-//! Bounded local PCG work and collider interests.
+//! Bounded local PCG work shared by render and collider interests.
 use super::*;
 use bevy::prelude::{Entity, Insert, On};
 
@@ -41,8 +41,65 @@ struct GeneratedLocalCoordinates(Vec<PcgLocalCoordinate>);
 #[derive(Default)]
 pub(super) struct GenerationPlan {
     desired: HashSet<ChunkCoordinate>,
-    pending: VecDeque<ChunkCoordinate>,
+    physics: HashSet<ChunkCoordinate>,
+    view: Option<PcgRenderView>,
+    pending_physics: VecDeque<ChunkCoordinate>,
+    pending_render: VecDeque<ChunkCoordinate>,
     evicting: VecDeque<ChunkCoordinate>,
+}
+
+impl GenerationPlan {
+    fn reconcile(
+        &mut self,
+        physics: HashSet<ChunkCoordinate>,
+        view: Option<PcgRenderView>,
+        loaded: &HashMap<ChunkCoordinate, GeneratedChunk>,
+    ) {
+        if self.physics == physics && self.view == view {
+            return;
+        }
+        self.view = view;
+        let desired = physics
+            .iter()
+            .copied()
+            .chain(view.into_iter().flat_map(PcgRenderView::positions))
+            .collect::<HashSet<_>>();
+        if self.physics == physics && self.desired == desired {
+            return;
+        }
+        let (mut pending_physics, mut pending_render): (Vec<_>, Vec<_>) = desired
+            .iter()
+            .copied()
+            .filter(|position| !loaded.contains_key(position))
+            .partition(|position| physics.contains(position));
+        pending_physics.sort_unstable();
+        if let Some(view) = view {
+            pending_render.sort_unstable_by(|&a, &b| {
+                view.distance_squared(a)
+                    .total_cmp(&view.distance_squared(b))
+                    .then(a.cmp(&b))
+            });
+        }
+        let mut evicting = loaded
+            .keys()
+            .filter(|position| !desired.contains(*position))
+            .copied()
+            .collect::<Vec<_>>();
+        evicting.sort_unstable();
+        self.desired = desired;
+        self.physics = physics;
+        self.pending_physics = pending_physics.into();
+        self.pending_render = pending_render.into();
+        self.evicting = evicting.into();
+    }
+
+    fn retry(&mut self, position: ChunkCoordinate) {
+        if self.physics.contains(&position) {
+            self.pending_physics.push_front(position);
+        } else {
+            self.pending_render.push_front(position);
+        }
+    }
 }
 
 fn invalidate_installed_coordinate(
@@ -75,7 +132,6 @@ fn spawn_generated_local_coordinates(
     }
 }
 
-// Only locally requested physics regions require generation on the server.
 fn prepare_generated_chunks(
     mut world: ResMut<LocalCoordinateServerWorld>,
     mut physics_interests: ResMut<LocalCoordinatePhysicsInterests>,
@@ -85,17 +141,18 @@ fn prepare_generated_chunks(
         &PcgLocalCoordinate,
         &mut LocalCoordinate,
         Option<&LocalCoordinateIdentity>,
+        Option<&PcgRenderView>,
     )>,
 ) {
     let mut active = HashSet::new();
     let mut desired_physics = HashMap::new();
     let mut budget = MAX_CHUNKS_GENERATED_PER_TICK
         .min(MAX_CHUNK_GENERATION_JOBS_IN_FLIGHT.saturating_sub(world.generation_jobs.len()));
-    if let Some(demands) = &demands {
-        budget = budget.min(demands.physics_budget().generate_per_tick());
-    }
+    let mut physics_budget = demands.as_ref().map_or(budget, |demands| {
+        demands.physics_budget().generate_per_tick()
+    });
     let worker = world.generation_worker.clone();
-    for (entity, generated, mut coordinate, identity) in &mut coordinates {
+    for (entity, generated, mut coordinate, identity, view) in &mut coordinates {
         active.insert(generated.id);
         let requested = demands
             .as_ref()
@@ -104,11 +161,17 @@ fn prepare_generated_chunks(
             .into_iter()
             .flat_map(crate::PhysicsDemandRegion::positions)
             .collect::<HashSet<_>>();
-        let desired = requested
+        let physics = requested
             .iter()
             .map(|position| position.to_array().map(i64::from))
             .collect::<HashSet<_>>();
         desired_physics.insert(generated.id, requested);
+        let view = view.map(|view| match identity {
+            Some(identity) if identity.0 == generated.id => {
+                view.for_installation(&coordinate, identity.0)
+            }
+            _ => PcgRenderView::default(),
+        });
         let LocalCoordinateServerWorld {
             loaded_chunks,
             generation_plans,
@@ -118,23 +181,7 @@ fn prepare_generated_chunks(
         } = &mut *world;
         let loaded = loaded_chunks.entry(generated.id).or_default();
         let plan = generation_plans.entry(generated.id).or_default();
-        if plan.desired != desired {
-            let mut missing = desired
-                .iter()
-                .copied()
-                .filter(|position| !loaded.contains_key(position))
-                .collect::<Vec<_>>();
-            missing.sort_unstable();
-            let mut evicting = loaded
-                .keys()
-                .filter(|position| !desired.contains(*position))
-                .copied()
-                .collect::<Vec<_>>();
-            evicting.sort_unstable();
-            plan.desired = desired;
-            plan.pending = missing.into();
-            plan.evicting = evicting.into();
-        }
+        plan.reconcile(physics, view, loaded);
         for position in plan
             .evicting
             .drain(..plan.evicting.len().min(MAX_CHUNKS_EVICTED_PER_TICK))
@@ -158,9 +205,18 @@ fn prepare_generated_chunks(
             remove_generated_chunk(&mut coordinate, position);
         }
         while budget > 0 {
-            let Some(position) = plan.pending.pop_front() else {
+            let physics = physics_budget > 0 && !plan.pending_physics.is_empty();
+            let pending = if physics {
+                &mut plan.pending_physics
+            } else {
+                &mut plan.pending_render
+            };
+            let Some(position) = pending.pop_front() else {
                 break;
             };
+            if loaded.contains_key(&position) {
+                continue;
+            }
             let id = ChunkId {
                 local_coordinate_id: generated.id,
                 coordinate: position,
@@ -177,11 +233,14 @@ fn prepare_generated_chunks(
                 .is_err()
             {
                 generation_jobs.remove(&id);
-                plan.pending.push_front(position);
+                pending.push_front(position);
                 log::error!("local chunk generation worker is closed");
                 break;
             }
             budget -= 1;
+            if physics {
+                physics_budget -= 1;
+            }
         }
     }
     world.loaded_chunks.retain(|id, _| active.contains(id));
@@ -230,7 +289,7 @@ fn commit_generated_chunks(
         };
         if result.installation != local_coordinate.incarnation {
             if let Some(plan) = world.generation_plans.get_mut(&id.local_coordinate_id) {
-                plan.pending.push_back(id.coordinate);
+                plan.retry(id.coordinate);
             }
             continue;
         }

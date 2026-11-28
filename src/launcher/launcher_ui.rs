@@ -11,6 +11,7 @@ use bevy::{
         FeathersPlugins,
         controls::{
             ButtonVariant, FeathersButton, FeathersDialog, FeathersDialogFooter, FeathersScrollbar,
+            FeathersSlider,
         },
         dark_theme::create_dark_theme,
         display::{caption, label as feathers_label},
@@ -23,18 +24,20 @@ use bevy::{
     },
     picking::{
         PickingSystems,
-        events::{PointerClick, PointerDragEnd, PointerPress, PointerRelease},
+        events::{PointerCancel, PointerClick, PointerDragEnd, PointerPress, PointerRelease},
         pointer::{PointerAction, PointerButton, PointerId, PointerInput},
     },
     prelude::*,
     scene::{Scene, SceneList},
     text::FontSourceTemplate,
     ui_widgets::{
-        Activate, ControlOrientation, RequestClose, ScrollArea, ScrollIntoView, SelectedTab, Tab,
-        TabActivation, TabList, ValueChange,
+        Activate, ControlOrientation, RequestClose, ScrollArea, ScrollIntoView, SelectedTab,
+        SliderPrecision, SliderValue, Tab, TabActivation, TabList, ValueChange,
     },
 };
-use roundo_infrastructure::user_config::ClientSettingsConfig;
+use roundo_infrastructure::user_config::{
+    ClientSettingsConfig, MAX_CHUNK_VIEW_DISTANCE, MIN_CHUNK_VIEW_DISTANCE,
+};
 
 use super::{
     bundled_assets_root,
@@ -104,6 +107,9 @@ struct LauncherOptionButton;
 
 #[derive(Clone, Component, Default)]
 struct OptionWindow;
+
+#[derive(Clone, Component, Default)]
+struct RenderRadiusStatus;
 
 #[derive(Component, FromTemplate)]
 struct LauncherTabBody(Entity);
@@ -405,7 +411,7 @@ fn option_tab_bodies(
     let label = |text: String| -> Box<dyn Scene> {
         Box::new(launcher_label_with_font(font.clone(), text, 18.0))
     };
-    let lod = settings.world.geometry_lod_pixel_error;
+    let graphics: Box<dyn Scene> = Box::new(graphics_settings_scene(settings, font.clone()));
     let controls: Box<dyn Scene> = Box::new(controls::controls_scene(
         settings,
         font.clone(),
@@ -414,10 +420,7 @@ fn option_tab_bodies(
     let contents = [
         (true, label("No general settings available.".into())),
         (false, label("No display settings available.".into())),
-        (
-            false,
-            label(format!("Geometry LOD pixel error (read-only): {lod}")),
-        ),
+        (false, graphics),
         (false, label("No audio settings available.".into())),
         (false, controls),
         (false, label("No other settings available.".into())),
@@ -434,6 +437,62 @@ fn option_tab_bodies(
             Children [ @{content} ]
         }
     })
+}
+
+fn graphics_settings_scene(
+    settings: &ClientSettingsConfig,
+    font: Handle<Font>,
+) -> impl Scene + use<> {
+    let radius = settings.world.chunk_view_distance;
+    let lod = settings.world.geometry_lod_pixel_error;
+    bsn! {
+        Node { flex_direction: FlexDirection::Column, row_gap: px(8) }
+        Children [
+            @launcher_label_with_font(font.clone(), "Render radius (world units)", 18.0)
+            --
+            @FeathersSlider {
+                @min: MIN_CHUNK_VIEW_DISTANCE,
+                @max: MAX_CHUNK_VIEW_DISTANCE,
+            }
+            SliderValue(radius)
+            SliderPrecision::default()
+            on(change_render_radius)
+            on(cancel_render_radius_drag)
+            --
+            @launcher_label_with_font(font.clone(), "", 18.0)
+            RenderRadiusStatus
+            --
+            @launcher_label_with_font(font, format!("Geometry LOD pixel error (read-only): {lod}"), 18.0)
+        ]
+    }
+}
+
+fn change_render_radius(
+    event: On<ValueChange<f32>>,
+    mut commands: Commands,
+    mut config: ResMut<ClientConfigStore>,
+    mut status: Single<&mut Text, With<RenderRadiusStatus>>,
+) {
+    let radius = if event.is_final {
+        status.0 = config
+            .edit_chunk_view_distance(event.value)
+            .err()
+            .unwrap_or_default();
+        config.settings().world.chunk_view_distance
+    } else {
+        event.value
+    };
+    commands.entity(event.source).insert(SliderValue(radius));
+}
+
+fn cancel_render_radius_drag(
+    event: On<PointerCancel>,
+    config: Res<ClientConfigStore>,
+    mut commands: Commands,
+) {
+    commands
+        .entity(event.entity)
+        .insert(SliderValue(config.settings().world.chunk_view_distance));
 }
 
 fn reveal_focused_tab(event: On<FocusGained>, mut commands: Commands) {

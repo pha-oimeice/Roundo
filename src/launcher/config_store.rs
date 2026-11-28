@@ -3,6 +3,7 @@
 use bevy::prelude::{Res, ResMut};
 use roundo_infrastructure::user_config::{
     ClientConfig, ClientInputBindingConfig, ClientInputKey, ClientSettingsConfig, ConfigDirectory,
+    MAX_CHUNK_VIEW_DISTANCE, MIN_CHUNK_VIEW_DISTANCE,
 };
 
 use super::local_input::LocalBindings;
@@ -22,6 +23,22 @@ impl ClientConfigStore {
 
     pub(crate) fn settings(&self) -> &ClientSettingsConfig {
         &self.settings
+    }
+
+    pub(super) fn edit_chunk_view_distance(&mut self, radius: f32) -> Result<(), String> {
+        if !(MIN_CHUNK_VIEW_DISTANCE..=MAX_CHUNK_VIEW_DISTANCE).contains(&radius)
+            || radius.fract() != 0.0
+        {
+            return Err("Render radius must be a whole number in the allowed range".into());
+        }
+        if self.settings.world.chunk_view_distance != radius {
+            let mut updated = self.settings.clone();
+            updated.world.chunk_view_distance = radius;
+            ConfigDirectory::executable()
+                .save_client_setting("world.chunk_view_distance", &updated)?;
+            self.settings.world = updated.world;
+        }
+        Ok(())
     }
 
     pub(super) fn edit_binding(

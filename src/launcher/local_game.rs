@@ -16,9 +16,9 @@ use roundo_creature::{
 };
 use roundo_local_coordinate::{
     CHUNK_EDGE_LENGTH, CoordinateIncarnation, LocalCoordinateServerPlugin,
-    LocalCoordinateServerSet, LocalPhysicsDemands, PcgLocalCoordinate, PhysicsDemandBudget,
-    PhysicsDemandId, PhysicsDemandRegion, PhysicsRegionReadiness, SuperflatGenerator,
-    VoxelEditBudget, WorldInteractionPlugin, WorldInteractionRuntimeBudgets,
+    LocalCoordinateServerSet, LocalPhysicsDemands, PcgLocalCoordinate, PcgRenderView,
+    PhysicsDemandBudget, PhysicsDemandId, PhysicsDemandRegion, PhysicsRegionReadiness,
+    SuperflatGenerator, VoxelEditBudget, WorldInteractionPlugin, WorldInteractionRuntimeBudgets,
 };
 use roundo_rendering::DebugCamera;
 
@@ -150,18 +150,38 @@ fn buffered_region(demands: &LocalPhysicsDemands, position: Vec3) -> PhysicsDema
         .expect("buffered local terrain fits its demand budget")
 }
 
+fn terrain_view(
+    coordinate: CoordinateIncarnation,
+    position: Vec3,
+    config: &ClientConfigStore,
+) -> PcgRenderView {
+    // The local camera is attached directly above the character on superflat.
+    PcgRenderView::horizontal(
+        coordinate,
+        Vec2::new(position.x, position.z),
+        ground_chunk(position).y,
+        config.settings().world.chunk_view_distance,
+    )
+    .expect("local terrain view has a valid origin and configured radius")
+}
+
 fn start_local_terrain(
+    mut commands: Commands,
     ground: Single<Entity, With<PcgLocalCoordinate>>,
+    config: Res<ClientConfigStore>,
     mut demands: LocalPhysicsDemands,
     mut terrain: ResMut<LocalTerrain>,
 ) {
     let coordinate = demands
         .bind_coordinate(*ground)
         .expect("local ground coordinate");
-    let requested = buffered_region(&demands, spawn_position());
+    let position = spawn_position();
+    let view = terrain_view(coordinate, position, &config);
+    let requested = buffered_region(&demands, position);
     let demand = demands
         .register(coordinate, requested)
         .expect("local terrain demand");
+    commands.entity(*ground).insert(view);
     terrain.interest = Some(TerrainInterest {
         coordinate,
         demand,
@@ -171,15 +191,21 @@ fn start_local_terrain(
 
 fn follow_terrain(
     character: Option<Single<&Transform, With<LocalCharacter>>>,
+    config: Res<ClientConfigStore>,
     mut demands: LocalPhysicsDemands,
     mut terrain: ResMut<LocalTerrain>,
+    mut views: Query<&mut PcgRenderView>,
 ) {
-    let Some(character) = character else { return };
+    let position = character.map_or_else(spawn_position, |character| character.translation);
     let interest = terrain
         .interest
         .as_mut()
-        .expect("an active character has a terrain demand");
-    let requested = buffered_region(&demands, character.translation);
+        .expect("an active local terrain demand");
+    views
+        .get_mut(interest.coordinate.entity())
+        .expect("an active local terrain render view")
+        .set_if_neq(terrain_view(interest.coordinate, position, &config));
+    let requested = buffered_region(&demands, position);
     if interest.requested != requested {
         demands
             .update(interest.demand, requested)
@@ -381,6 +407,7 @@ fn sync_view(
 fn stop_local_game(
     mut terrain: ResMut<LocalTerrain>,
     mut demands: LocalPhysicsDemands,
+    mut views: Query<&mut PcgRenderView>,
     mut control: ResMut<LocalControl>,
     cursor: Single<&mut CursorOptions, With<PrimaryWindow>>,
     mut debug: Single<&mut Camera, With<DebugCamera>>,
@@ -392,6 +419,9 @@ fn stop_local_game(
     demands
         .remove(interest.demand)
         .expect("live local terrain demand");
+    *views
+        .get_mut(interest.coordinate.entity())
+        .expect("live local terrain render view") = PcgRenderView::default();
     terrain.ready_for_motion = false;
     *control = LocalControl::Loading;
     set_cursor(&mut cursor.into_inner(), false);

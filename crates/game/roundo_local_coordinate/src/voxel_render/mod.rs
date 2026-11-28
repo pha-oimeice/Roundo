@@ -30,7 +30,7 @@ use svo_upload::SvoUploads;
 
 use crate::{
     CHUNK_EDGE_LENGTH, ChunkId, LocalCoordinate, LocalCoordinateId, LocalCoordinateIdentity,
-    VoxelChunkSvo, local_coordinate::RenderChunkCache,
+    PcgRenderView, VoxelChunkSvo, local_coordinate::RenderChunkCache,
 };
 use bevy::{
     core_pipeline::{
@@ -179,7 +179,13 @@ impl bevy::prelude::Plugin for WorldRenderPlugin {
 struct ExtractedChunks {
     epoch: u64,
     changes: Vec<ExtractedChunkChange>,
-    tracked: HashMap<LocalCoordinateId, HashMap<[i64; 3], u64>>,
+    tracked: HashMap<LocalCoordinateId, TrackedChunks>,
+}
+
+#[derive(Default)]
+struct TrackedChunks {
+    view: Option<PcgRenderView>,
+    revisions: HashMap<[i64; 3], u64>,
 }
 
 enum ExtractedChunkChange {

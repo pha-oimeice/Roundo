@@ -1,5 +1,5 @@
 # Required by the shared configuration loader; not used by the standalone runtime.
 joinable_world_radius = 4.0
-# Required by the shared configuration loader; not used by the standalone runtime.
+# Horizontal render radius in world units for local superflat terrain.
 chunk_view_distance = 64.0
 geometry_lod_pixel_error = 1.0

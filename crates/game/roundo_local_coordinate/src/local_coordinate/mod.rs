@@ -42,8 +42,8 @@ pub use world_interaction::{
 pub use attributes::{
     CompleteEnvironmentDefaults, LocalCoordinateTransform, SparseEnvironmentOverride,
 };
-pub(crate) use base::RenderChunkCache;
 pub use base::LocalCoordinateSet;
+pub(crate) use base::RenderChunkCache;
 pub use data::{
     AtomicVoxel, AtomicVoxelId, EMPTY_VOXEL_ID, GlobalAtomicVoxelData, LocalAtomicVoxelData,
     LocalCoordinate, LocalCoordinateCRUDMessage, LocalCoordinateCRUDMessageEnum,
@@ -54,7 +54,7 @@ pub use physics::LocalCoordinatePhysicsInterests;
 pub use raycast::{VoxelRaycastHit, VoxelRaycaster};
 pub use server::{
     DEFAULT_PCG_LOCAL_COORDINATE_ID, LocalCoordinateServerPlugin, LocalCoordinateServerSet,
-    LocalCoordinateServerWorld, PcgLocalCoordinate,
+    LocalCoordinateServerWorld, PcgLocalCoordinate, PcgRenderView,
 };
 pub use virtual_chunk::{
     ChunkReference, VIRTUAL_CHUNK_EDGE_LENGTH, VirtualChunkCoordinate, VirtualChunkIndex,
