@@ -12,6 +12,8 @@ skills-lock.json
 *.bat
 .scratch
 
+/saves
+
 NUL
 target
 document
